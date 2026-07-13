@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-""":"
-Hydrate and atomically activate one checksum-pinned corpus release.
-
-Usage:
-  hydrate-corpus.sh GCS_OBJECT_URI RELEASE SHA256 [DATA_ROOT]
-":"""
+# Hydrate and atomically activate one checksum-pinned corpus release.
+#
+# Usage:
+#   hydrate-corpus.sh GCS_OBJECT_URI RELEASE SHA256 [DATA_ROOT]
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

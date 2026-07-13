@@ -45,6 +45,18 @@ resource "google_storage_bucket_iam_member" "backup_prefix_reader" {
   }
 }
 
+# Cloud Storage authorizes object listing against the bucket resource, so the
+# object-name condition above cannot grant storage.objects.list. The backup
+# script needs list only because `gcloud storage cp --if-generation-match=0`
+# checks the append-only destination before upload. Scope this bucket-level
+# permission to the dedicated backup bucket; object reads remain constrained to
+# the application prefix by backup_prefix_reader.
+resource "google_storage_bucket_iam_member" "backup_bucket_lister" {
+  bucket = google_storage_bucket.backup.name
+  role   = "roles/storage.legacyBucketReader"
+  member = local.service_account_member
+}
+
 resource "google_artifact_registry_repository_iam_member" "backend_reader" {
   project    = var.project_id
   location   = google_artifact_registry_repository.backend.location
