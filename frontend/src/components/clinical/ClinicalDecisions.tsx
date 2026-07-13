@@ -243,7 +243,11 @@ export function ClinicalDecisions() {
   useEffect(() => {
     if (!running) return;
     const id = window.setInterval(() => {
-      const rem = Math.max(0, (clockEndRef.current - performance.now()) / 1000);
+      // `clockEndRef` stores the server's ISO deadline as Unix epoch milliseconds.
+      // Keep the tick on the same clock domain: `performance.now()` is measured
+      // from page navigation and would turn an epoch deadline into a multi-year
+      // countdown that never expires.
+      const rem = Math.max(0, (clockEndRef.current - Date.now()) / 1000);
       setRemaining(rem);
       if (rem <= 0) {
         setRunning(false);

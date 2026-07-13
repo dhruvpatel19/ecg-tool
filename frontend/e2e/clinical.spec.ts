@@ -134,6 +134,44 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
 
+  test("timed decision clock decrements in epoch time and auto-submits at expiry", async ({ page }) => {
+    const errors = collectConsoleErrors(page);
+    // Clinical deadlines are absolute server timestamps. A controlled browser
+    // clock lets this regression cover the full expiry path without adding the
+    // ED lane's 37-second decision window to every CI run.
+    await page.clock.install({ time: Date.now() });
+    await page.goto("/practice");
+    await page.getByRole("button", { name: "Emergency dept" }).click();
+
+    const startResponse = page.waitForResponse((response) => response.url().endsWith("/api/backend/clinical/shift/start"));
+    await page.getByRole("button", { name: "Start shift" }).click();
+    const start = await (await startResponse).json() as { next: { clock: { decideSec: number } } };
+
+    await page.getByLabel("Dominant finding").selectOption("uncertain");
+    await page.getByRole("button", { name: "Medium" }).click();
+    await page.getByRole("button", { name: /Commit first look & reveal clinical context/ }).click();
+
+    const clock = page.locator(".clinical-clock");
+    await expect(clock).toHaveAttribute("data-clock-phase", "decide");
+    const seconds = async () => Number.parseInt((await clock.locator("span").last().textContent()) ?? "0", 10);
+    const before = await seconds();
+    await page.clock.runFor(1_200);
+    const after = await seconds();
+    expect(after).toBeLessThan(before);
+    expect(after).toBeGreaterThan(0);
+
+    const automaticAnswer = page.waitForRequest((request) => {
+      const path = new URL(request.url()).pathname;
+      return /\/api\/backend\/clinical\/shift\/[^/]+\/answer$/.test(path);
+    });
+    await page.clock.runFor((start.next.clock.decideSec + 1) * 1_000);
+    const request = await automaticAnswer;
+    expect(request.postDataJSON()).toMatchObject({ answer: {} });
+    await expect(page.locator(".clinical-clock")).toHaveAttribute("data-clock-phase", "feedback", { timeout: 15_000 });
+
+    expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
+  });
+
   test("guided handoff records only formative clinical application without reviewed governance", async ({ page }) => {
     const errors = collectConsoleErrors(page);
     await page.goto("/practice?focus=atrial_fibrillation&subskill=apply_in_context&support=independent&returnTo=/learn/tachyarrhythmias?scene=m06-s5");
