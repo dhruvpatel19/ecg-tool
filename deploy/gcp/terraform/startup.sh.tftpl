@@ -3,6 +3,14 @@ set -Eeuo pipefail
 
 exec > >(logger --tag ecg-startup --stderr 2>/dev/console) 2>&1
 
+# Fail closed while Terraform metadata and the pinned container image are being
+# reconciled. On later boots, systemd may otherwise start the previously pinned
+# image before this startup script has installed the new deployment state.
+if systemctl cat ecg-backend.service >/dev/null 2>&1; then
+  echo "Stopping the existing ECG backend during deployment reconciliation."
+  systemctl stop ecg-backend.service
+fi
+
 # The stock GCE image normally includes these utilities, but bootstrap does not
 # rely on that implicit contract.
 export DEBIAN_FRONTEND=noninteractive
