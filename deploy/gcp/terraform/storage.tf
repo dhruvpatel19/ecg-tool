@@ -119,7 +119,7 @@ resource "google_artifact_registry_repository" "backend" {
 
       condition {
         tag_state             = "ANY"
-        version_name_prefixes = local.protected_backend_digests
+        version_name_prefixes = local.protected_backend_version_prefixes
       }
     }
   }

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from app.ontology import DEFAULT_MASTERY
 from app.storage import (
     LEARNER_SCHEMA_VERSION,
     LearningStore,
@@ -24,6 +27,32 @@ def test_new_database_records_versioned_schema_and_full_sync(tmp_path) -> None:
         assert migration["version"] == LEARNER_SCHEMA_VERSION
         assert "Versioned baseline" in migration["description"]
         assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2
+
+
+def test_concurrent_first_requests_create_one_complete_profile(tmp_path) -> None:
+    store = LearningStore(tmp_path / "concurrent.sqlite3")
+    learner_id = "simultaneous-first-login"
+    workers = 12
+    start = threading.Barrier(workers)
+
+    def ensure() -> dict:
+        start.wait()
+        return store.ensure_profile(learner_id, "Concurrent Learner")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        profiles = list(executor.map(lambda _: ensure(), range(workers)))
+
+    assert all(profile["learnerId"] == learner_id for profile in profiles)
+    assert all(profile["displayName"] == "Concurrent Learner" for profile in profiles)
+    assert all(len(profile["mastery"]) == len(DEFAULT_MASTERY) for profile in profiles)
+
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM learner_profiles WHERE learner_id = ?", (learner_id,)
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM objective_mastery WHERE learner_id = ?", (learner_id,)
+        ).fetchone()[0] == len(DEFAULT_MASTERY)
 
 
 def test_legacy_unversioned_database_is_baselined_after_additive_migration(tmp_path) -> None:

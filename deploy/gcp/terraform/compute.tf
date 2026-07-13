@@ -131,9 +131,9 @@ resource "google_compute_instance" "app" {
     ecg-corpus-uri                    = "gs://${google_storage_bucket.corpus.name}/${var.corpus_object_name}#${var.corpus_object_generation}"
     ecg-corpus-sha256                 = var.corpus_archive_sha256
     ecg-backup-uri                    = "gs://${google_storage_bucket.backup.name}/${local.backup_object_prefix}/"
-    ecg-auth-secret                   = google_secret_manager_secret.runtime["auth_rate_limit"].id
-    ecg-origin-secret                 = google_secret_manager_secret.runtime["origin_shared"].id
-    ecg-llm-secret                    = var.enable_llm_secret ? google_secret_manager_secret.runtime["llm_api_key"].id : ""
+    ecg-auth-secret                   = google_secret_manager_secret.runtime["auth_rate_limit"].secret_id
+    ecg-origin-secret                 = google_secret_manager_secret.runtime["origin_shared"].secret_id
+    ecg-llm-secret                    = var.enable_llm_secret ? google_secret_manager_secret.runtime["llm_api_key"].secret_id : ""
     ecg-environment                   = var.environment
     ecg-backend-domain                = var.health_check_host
     ecg-acme-email                    = var.acme_email

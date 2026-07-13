@@ -508,24 +508,28 @@ class LearningStore:
     def ensure_profile(self, learner_id: str = "demo", display_name: str | None = None) -> dict[str, Any]:
         now = utc_now()
         with self.connect() as conn:
-            existing = conn.execute(
-                "SELECT learner_id, display_name, created_at, updated_at FROM learner_profiles WHERE learner_id = ?",
-                (learner_id,),
-            ).fetchone()
-            if not existing:
+            # Profile creation is a compare-and-insert operation at the database
+            # boundary. A SELECT followed by INSERT lets simultaneous first-page
+            # requests both observe a missing learner and one then violates the
+            # primary key. SQLite serializes these idempotent writes safely.
+            conn.execute(
+                "INSERT OR IGNORE INTO learner_profiles "
+                "(learner_id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (learner_id, display_name or "Demo Learner", now, now),
+            )
+            if display_name:
                 conn.execute(
-                    "INSERT INTO learner_profiles (learner_id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (learner_id, display_name or "Demo Learner", now, now),
+                    "UPDATE learner_profiles SET display_name = ?, updated_at = ? "
+                    "WHERE learner_id = ? AND display_name <> ?",
+                    (display_name, now, learner_id, display_name),
                 )
-                for objective, mastery in DEFAULT_MASTERY.items():
-                    conn.execute(
-                        "INSERT OR IGNORE INTO objective_mastery (learner_id, objective, mastery) VALUES (?, ?, ?)",
-                        (learner_id, objective, mastery),
-                    )
-            elif display_name and display_name != existing["display_name"]:
+            # Run this on every idempotent ensure so newly introduced default
+            # objectives are backfilled without a separate learner migration.
+            for objective, mastery in DEFAULT_MASTERY.items():
                 conn.execute(
-                    "UPDATE learner_profiles SET display_name = ?, updated_at = ? WHERE learner_id = ?",
-                    (display_name, now, learner_id),
+                    "INSERT OR IGNORE INTO objective_mastery "
+                    "(learner_id, objective, mastery) VALUES (?, ?, ?)",
+                    (learner_id, objective, mastery),
                 )
         return self.get_profile(learner_id)
 

@@ -19,6 +19,13 @@ locals {
     [local.backend_image_digest],
     var.artifact_recovery_image_digests,
   )))
+  # Artifact Registry limits cleanup-policy version-name prefixes to 64
+  # characters, while a Docker version name is `sha256:` plus 64 hex digits.
+  # Retain the scheme and first 57 digest digits so the prefix matches the
+  # intended version with 228 bits of collision resistance.
+  protected_backend_version_prefixes = [
+    for digest in local.protected_backend_digests : substr(digest, 0, min(length(digest), 64))
+  ]
 
   # Reviewed host assets are compressed into non-secret instance metadata and
   # staged locally by the startup shim. The VM never clones a repository or
@@ -39,9 +46,11 @@ locals {
     "systemd/ecg-sqlite-backup.timer"       = base64encode(file("${path.module}/../systemd/ecg-sqlite-backup.timer"))
     "caddy/Caddyfile"                       = base64encode(file("${path.module}/../caddy/Caddyfile"))
   }
-  runtime_asset_records = join("\n", [
+  # Keep the terminal newline: the startup shim streams this manifest through
+  # Bash `read`, which otherwise omits the final asset record.
+  runtime_asset_records = "${join("\n", [
     for path, payload in local.runtime_assets : "${path}\t${payload}"
-  ])
+  ])}\n"
   runtime_asset_bundle = base64gzip(local.runtime_asset_records)
 
   runtime_secrets = merge(
