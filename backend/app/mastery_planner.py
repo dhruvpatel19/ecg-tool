@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from .objectives import OBJECTIVES, ObjectiveDefinition
 from .ontology import concept_label
-from .retention import competency_state
+from .retention import DURABLE_DISTINCT_SUCCESSFUL_ECGS, competency_state
 from .subskill_tasks import training_independent_receipt_available
 
 
@@ -78,7 +78,13 @@ def _receipt_mode(
 
 
 def _best_case_concept(definition: ObjectiveDefinition, counts: dict[str, int]) -> str | None:
-    available = [concept for concept in definition.case_concepts if int(counts.get(concept, 0)) > 0]
+    # A plan presented as a path to durable mastery must be capable of meeting
+    # the same distinct-ECG gate as the retention model. A one-positive family
+    # can remain formative, but cannot appear in this durable receipt queue.
+    available = [
+        concept for concept in definition.case_concepts
+        if int(counts.get(concept, 0)) >= DURABLE_DISTINCT_SUCCESSFUL_ECGS
+    ]
     if not available:
         return None
     # Preserve the authored mapping order; count only breaks ties between
@@ -132,7 +138,9 @@ def _reason(cell: dict[str, Any]) -> str:
     return f"{label} · {skill} has not yet been observed; begin with an eligible real ECG."
 
 
-def _stage(cell: dict[str, Any], *, order: int) -> dict[str, Any]:
+def _stage(
+    cell: dict[str, Any], *, order: int, stage_kind: str
+) -> dict[str, Any]:
     concept = cell["caseConcept"]
     objective = cell["objectiveId"]
     label = cell["label"]
@@ -141,6 +149,8 @@ def _stage(cell: dict[str, Any], *, order: int) -> dict[str, Any]:
     if mode == "train":
         return {
             "order": order,
+            "stageKind": stage_kind,
+            "status": "current",
             "mode": "train",
             "title": f"Build {label} · {subskill.replace('_', ' ')}",
             "purpose": "Complete the exact server-graded task, then clear it on an unannounced transfer ECG without a hint.",
@@ -155,6 +165,8 @@ def _stage(cell: dict[str, Any], *, order: int) -> dict[str, Any]:
         }
     return {
         "order": order,
+        "stageKind": stage_kind,
+        "status": "current",
         "mode": "rapid",
         "title": (
             f"Build {label} · complete-read synthesis"
@@ -276,9 +288,23 @@ def build_mastery_plan(
         if len(priorities) == 6:
             break
 
+    if baseline_needed:
+        plan_stage = "baseline"
+    elif primary and primary["isDue"]:
+        plan_stage = "retention"
+    elif primary and (
+        primary["highConfidenceWrong"] > 0
+        or primary["independentMastery"] < 0.55
+    ):
+        plan_stage = "remediation"
+    elif primary and primary["state"] != "durable":
+        plan_stage = "consolidation"
+    else:
+        plan_stage = "extension"
+
     stages: list[dict[str, Any]] = []
     if primary:
-        stages.append(_stage(primary, order=1))
+        stages.append(_stage(primary, order=1, stage_kind=plan_stage))
 
     secondary = next(
         (
@@ -297,8 +323,23 @@ def build_mastery_plan(
         ),
         None,
     )
+    def integration_ready(cell: dict[str, Any] | None) -> bool:
+        return bool(
+            cell
+            and cell["independentAttempts"] >= 2
+            and cell["independentMastery"] >= 0.6
+            and cell["distinctSuccessfulEcgs"] >= 2
+            and not cell["isDue"]
+        )
+
+    integration_unlocked = bool(
+        not baseline_needed
+        and synthesis_target
+        and integration_ready(primary)
+        and integration_ready(secondary)
+    )
     integration = None
-    if primary and secondary and synthesis_target:
+    if integration_unlocked and primary and secondary and synthesis_target:
         integration = {
             "primaryConcept": primary["caseConcept"],
             "secondaryConcept": secondary["caseConcept"],
@@ -328,11 +369,21 @@ def build_mastery_plan(
             "highConfidenceMisses": high_confidence_misses,
             "eligibleConcepts": len({cell["caseConcept"] for cell in ranked}),
             "baselineNeeded": baseline_needed,
+            "planStage": plan_stage,
+            "minimumDistinctEcgsForDurable": DURABLE_DISTINCT_SUCCESSFUL_ECGS,
         },
         "primary": ({**primary, "reason": _reason(primary)} if primary else None),
         "priorities": priorities,
         "stages": stages,
         "integration": integration,
+        "integrationReadiness": {
+            "unlocked": integration_unlocked,
+            "reason": (
+                "Unlocked after both concepts have repeated independent success and neither is due."
+                if integration_unlocked
+                else "Complete baseline/consolidation evidence on two concepts before cross-concept integration unlocks."
+            ),
+        },
         "explanation": (
             "No independently assessable competency evidence exists yet, so the first step is the highest-priority exact receipt task."
             if baseline_needed

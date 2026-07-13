@@ -49,7 +49,7 @@ export type BlindedItem = {
   click_target_type?: string | null;
   /** Neutral parsed waveform ROI for viewer grading; never a pathology answer key. */
   click_roi_concept?: string | null;
-  tracing_provenance?: "real_deidentified_ecg" | "synthetic_teaching_waveform";
+  tracing_provenance?: "real_deidentified_ecg";
   context_provenance?: "authored_simulation";
   learning_evidence?: "formative_only";
   content_label?: string;
@@ -59,7 +59,7 @@ export type BlindedItem = {
 export function provenanceBadge(p?: string): string {
   return p === "real_deidentified_ecg"
     ? "Real de-identified ECG · authored vignette"
-    : "Synthetic teaching ECG · authored simulation";
+    : "ECG provenance unavailable · not valid for learner scoring";
 }
 
 export type ClockSpec = {

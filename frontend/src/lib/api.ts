@@ -115,6 +115,13 @@ export type CompetencyObjective = {
     distinctSuccessfulEcgs: number;
     distinctModes: number;
     distinctMorphologies: number;
+    independentEvidenceAvailable: boolean;
+    independentReceipt: null | {
+      mode: "train" | "rapid";
+      caseConcept: string;
+      receiptConcept: string;
+      subskill: string;
+    };
     evidenceUncertainty: string | null;
   }>;
 };

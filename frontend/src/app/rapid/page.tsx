@@ -166,9 +166,10 @@ const RAPID_CASE_CONCEPTS = [
   "av_block_second_degree_mobitz_ii", "av_block_third_degree", "atrial_fibrillation", "atrial_flutter",
   "supraventricular_tachycardia", "wide_complex_tachycardia", "qrs_duration", "right_bundle_branch_block", "left_bundle_branch_block",
   "left_anterior_fascicular_block", "left_posterior_fascicular_block", "wolff_parkinson_white",
+  "paced_rhythm",
   "left_ventricular_hypertrophy", "right_ventricular_hypertrophy", "atrial_enlargement", "qt_interval",
   "qtc_prolongation", "nonspecific_st_t_change", "st_depression", "t_wave_inversion", "myocardial_ischemia",
-  "myocardial_infarction", "anterior_mi", "inferior_mi", "lateral_mi", "septal_mi", "pathologic_q_waves",
+  "electrolyte_drug_pattern", "myocardial_infarction", "anterior_mi", "inferior_mi", "lateral_mi", "septal_mi", "posterior_mi", "pathologic_q_waves",
 ];
 
 const FRAMEWORK_STEPS = [
@@ -326,6 +327,7 @@ export default function RapidPage() {
   const [results, setResults] = useState<CaseResult[]>([]);
   const [serverResultCount, setServerResultCount] = useState(0);
   const [conceptGroups, setConceptGroups] = useState<RapidConceptGroup[]>(FALLBACK_CONCEPT_GROUPS);
+  const [rapidAvailableConcepts, setRapidAvailableConcepts] = useState<Set<string>>(new Set(RAPID_CASE_CONCEPTS));
   const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [clinicalSupportedConcepts, setClinicalSupportedConcepts] = useState<Set<string>>(new Set());
   const [remaining, setRemaining] = useState<number | null>(null);
@@ -517,7 +519,10 @@ export default function RapidPage() {
     let active = true;
     api.concepts()
       .then((payload) => {
-        if (active) setConceptGroups(buildRapidConceptGroups(payload));
+        if (!active) return;
+        const groups = buildRapidConceptGroups(payload);
+        setConceptGroups(groups);
+        setRapidAvailableConcepts(new Set(groups.flatMap((group) => group.concepts.map((concept) => concept.id))));
       })
       .catch(() => {
         // The complete validated fallback remains answerable if catalog loading fails.
@@ -553,11 +558,6 @@ export default function RapidPage() {
     if (requestedReturn.startsWith("/learn/") || requestedReturn === "/review") setReturnTo(requestedReturn);
     const requestedFocus = params.get("focus") ?? "";
     setHandoffFocus(requestedFocus);
-    const resolution = requestedFocus ? resolveHandoffTarget(requestedFocus, RAPID_CASE_CONCEPTS) : null;
-    setHandoffResolution(resolution);
-    if (requestedFocus && !resolution) {
-      setHandoffUnavailable(`No validated Rapid case family can currently prove ${requestedFocus.replaceAll("_", " ")}. No substitute case or competency receipt will be created.`);
-    }
     const requestedSubskill = params.get("subskill") ?? "";
     setHandoffReceiptConcept(params.get("receiptConcept") ?? requestedFocus);
     if (["recognize", "localize", "measure", "discriminate", "explain_mechanism", "synthesize", "apply_in_context", "calibrate_confidence"].includes(requestedSubskill)) {
@@ -565,6 +565,15 @@ export default function RapidPage() {
       if (requestedSubskill === "synthesize") setPaceId("untimed");
     }
   }, []);
+
+  useEffect(() => {
+    if (!catalogLoaded) return;
+    const resolution = handoffFocus ? resolveHandoffTarget(handoffFocus, rapidAvailableConcepts) : null;
+    setHandoffResolution(resolution);
+    setHandoffUnavailable(handoffFocus && !resolution
+      ? `No validated Rapid case family can currently prove ${handoffFocus.replaceAll("_", " ")}. No substitute case or competency receipt will be created.`
+      : "");
+  }, [catalogLoaded, handoffFocus, rapidAvailableConcepts]);
 
   const loadCase = useCallback(async (activeRoundId = roundId) => {
     if (!activeRoundId) return;
@@ -922,7 +931,13 @@ export default function RapidPage() {
           {handoffSubskill === "synthesize" ? <div className="selection-note" style={{ marginTop: 10 }}>
             <strong>Independent synthesis gate:</strong> complete rate, rhythm, axis, intervals, QRS/conduction, ST–T, chambers, and an evidence-limited one-line synthesis; explicitly select the supported focus and avoid unsupported calls.
           </div> : null}
-          <button className="button primary rapid-start" type="button" onClick={() => void startSession()} disabled={Boolean(handoffUnavailable)} style={{ marginTop: 16 }}>
+          <button
+            className="button primary rapid-start"
+            type="button"
+            onClick={() => void startSession()}
+            disabled={!catalogLoaded || Boolean(handoffUnavailable) || Boolean(handoffFocus && !handoffResolution)}
+            style={{ marginTop: 16 }}
+          >
             Start {pace.title.toLowerCase()} <ArrowRight size={16} aria-hidden="true" />
           </button>
         </section>

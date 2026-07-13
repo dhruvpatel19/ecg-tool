@@ -43,6 +43,57 @@ ADAPTIVE_ONBOARDING_ORDER = [
 ]
 
 
+def independent_subskill_index(
+    profile: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Index server-verified concept x subskill evidence by objective.
+
+    The legacy objective table is still populated by older/guided/clinical
+    workflows, while Training and Rapid deliberately write their defensible
+    evidence only to ``subskillMastery``.  Schedulers must therefore consult
+    this index first and use the legacy row only when an objective has no
+    independent exact-cell evidence at all.
+    """
+
+    indexed: dict[str, list[dict[str, Any]]] = {}
+    for row in profile.get("subskillMastery", []):
+        if int(row.get("independentAttempts", 0)) <= 0:
+            continue
+        concept = str(row.get("concept") or "")
+        if concept:
+            indexed.setdefault(concept, []).append(row)
+    return indexed
+
+
+def priority_exact_row(
+    rows: list[dict[str, Any]],
+    *,
+    as_of: datetime,
+    preferred_subskills: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Return the exact cell with the strongest defensible learning need."""
+
+    if preferred_subskills:
+        preferred = [row for row in rows if row.get("subskill") in preferred_subskills]
+        if preferred:
+            rows = preferred
+    if not rows:
+        return None
+
+    def key(row: dict[str, Any]) -> tuple[Any, ...]:
+        due = due_snapshot(row, as_of=as_of)
+        return (
+            tuple(due["duePriority"]),
+            -int(row.get("highConfidenceWrong", 0)),
+            float(row.get("independentMastery", 0.15)),
+            -int(row.get("lapses", 0)),
+            int(row.get("independentAttempts", 0)),
+            str(row.get("subskill") or ""),
+        )
+
+    return min(rows, key=key)
+
+
 def _teaching_exemplar_rejection_reasons(case: dict[str, Any], concept_id: str | None) -> list[str]:
     """Stricter gate for a canonical guided example than for adaptive practice.
 
@@ -157,6 +208,16 @@ def next_case(
         (row["concept"], row["subskill"]): row
         for row in profile.get("subskillMastery", [])
     }
+    independent_by_objective = independent_subskill_index(profile)
+
+    def exact_need_row(
+        objective: str, preferred_subskills: set[str] | None = None
+    ) -> dict[str, Any] | None:
+        return priority_exact_row(
+            independent_by_objective.get(objective, []),
+            as_of=schedule_time,
+            preferred_subskills=preferred_subskills,
+        )
 
     # Choose one explicit competency for an unscoped session. This prevents the
     # old policy from rewarding highly multi-label cases simply because summing
@@ -171,28 +232,48 @@ def next_case(
             if subskill_id:
                 row = subskill_mastery.get((objective, subskill_id))
                 return tuple(due_snapshot(row or {}, as_of=schedule_time)["duePriority"])
-            rows = [row for (concept, _), row in subskill_mastery.items() if concept == objective]
-            if not rows:
+            row = exact_need_row(objective)
+            if not row:
                 return (1, 0.0)
-            return min(
-                tuple(due_snapshot(row, as_of=schedule_time)["duePriority"])
-                for row in rows
+            return tuple(due_snapshot(row, as_of=schedule_time)["duePriority"])
+
+        def objective_rank(row: dict[str, Any]) -> tuple[Any, ...]:
+            objective = row["objective"]
+            if subskill_id:
+                exact = subskill_mastery.get((objective, subskill_id), {})
+                level = float(exact.get("independentMastery", 0.15))
+                high_confidence_wrong = int(exact.get("highConfidenceWrong", 0))
+                attempts = int(exact.get("independentAttempts", 0))
+                last_practiced = exact.get("lastPracticedAt")
+            else:
+                # Training/Rapid exact evidence is authoritative when present;
+                # the objective summary remains a compatibility fallback for
+                # learners whose earlier work predates exact receipts.
+                exact = exact_need_row(objective)
+                source = exact or row
+                level = float(
+                    source.get(
+                        "independentMastery" if exact else "mastery",
+                        0.15 if exact else 0.25,
+                    )
+                )
+                high_confidence_wrong = int(source.get("highConfidenceWrong", 0))
+                attempts = int(
+                    source.get("independentAttempts" if exact else "attempts", 0)
+                )
+                last_practiced = source.get("lastPracticedAt")
+            return (
+                retention_priority(objective),
+                level,
+                -high_confidence_wrong,
+                attempts,
+                -_stale_bonus(last_practiced),
+                onboarding_rank.get(objective, len(onboarding_rank) + 1),
             )
 
         ranked_objectives = sorted(
             profile["mastery"],
-            key=lambda row: (
-                retention_priority(row["objective"]),
-                float(subskill_mastery.get((row["objective"], subskill_id), {}).get("independentMastery", 0.15))
-                if subskill_id else float(row.get("mastery", 0.25)),
-                -int(subskill_mastery.get((row["objective"], subskill_id), {}).get("highConfidenceWrong", 0))
-                if subskill_id else -int(row.get("highConfidenceWrong", 0)),
-                int(subskill_mastery.get((row["objective"], subskill_id), {}).get("independentAttempts", 0))
-                if subskill_id else int(row.get("attempts", 0)),
-                -_stale_bonus(subskill_mastery.get((row["objective"], subskill_id), {}).get("lastPracticedAt"))
-                if subskill_id else -_stale_bonus(row.get("lastPracticedAt")),
-                onboarding_rank.get(row["objective"], len(onboarding_rank) + 1),
-            ),
+            key=objective_rank,
         )
         if hasattr(repo, "concept_ab_counts"):
             available_counts = repo.concept_ab_counts()
@@ -228,11 +309,11 @@ def next_case(
             "targetObjectives": [],
             "requestedConceptUnavailable": requested_unavailable,
         }
-    retention_row = (
-        subskill_mastery.get((target_objective, subskill_id), {})
-        if target_objective and subskill_id
-        else {}
-    )
+    retention_row = {}
+    if target_objective and subskill_id:
+        retention_row = subskill_mastery.get((target_objective, subskill_id), {})
+    elif target_objective:
+        retention_row = exact_need_row(target_objective) or {}
     retention_status = due_snapshot(retention_row, as_of=schedule_time)
 
     # For an exact competency, prefer a new real ECG until the available pool is
@@ -258,14 +339,23 @@ def next_case(
         supported = candidate.get("supported_objectives", [])
         if target_objective and target_objective in supported:
             target_row = mastery.get(target_objective, {})
-            exact_row = subskill_mastery.get((target_objective, subskill_id), {}) if subskill_id else {}
-            target_level = float(exact_row.get("independentMastery", 0.15)) if subskill_id else float(target_row.get("mastery", 0.25))
+            exact_row = (
+                subskill_mastery.get((target_objective, subskill_id), {})
+                if subskill_id
+                else (exact_need_row(target_objective) or {})
+            )
+            uses_exact = bool(exact_row)
+            target_level = float(
+                exact_row.get("independentMastery", 0.15)
+                if uses_exact
+                else target_row.get("mastery", 0.25)
+            )
             value += (1.0 - target_level) * 3.0
-            value += min(0.8, int(target_row.get("highConfidenceWrong", 0)) * 0.2)
-            if subskill_id:
+            if uses_exact:
                 value += min(0.8, int(exact_row.get("highConfidenceWrong", 0)) * 0.2)
                 value += _stale_bonus(exact_row.get("lastPracticedAt"))
             else:
+                value += min(0.8, int(target_row.get("highConfidenceWrong", 0)) * 0.2)
                 value += _stale_bonus(target_row.get("lastPracticedAt"))
 
         # Secondary coverage is useful, but only as a small tie-breaker. Average
@@ -274,8 +364,13 @@ def next_case(
         for objective in supported:
             if objective == target_objective:
                 continue
-            row = mastery.get(objective, {})
-            mastery_score = float(row.get("mastery", 0.25))
+            exact = exact_need_row(objective)
+            row = exact or mastery.get(objective, {})
+            mastery_score = float(
+                row.get("independentMastery", 0.15)
+                if exact
+                else row.get("mastery", 0.25)
+            )
             secondary_needs.append(1.0 - mastery_score)
         if secondary_needs:
             value += sum(sorted(secondary_needs, reverse=True)[:3]) / min(3, len(secondary_needs)) * 0.35
@@ -332,7 +427,11 @@ def next_case(
     weak_objectives = [
         objective
         for objective in supported_objectives
-        if float(mastery.get(objective, {}).get("mastery", 0.25)) < 0.55
+        if (
+            float(exact_need_row(objective).get("independentMastery", 0.15))
+            if exact_need_row(objective)
+            else float(mastery.get(objective, {}).get("mastery", 0.25))
+        ) < 0.55
     ]
     targets = []
     if target_objective and target_objective in supported_objectives:
@@ -362,6 +461,7 @@ def next_case(
             "overdueDays": retention_status["overdueDays"],
             "nextDueAt": retention_row.get("nextDueAt"),
             "stabilityDays": float(retention_row.get("stabilityDays", 0.0)),
+            "subskill": retention_row.get("subskill"),
         },
     }
 

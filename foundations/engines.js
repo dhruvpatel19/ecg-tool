@@ -1,7 +1,8 @@
 /* engines.js — reusable interaction engines for the Foundations module.
  * Each returns a small controller object and mounts itself into a host element.
- * All measurement engines read the SAME calibrated coordinate system as ecg.js,
- * so box-counts map to real ms/mV and scoring compares to the true model value.
+ * All measurement engines read the SAME calibrated coordinate system as ecg.js.
+ * Patient-trace scoring receives an explicit real PTB case; controllable mechanism
+ * schematics are visibly disclosed by the scene and never mint independent evidence.
  */
 (function (global) {
   'use strict';
@@ -410,23 +411,19 @@
     }
     wrap.querySelector('#rspace').oninput = function () { drawAt(parseFloat(this.value)); };
     drawAt(4);
-    // quiz — a REAL lead-II strip at a known rate when available, else synthetic.
+    // The scored quiz always uses a real lead-II strip. Missing data blocks the
+    // lesson rather than silently substituting an authored trace.
     var qc = opts.quizCase;
-    var truth, quizSvg;
-    if (qc && qc.lead_ii && qc.features && qc.features.heart_rate) {
-      truth = Math.round(qc.features.heart_rate);
-      quizSvg = '<svg class="ecg-svg" style="max-width:340px" viewBox="0 0 340 90" preserveAspectRatio="xMidYMid meet">' + E.gridSVG(340, 90) + '<polyline class="ecg-trace" points="' + E.realPoints(qc.lead_ii, 50, 48, { baseline: 'median' }) + '" /></svg>';
-    } else {
-      truth = 100;
-      quizSvg = '<svg class="ecg-svg" style="max-width:320px" viewBox="0 0 320 90" preserveAspectRatio="xMidYMid meet">' + E.gridSVG(320, 90) + '<polyline class="ecg-trace" points="' + E.leadPoints('II', E.params({ rate: 100 }), 320, 48, {}).points + '" /></svg>';
-    }
+    if (!qc || !qc.lead_ii || !qc.lead_ii.length || !qc.features || !qc.features.heart_rate) throw new Error('A verified real PTB rate case is required');
+    var truth = Math.round(qc.features.heart_rate);
+    var quizSvg = '<div class="real-case-label">Real PTB-XL ECG ' + qc.ecg_id + ' · lead II</div><svg class="ecg-svg" style="max-width:340px" viewBox="0 0 340 90" preserveAspectRatio="xMidYMid meet">' + E.gridSVG(340, 90) + '<polyline class="ecg-trace" points="' + E.realPoints(qc.lead_ii, 50, 48, { baseline: 'median' }) + '" /></svg>';
     var quiz = wrap.querySelector('#rquiz');
     quiz.innerHTML = quizSvg + '<input id="rans" style="max-width:120px" placeholder="bpm" inputmode="numeric"><button class="accent" id="rgo">Check</button>';
     wrap.querySelector('#rgo').onclick = function () {
       var v = parseInt(wrap.querySelector('#rans').value, 10);
       var fb = wrap.querySelector('#rfb');
       if (!v) return;
-      if (Math.abs(v - truth) <= 12) { fb.innerHTML = '<div class="fb ok">Yes — about <b>' + truth + ' bpm</b>. ' + (qc ? 'Your estimate is close — the printed measurement is ' + truth + ' bpm on this real strip. ' : '') + 'Within ~10–12 bpm is a great read.</div>'; onScore(true); }
+      if (Math.abs(v - truth) <= 12) { fb.innerHTML = '<div class="fb ok">Yes — about <b>' + truth + ' bpm</b>. Your estimate is close — the printed measurement is ' + truth + ' bpm on this real strip. Within ~10–12 bpm is a great read.</div>'; onScore(true); }
       else { fb.innerHTML = '<div class="fb warn">Count the big boxes between two R’s (300 ÷ that). It’s about <b>' + truth + ' bpm</b>. Estimates are approximate — within ~10 is the goal.</div>'; onScore(false); }
     };
     return wrap;
@@ -438,21 +435,14 @@
   function intervalHandle(host, opts) {
     opts = opts || {};
     var which = opts.which || 'PR';           // 'PR' | 'QRS'
-    var p = opts.params || E.params();
     var onScore = opts.onScore || function () {};
     var W = 480, H = 150, y0 = 90, zoom = 1.7;
     var caseObj = opts.caseObj, pointsStr, trueMs, startX, endX;
-    if (caseObj && caseObj.median && caseObj.median.II && caseObj.features) {
-      pointsStr = E.realPoints(caseObj.median.II, caseObj.median_fs || 100, y0, { zoom: zoom, baseline: 'start' });
-      trueMs = which === 'PR' ? caseObj.features.pr_ms : caseObj.features.qrs_ms;
-      startX = E.xOf(70) * zoom; endX = startX + E.xOf((trueMs || 160) * 0.55) * zoom; // off-target
-    } else {
-      var L = E.landmarks(p);
-      pointsStr = E.leadPoints('II', p, W, y0, { zoom: zoom }).points;
-      trueMs = which === 'PR' ? p.pr : p.qrs;
-      startX = (which === 'PR' ? E.xOf(L.pOnset) * zoom : E.xOf(L.qrsOnset) * zoom) + 2.4 * E.SMALL * zoom;
-      endX = (which === 'PR' ? E.xOf(L.qrsOnset) * zoom : E.xOf(L.j) * zoom) - 1.2 * E.SMALL * zoom;
-    }
+    if (!caseObj || !caseObj.median || !caseObj.median.II || !caseObj.features) throw new Error('A verified real PTB interval case is required');
+    pointsStr = E.realPoints(caseObj.median.II, caseObj.median_fs || 100, y0, { zoom: zoom, baseline: 'start' });
+    trueMs = which === 'PR' ? caseObj.features.pr_ms : caseObj.features.qrs_ms;
+    if (!Number.isFinite(trueMs)) throw new Error('The real PTB interval case has no grounded ' + which + ' measurement');
+    startX = E.xOf(70) * zoom; endX = startX + E.xOf(trueMs * 0.55) * zoom; // off-target
     var lo = which === 'PR' ? 120 : 60, hi = which === 'PR' ? 200 : 120; // normal band (QRS floor 60 so an implausibly short span isn't green-lit)
     var wrap = el('div', 'measure');
     wrap.innerHTML =

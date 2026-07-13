@@ -30,7 +30,7 @@ from .guest_identity import (
 )
 from .guest_progress import GuestProgressClaimConflict, GuestProgressService
 from .llm import TutorService
-from .mastery_planner import build_mastery_plan
+from .mastery_planner import _best_case_concept, _receipt_mode, build_mastery_plan
 from .origin_guard import OriginKeyMiddleware, trusted_registration_ip
 from .ontology import CONCEPTS, CONCEPT_BY_ID, concept_label
 from .objectives import (
@@ -38,6 +38,8 @@ from .objectives import (
     OBJECTIVES,
     REGISTRY_VERSION,
     SUBSKILLS,
+    ObjectiveDefinition,
+    ObjectiveRuntimeAvailability,
     audited_source_packet_supports_objective,
     objective_runtime_availability,
 )
@@ -431,6 +433,31 @@ def concepts() -> dict[str, Any]:
     }
 
 
+def _independent_receipt_contract(
+    definition: ObjectiveDefinition,
+    runtime: ObjectiveRuntimeAvailability,
+    concept_counts: dict[str, int],
+    subskill: str,
+) -> dict[str, str] | None:
+    """Resolve the same independently scored route used by the mastery planner."""
+    if runtime.evidence_ceiling != "eligible_real_case":
+        return None
+    if subskill not in runtime.eligible_subskills:
+        return None
+    case_concept = _best_case_concept(definition, concept_counts)
+    if not case_concept:
+        return None
+    mode = _receipt_mode(definition, case_concept, subskill)
+    if mode is None:
+        return None
+    return {
+        "mode": mode,
+        "caseConcept": case_concept,
+        "receiptConcept": definition.id,
+        "subskill": subskill,
+    }
+
+
 @app.get("/objectives")
 def objective_registry() -> dict[str, Any]:
     """Versioned educational objectives plus honest corpus/task availability."""
@@ -443,6 +470,7 @@ def objective_registry() -> dict[str, Any]:
         concept_id: {row["case_id"] for row in repo.candidates(concept_id)}
         for concept_id in mapped_concepts
     }
+    concept_counts = repo.concept_ab_counts()
     rows: list[dict[str, Any]] = []
     for definition in OBJECTIVES.values():
         runtime_availability = objective_runtime_availability(definition, repo)
@@ -454,16 +482,30 @@ def objective_registry() -> dict[str, Any]:
                 ids = set(runtime_availability.eligible_case_ids)
             reliable_ids.update(ids)
             mapped_counts.append({"caseConceptId": concept_id, "reliableCaseCount": len(ids)})
+        receipt_contracts = [
+            contract
+            for subskill in definition.allowed_subskills
+            if (
+                contract := _independent_receipt_contract(
+                    definition, runtime_availability, concept_counts, subskill
+                )
+            ) is not None
+        ]
         row = definition.as_api()
         row["evidenceCeiling"] = runtime_availability.evidence_ceiling
         row["unavailableReason"] = runtime_availability.unavailable_reason
         row["coverage"] = {
             "reliableDistinctCases": len(reliable_ids),
             "mappedConcepts": mapped_counts,
-            "independentEvidenceAvailable": bool(reliable_ids) and runtime_availability.independent_evidence_available,
-            "eligibleSubskills": list(runtime_availability.eligible_subskills),
+            "independentEvidenceAvailable": bool(receipt_contracts),
+            "eligibleSubskills": [contract["subskill"] for contract in receipt_contracts],
+            "receiptContracts": receipt_contracts,
             "reason": runtime_availability.unavailable_reason or (
-                None if reliable_ids else "No reliable Tier A/B case is connected to this objective."
+                None
+                if receipt_contracts
+                else "No implemented independent receipt route is available for this objective."
+                if reliable_ids
+                else "No reliable Tier A/B case is connected to this objective."
             ),
         }
         rows.append(row)
@@ -598,17 +640,17 @@ def competency_registry_state(
         (row["concept"], row["subskill"]): row
         for row in profile.get("subskillMastery", [])
     }
+    concept_counts = repo.concept_ab_counts()
     objectives: list[dict[str, Any]] = []
     for definition in OBJECTIVES.values():
         runtime_availability = objective_runtime_availability(definition, repo)
-        runtime_subskills = set(runtime_availability.eligible_subskills)
         cells = []
         for subskill in definition.allowed_subskills:
             actual = observed.get((definition.id, subskill))
-            independently_eligible = (
-                runtime_availability.independent_evidence_available
-                and subskill in runtime_subskills
+            receipt_contract = _independent_receipt_contract(
+                definition, runtime_availability, concept_counts, subskill
             )
+            independently_eligible = receipt_contract is not None
             cells.append({
                 "subskill": subskill,
                 "state": _competency_state(actual),
@@ -635,8 +677,9 @@ def competency_registry_state(
                 "distinctModes": int(actual.get("distinctModes", 0)) if actual else 0,
                 "distinctMorphologies": int(actual.get("distinctMorphologies", 0)) if actual else 0,
                 "independentEvidenceAvailable": independently_eligible,
+                "independentReceipt": receipt_contract,
                 "evidenceUncertainty": runtime_availability.unavailable_reason or (
-                    f"The installed source contract does not support independent {subskill.replace('_', ' ')} evidence for this objective."
+                    f"No implemented independent {subskill.replace('_', ' ')} receipt route is available for this objective."
                     if not independently_eligible
                     else
                     "No observation recorded yet."

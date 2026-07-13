@@ -210,11 +210,21 @@
     renderChrome();
     emit('ready', progressDetail());
     // Wait for the real case data to load before mounting scenes that render it.
-    (global.CASES_READY || Promise.resolve()).then(function () {
+    (global.CASES_READY || Promise.reject(new Error('real PTB teaching bundle loader is missing'))).then(function () {
       if (state.current && state.current > 0) {
         modal('Welcome back', '<p>You left off at <b>' + SCENES[state.current].title + '</b> (' + Object.keys(state.completed).length + '/' + SCENES.length + ' scenes done).</p>',
           [{ label: 'Resume', cls: 'accent', go: function () { closeModal(); mount(); } }, { label: 'Start over', go: function () { state = { completed: {}, current: 0, nv: {}, skipped: {}, testedOut: {} }; idx = 0; NV.load({}); save(); closeModal(); mount(); } }]);
       } else { mount(); }
+    }).catch(function (error) {
+      document.getElementById('scMeta').textContent = 'Real-data release gate';
+      document.getElementById('scTitle').textContent = 'Foundations is temporarily unavailable';
+      document.getElementById('scSub').textContent = 'A verified PTB teaching bundle is required';
+      document.getElementById('sceneRoot').innerHTML =
+        '<div class="warning" role="alert"><b>No simulated ECG will replace missing real data.</b> ' +
+        'The verified PTB teaching bundle could not be loaded. Please refresh or contact the course operator.</div>';
+      document.getElementById('btnNext').disabled = true;
+      document.getElementById('btnPrev').disabled = true;
+      try { console.error('Foundations real-data gate:', error); } catch (ignored) {}
     });
   }
   if (document.readyState !== 'loading') boot(); else document.addEventListener('DOMContentLoaded', boot);

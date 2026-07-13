@@ -42,6 +42,10 @@ def test_unassessed_plan_starts_with_baseline_and_never_displays_a_mastery_prior
     assert "highest-priority exact receipt task" in plan["explanation"]
     assert plan["stages"][0]["receiptConcept"] == "normal_ecg"
     assert plan["stages"][0]["receiptSubskill"] == "recognize"
+    assert plan["stages"][0]["stageKind"] == "baseline"
+    assert plan["integration"] is None
+    assert plan["integrationReadiness"]["unlocked"] is False
+    assert plan["basis"]["minimumDistinctEcgsForDurable"] == 3
 
 
 def test_due_and_high_confidence_evidence_drive_plan_before_unseen_cells() -> None:
@@ -82,7 +86,7 @@ def test_due_and_high_confidence_evidence_drive_plan_before_unseen_cells() -> No
 def test_unavailable_or_nonexistent_source_contracts_never_enter_plan() -> None:
     plan = build_mastery_plan(
         {"subskillMastery": []},
-        {"wide_complex_tachycardia": 10, "normal_ecg": 1},
+        {"wide_complex_tachycardia": 10, "normal_ecg": 3},
         definitions=[
             _definition(
                 "wide_complex_tachycardia",
@@ -216,7 +220,23 @@ def test_training_cells_without_a_trace_or_contrast_grader_do_not_enter_plan() -
         {"axis_normal": 50, "paced_rhythm": 10},
         definitions=[
             _definition("axis_normal", "axis_normal", "measure"),
-            _definition("paced_rhythm", "paced_rhythm", "discriminate"),
+            _definition("paced_rhythm", "paced_rhythm", "measure"),
+        ],
+    )
+    assert plan["primary"] is None
+    assert plan["stages"] == []
+
+
+def test_sparse_family_cannot_be_advertised_as_a_durable_mastery_path() -> None:
+    plan = build_mastery_plan(
+        {"subskillMastery": []},
+        {"av_block_second_degree_mobitz_i": 1},
+        definitions=[
+            _definition(
+                "av_block_second_degree_mobitz_i",
+                "av_block_second_degree_mobitz_i",
+                "recognize",
+            )
         ],
     )
     assert plan["primary"] is None

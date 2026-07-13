@@ -261,3 +261,36 @@ def test_adaptive_scheduler_serves_due_retention_before_lower_not_due_mastery() 
     )
     assert selected["case"]["caseId"] == "n"
     assert selected["retention"]["dueState"] == "overdue"
+
+
+def test_unscoped_adaptive_scheduler_prefers_exact_receipts_over_legacy_mastery() -> None:
+    class ExactWinsStore(_AdaptiveStore):
+        def ensure_profile(self, learner_id: str) -> dict:
+            return {
+                "mastery": [
+                    {"objective": "normal_ecg", "mastery": 0.05, "attempts": 4, "highConfidenceWrong": 0},
+                    {"objective": "bradycardia", "mastery": 0.95, "attempts": 4, "highConfidenceWrong": 0},
+                ],
+                "subskillMastery": [
+                    {
+                        "concept": "normal_ecg", "subskill": "recognize",
+                        "independentMastery": 0.9, "independentAttempts": 4,
+                        "nextDueAt": (FROZEN + timedelta(days=2)).isoformat(),
+                        "lastPracticedAt": FROZEN.isoformat(),
+                    },
+                    {
+                        "concept": "bradycardia", "subskill": "recognize",
+                        "independentMastery": 0.2, "independentAttempts": 4,
+                        "nextDueAt": (FROZEN + timedelta(days=2)).isoformat(),
+                        "lastPracticedAt": FROZEN.isoformat(),
+                    },
+                ],
+            }
+
+    selected = next_case(
+        _AdaptiveRepo(),
+        ExactWinsStore(),  # type: ignore[arg-type]
+        "learner",
+        as_of=FROZEN,
+    )
+    assert selected["case"]["caseId"] == "b"

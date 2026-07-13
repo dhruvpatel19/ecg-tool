@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app.config import Settings
-from app.llm import MockProvider, TutorService, _detect_concepts, _flag_unsupported_diagnoses, _roi_for_concept
+from app.llm import MockProvider, TutorService, _detect_concepts, _flag_unsupported_diagnoses, _profile_summary, _roi_for_concept
 from app.schemas import TutorResponse, ViewerAction, validate_tutor_response
 
 
@@ -80,6 +80,34 @@ def test_adaptive_plan_coach_explains_verified_queue_without_scoring_or_viewer_a
     assert data["objectiveUpdates"] == []
     assert data["viewerActions"] == []
     assert "cannot score" in " ".join(data["uncertaintyWarnings"]).lower()
+
+
+def test_tutor_profile_prefers_exact_subskill_and_retention_evidence() -> None:
+    summary = _profile_summary({
+        "learnerId": "learner",
+        "weakObjectives": ["atrial_fibrillation", "normal_ecg"],
+        "subskillMastery": [{
+            "concept": "atrial_fibrillation",
+            "subskill": "recognize",
+            "attempts": 5,
+            "independentAttempts": 5,
+            "independentMastery": 0.82,
+            "dueState": "scheduled",
+            "isDue": False,
+            "distinctSuccessfulEcgs": 5,
+            "distinctMorphologies": 4,
+            "stabilityDays": 7,
+            "lapses": 0,
+            "spacedRetrievals": 3,
+            "highConfidenceWrong": 0,
+        }],
+        "misconceptions": [],
+    })
+    assert summary["competencySource"] == "exact_subskill_receipts"
+    assert summary["priorityCompetencies"][0]["objectiveId"] == "atrial_fibrillation"
+    assert summary["priorityCompetencies"][0]["distinctSuccessfulEcgs"] == 5
+    assert "atrial_fibrillation" not in summary["weakObjectives"]
+    assert summary["weakObjectives"] == ["normal_ecg"]
 
 
 def test_axis_challenge_uses_numeric_axis_and_qrs_never_p_wave_evidence() -> None:

@@ -10,6 +10,7 @@
 import { cpSync, rmSync, existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { verifyFoundationsBoundary } from "./check-foundations-boundary.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here, "..", "..", "foundations");
@@ -17,7 +18,8 @@ const dest = resolve(here, "..", "public", "foundations");
 
 if (!existsSync(src)) {
   if (existsSync(resolve(dest, "index.html"))) {
-    console.log("[sync-foundations] canonical source unavailable; using checked-in deployment snapshot");
+    const result = verifyFoundationsBoundary(dest);
+    console.log(`[sync-foundations] canonical source unavailable; verified checked-in snapshot (${result.cases} real PTB ECGs)`);
     process.exit(0);
   }
   console.error("[sync-foundations] neither canonical source nor deployment snapshot is available");
@@ -29,4 +31,5 @@ mkdirSync(dest, { recursive: true });
 // Ship the runnable module only — skip the markdown review docs (MODULE_GUIDE/TEXT).
 cpSync(src, dest, { recursive: true, filter: (s) => !s.toLowerCase().endsWith(".md") });
 
-console.log("[sync-foundations] synced", src, "->", dest);
+const result = verifyFoundationsBoundary(dest);
+console.log(`[sync-foundations] synced and verified ${result.cases} real PTB ECGs`, src, "->", dest);

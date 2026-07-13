@@ -11,13 +11,13 @@ variable "project_id" {
 variable "region" {
   description = "Single GCP region for compute, disks, buckets, registry, and secrets."
   type        = string
-  default     = "us-east4"
+  default     = "us-east1"
 }
 
 variable "zone" {
   description = "Compute zone within region."
   type        = string
-  default     = "us-east4-b"
+  default     = "us-east1-b"
 }
 
 variable "name_prefix" {
@@ -108,7 +108,40 @@ variable "network_cidr" {
 variable "machine_type" {
   description = "GCE machine type for the single application VM."
   type        = string
-  default     = "e2-medium"
+  default     = "e2-small"
+}
+
+variable "backend_memory_limit_mb" {
+  description = "Hard Docker memory ceiling for the backend container in MiB."
+  type        = number
+  default     = 1536
+
+  validation {
+    condition     = var.backend_memory_limit_mb == floor(var.backend_memory_limit_mb) && var.backend_memory_limit_mb >= 512 && var.backend_memory_limit_mb <= 65536
+    error_message = "backend_memory_limit_mb must be an integer from 512 through 65536."
+  }
+}
+
+variable "backend_memory_reservation_mb" {
+  description = "Soft Docker memory reservation for the backend container in MiB; must not exceed the hard limit."
+  type        = number
+  default     = 1024
+
+  validation {
+    condition     = var.backend_memory_reservation_mb == floor(var.backend_memory_reservation_mb) && var.backend_memory_reservation_mb >= 256 && var.backend_memory_reservation_mb <= 65536
+    error_message = "backend_memory_reservation_mb must be an integer from 256 through 65536."
+  }
+}
+
+variable "backend_cpu_limit" {
+  description = "Hard Docker CPU quota expressed as logical CPUs."
+  type        = number
+  default     = 1.5
+
+  validation {
+    condition     = var.backend_cpu_limit >= 0.25 && var.backend_cpu_limit <= 64
+    error_message = "backend_cpu_limit must be from 0.25 through 64 logical CPUs."
+  }
 }
 
 variable "source_image" {
@@ -120,7 +153,7 @@ variable "source_image" {
 variable "boot_disk_size_gb" {
   description = "Ephemeral boot disk size in GiB. Learner state and corpus data do not belong on this disk."
   type        = number
-  default     = 30
+  default     = 20
 
   validation {
     condition     = var.boot_disk_size_gb >= 20
@@ -128,21 +161,32 @@ variable "boot_disk_size_gb" {
   }
 }
 
+variable "boot_disk_type" {
+  description = "Ephemeral boot-disk Persistent Disk type."
+  type        = string
+  default     = "pd-standard"
+
+  validation {
+    condition     = contains(["pd-balanced", "pd-ssd", "pd-standard"], var.boot_disk_type)
+    error_message = "boot_disk_type must be pd-balanced, pd-ssd, or pd-standard."
+  }
+}
+
 variable "data_disk_size_gb" {
   description = "Dedicated persistent disk size in GiB for the hydrated corpus, SQLite learner database, and runtime state."
   type        = number
-  default     = 50
+  default     = 20
 
   validation {
-    condition     = var.data_disk_size_gb >= 50
-    error_message = "data_disk_size_gb must be at least 50 GiB."
+    condition     = var.data_disk_size_gb >= 20
+    error_message = "data_disk_size_gb must be at least 20 GiB."
   }
 }
 
 variable "data_disk_type" {
   description = "Persistent disk type."
   type        = string
-  default     = "pd-balanced"
+  default     = "pd-standard"
 
   validation {
     condition     = contains(["pd-balanced", "pd-ssd", "pd-standard"], var.data_disk_type)
@@ -279,6 +323,19 @@ variable "artifact_keep_recent_count" {
   validation {
     condition     = var.artifact_keep_recent_count == floor(var.artifact_keep_recent_count) && var.artifact_keep_recent_count >= 3 && var.artifact_keep_recent_count <= 50
     error_message = "artifact_keep_recent_count must be an integer from 3 through 50."
+  }
+}
+
+variable "artifact_recovery_image_digests" {
+  description = "Additional exact backend sha256 digests retained by Artifact Registry cleanup for intentional rollback/recovery. The active backend_image digest is protected automatically."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for digest in var.artifact_recovery_image_digests : can(regex("^sha256:[a-f0-9]{64}$", digest))
+    ])
+    error_message = "artifact_recovery_image_digests entries must be lowercase sha256 digests."
   }
 }
 

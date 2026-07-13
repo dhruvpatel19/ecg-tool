@@ -191,3 +191,43 @@ def test_objective_registry_and_complete_unseen_competency_matrix() -> None:
             for objective in state_body["objectives"]
             for cell in objective["subskills"]
         )
+
+        competency_by_id = {
+            row["objectiveId"]: row for row in state_body["objectives"]
+        }
+        brady_application = next(
+            cell
+            for cell in competency_by_id["brady_context"]["subskills"]
+            if cell["subskill"] == "apply_in_context"
+        )
+        assert brady_application["independentEvidenceAvailable"] is False
+        assert brady_application["independentReceipt"] is None
+
+        rbbb_recognition = next(
+            cell
+            for cell in competency_by_id["right_bundle_branch_block"]["subskills"]
+            if cell["subskill"] == "recognize"
+        )
+        assert rbbb_recognition["independentEvidenceAvailable"] is True
+        assert rbbb_recognition["independentReceipt"] == {
+            "mode": "rapid",
+            "caseConcept": "right_bundle_branch_block",
+            "receiptConcept": "right_bundle_branch_block",
+            "subskill": "recognize",
+        }
+
+
+def test_supported_selector_concepts_are_exposed_by_the_live_catalog() -> None:
+    with TestClient(app) as client:
+        groups = client.get("/concepts").json()["practiceGroups"]
+        available = {
+            concept["id"]
+            for group in groups
+            for concept in group["concepts"]
+            if concept["available"]
+        }
+        assert {
+            "paced_rhythm",
+            "electrolyte_drug_pattern",
+            "posterior_mi",
+        } <= available

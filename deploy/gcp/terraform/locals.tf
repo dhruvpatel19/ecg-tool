@@ -14,6 +14,11 @@ locals {
   corpus_object_resource = "projects/_/buckets/${google_storage_bucket.corpus.name}/objects/${var.corpus_object_name}"
   backup_object_resource = "projects/_/buckets/${google_storage_bucket.backup.name}/objects/${local.backup_object_prefix}/"
   backend_repository_url = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.backend.repository_id}"
+  backend_image_digest   = try(split("@", var.backend_image)[1], "")
+  protected_backend_digests = distinct(compact(concat(
+    [local.backend_image_digest],
+    var.artifact_recovery_image_digests,
+  )))
 
   # Reviewed host assets are compressed into non-secret instance metadata and
   # staged locally by the startup shim. The VM never clones a repository or

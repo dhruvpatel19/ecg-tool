@@ -8,12 +8,14 @@ RequiresMountsFor=/srv/ecg-data
 ConditionPathIsSymbolicLink=/srv/ecg-data/corpus/current
 ConditionPathExists=/etc/ecg/backend.env
 ConditionPathExists=/etc/ecg/image.env
+ConditionPathExists=/etc/ecg/resources.env
 StartLimitIntervalSec=300s
 StartLimitBurst=3
 
 [Service]
 Type=simple
 EnvironmentFile=/etc/ecg/image.env
+EnvironmentFile=/etc/ecg/resources.env
 Environment=CLOUDSDK_CONFIG=/var/lib/ecg-gcloud
 Environment=HOME=/root
 Environment=DOCKER_CONFIG=/root/.docker
@@ -28,6 +30,10 @@ ExecStart=/usr/bin/docker run --name ecg-backend \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
+  --memory-reservation ${ECG_BACKEND_MEMORY_RESERVATION} \
+  --memory ${ECG_BACKEND_MEMORY_LIMIT} \
+  --memory-swap ${ECG_BACKEND_MEMORY_LIMIT} \
+  --cpus ${ECG_BACKEND_CPU_LIMIT} \
   --pids-limit 256 \
   --ulimit nofile=65536:65536 \
   --stop-timeout 45 \

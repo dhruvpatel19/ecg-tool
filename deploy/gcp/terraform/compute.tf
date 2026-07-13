@@ -74,7 +74,7 @@ resource "google_compute_instance" "app" {
     initialize_params {
       image = var.source_image
       size  = var.boot_disk_size_gb
-      type  = "pd-balanced"
+      type  = var.boot_disk_type
       labels = merge(local.labels, {
         data-class = "ephemeral"
       })
@@ -151,6 +151,9 @@ resource "google_compute_instance" "app" {
     ecg-llm-global-daily-limit        = tostring(var.llm_global_daily_limit)
     ecg-backup-max-age-seconds        = tostring(var.backup_max_age_seconds)
     ecg-min-state-free-bytes          = tostring(var.min_state_free_bytes)
+    ecg-backend-memory-limit-mb       = tostring(var.backend_memory_limit_mb)
+    ecg-backend-memory-reservation-mb = tostring(var.backend_memory_reservation_mb)
+    ecg-backend-cpu-limit             = tostring(var.backend_cpu_limit)
     ecg-runtime-assets                = local.runtime_asset_bundle
 
     startup-script = file("${path.module}/startup.sh.tftpl")
@@ -170,6 +173,11 @@ resource "google_compute_instance" "app" {
     precondition {
       condition     = can(regex("@sha256:[0-9a-f]{64}$", var.backend_image))
       error_message = "backend_image must be an immutable lowercase sha256 digest reference, not a tag."
+    }
+
+    precondition {
+      condition     = var.backend_memory_reservation_mb <= var.backend_memory_limit_mb
+      error_message = "backend_memory_reservation_mb must not exceed backend_memory_limit_mb."
     }
 
     precondition {

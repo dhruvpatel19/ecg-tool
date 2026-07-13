@@ -1,24 +1,34 @@
-"""Export a curated set of REAL PTB-XL cases for the Foundations module.
+"""Export a curated set of real PTB-XL cases for the Foundations module.
 
 Pulls, from data/ecg_corpus/corpus.db, representative cases across the teaching
-categories (normal / brady / tachy / long-PR / wide-QRS / left-axis / right-axis /
-noisy), each with its real 12-lead MEDIAN BEAT (mV) and the real 12SL computed
+categories (normal / brady / tachy / non-sinus / long-PR / wide-QRS / left-axis /
+right-axis / noisy), each with its real 12-lead MEDIAN BEAT (mV) and the real 12SL computed
 features (rate, PR, QRS, QT, axis, per-lead ST) as ground truth. Writes
-foundations/data/cases.json — the static module loads this and renders/scores
+``frontend/public/foundations/data/cases.json`` — the static module loads this and renders/scores
 against real data. Run: python scripts/export_foundations_cases.py
 """
-import sqlite3, json, os, numpy as np
+from __future__ import annotations
 
-DB = "data/ecg_corpus/corpus.db"
-OUT = "foundations/data/cases.json"
+from collections import Counter
+import json
+from pathlib import Path
+import sqlite3
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+DB = ROOT / "data" / "ecg_corpus" / "corpus.db"
+OUT = ROOT / "foundations" / "data" / "cases.json"
 LEADS = ["I","II","III","aVR","aVL","aVF","V1","V2","V3","V4","V5","V6"]
+SOURCE_VERSION = "1.0.3"
+LICENSE_ID = "CC-BY-4.0"
 
 con = sqlite3.connect(DB); cur = con.cursor()
 
 def wf_path(ecg_id):
     ecg_id = int(ecg_id)
     folder = f"{(ecg_id // 1000) * 1000:05d}"
-    return f"data/ecg_corpus/waveforms/{folder}/{ecg_id:05d}.npy"
+    return ROOT / "data" / "ecg_corpus" / "waveforms" / folder / f"{ecg_id:05d}.npy"
 
 def has_concept(ecg_id, concept, tiers=("A", "B")):
     r = cur.execute("select tier from case_concepts where ecg_id=? and concept_id=?", (ecg_id, concept)).fetchone()
@@ -81,6 +91,7 @@ CATS = [
     ("normal",     "normal_ecg",              ("A",),      normal_ok, 4),
     ("brady",      "bradycardia",             ("A", "B"),  lambda c: (feat(c,"heart_rate") or 99) < 58 and has_concept(c["ecg_id"],"sinus_rhythm") and c["signal_status"]!="poor", 2),
     ("tachy",      "sinus_rhythm",            ("A", "B"),  lambda c: (feat(c,"heart_rate") or 0) > 100 and c["signal_status"]!="poor", 3),
+    ("non_sinus",  "atrial_fibrillation",     ("A",),      lambda c: not c["sinus"] and c["signal_status"]!="poor", 2),
     ("long_pr",    "av_block_first_degree",   ("A",),      lambda c: (feat(c,"pr_ms") or 0) > 210 and (feat(c,"qrs_ms") or 999) < 120 and c["signal_status"]!="poor", 3),
     ("wide_qrs",   "left_bundle_branch_block",("B",),      lambda c: (feat(c,"qrs_ms") or 0) >= 130 and c["signal_status"]!="poor", 2),
     ("wide_qrs",   "right_bundle_branch_block",("B",),     lambda c: (feat(c,"qrs_ms") or 0) >= 130 and c["signal_status"]!="poor", 2),
@@ -111,9 +122,9 @@ for name, concept, tiers, pred, want in CATS:
         if eid in seen: continue
         c = load(eid)
         if not c or not pred(c): continue
-        if not c["sinus"]: continue   # teaching cases must be genuine sinus (so caseTruth's "sinus" holds)
+        if name != "non_sinus" and not c["sinus"]: continue
         c["category"] = name
-        if name in ("tachy", "brady", "normal"):
+        if name in ("tachy", "brady", "normal", "non_sinus"):
             c["lead_ii"] = lead_ii_strip(eid)  # real rhythm strip for rate/regularity/quality
         selected.append(c); seen.add(eid); got += 1
         if got >= want: break
@@ -126,6 +137,7 @@ out = []
 for c in selected:
     rec = {
         "ecg_id": c["ecg_id"], "category": c["category"], "report": c["report"],
+        "source": "ptbxl", "source_version": SOURCE_VERSION, "license_id": LICENSE_ID,
         "signal_status": c["signal_status"], "median_fs": c["median_fs"],
         "sinus": c.get("sinus", None), "st_normal": c.get("st_normal", None),
         "features": {k: c["features"].get(k) for k in KEEP_FEATS if c["features"].get(k) is not None},
@@ -135,13 +147,12 @@ for c in selected:
         rec["lead_ii"] = c["lead_ii"]
     out.append(rec)
 
-os.makedirs(os.path.dirname(OUT), exist_ok=True)
-with open(OUT, "w") as f:
+OUT.parent.mkdir(parents=True, exist_ok=True)
+with OUT.open("w", encoding="utf-8") as f:
     json.dump({"leads": LEADS, "cases": out}, f, separators=(",", ":"))
 con.close()
-sz = os.path.getsize(OUT) / 1024
+sz = OUT.stat().st_size / 1024
 print(f"\nWrote {len(out)} cases to {OUT} ({sz:.0f} KB)")
-from collections import Counter
 print("by category:", dict(Counter(c["category"] for c in out)))
 for c in out[:30]:
     fe = c["features"]

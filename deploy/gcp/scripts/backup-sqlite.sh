@@ -32,7 +32,9 @@ flock -n 9 || die "another backup is already running"
 WORK="$(mktemp -d "${ECG_OPS_ROOT}/.backup.XXXXXX")"
 trap 'remove_ops_worktree "${ECG_OPS_ROOT}" "${WORK}"' EXIT
 SNAPSHOT="${WORK}/ecg-learning.sqlite3"
-TIMESTAMP="$(date -u +'%Y%m%dT%H%M%SZ')"
+# Nanoseconds prevent two explicitly triggered backups in the same second from
+# colliding at an append-only destination (for example, pre-release + restore).
+TIMESTAMP="$(date -u +'%Y%m%dT%H%M%S%NZ')"
 chown 10001:10001 "${WORK}"
 chmod 0700 "${WORK}"
 

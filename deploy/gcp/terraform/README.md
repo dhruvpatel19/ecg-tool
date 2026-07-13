@@ -13,6 +13,7 @@ Terraform does **not** upload an image, corpus archive, license-restricted data,
 - private, regional corpus and learner-backup buckets with uniform access, public-access prevention, versioning, retention, soft delete, and destroy guards;
 - one private Artifact Registry Docker repository whose disposable unique build
   tags are cleanup-managed while every deployment is pinned to a content digest;
+  cleanup keeps the active digest plus explicitly declared recovery digests;
 - empty Secret Manager containers for the auth-rate-limit HMAC key and origin shared secret, plus an optional LLM key container;
 - a dedicated VM service account and resource-scoped IAM;
 - a public `/readyz` dependency-aware uptime check and failure alert policy;
@@ -36,10 +37,16 @@ Use Terraform 1.6+ and Application Default Credentials for an infrastructure ope
 2. Review billable resources, configure the billing account/monthly GCP budget and auditable Vercel/LLM spend-limit references, then set `billing_acknowledged = true` only with explicit approval. Any missing gate blocks the foundation before resource creation. GCP budgets alert but do not cap or disable billing.
 3. Run `terraform init -backend-config=backend.hcl -input=false`, `terraform fmt -check`, `terraform validate`, and review `terraform plan`.
 4. Apply the foundation. No application VM exists yet.
-5. Build and push the backend image outside Terraform. Record the immutable Artifact Registry reference returned by the registry (`...@sha256:<64 hex>`); a tag is rejected by the VM precondition.
+5. Build and push the backend image outside Terraform. Record the immutable Artifact Registry reference returned by the registry (`...@sha256:<64 hex>`); a tag is rejected by the VM precondition. Before replacing an existing `backend_image`, add its digest to `artifact_recovery_image_digests` so cleanup continues to protect the rollback artifact.
 6. Upload the approved corpus archive outside Terraform. Record both its GCS object generation and local SHA-256. This must be the release corpus, never a raw credentialed MIMIC archive.
 7. Add secret **versions** outside Terraform. The containers are outputs; payloads must never appear in `.tf`, `.tfvars`, plan output, or Terraform state. At minimum populate the auth-rate-limit and origin-shared-secret containers. The production example also requires the LLM API-key version. Configure the same origin value securely in the Vercel server environment.
 8. Set the image digest, corpus generation/SHA, DNS health hostname, ACME email, and `provision_instance = true`; plan and apply again.
+
+The checked demo example uses one `e2-small` VM with 20 GiB standard boot and
+data disks in `us-east1`. It retains the complete corpus, durable SQLite state,
+backup, and rollback behavior, but has less concurrency and latency headroom
+than `e2-medium`/`pd-balanced`; resize only after observing the documented load
+signals.
 
 Before step 8, resolve `debian-12` with `gcloud compute images
 describe-from-family --format='value(name)'` and set `source_image` to the concrete
@@ -77,6 +84,7 @@ for idempotently:
 - reading secret payloads from Secret Manager and writing a root-owned, mode `0600` environment file;
 - setting `APP_ENV=production`, `ECG_REQUIRE_REAL_DATA=1`, the persistent `DATABASE_URL`, `ECG_CORPUS_ROOT`, `AUTH_RATE_LIMIT_SECRET`, and `ECG_ORIGIN_SHARED_SECRET`;
 - installing/restarting the backend and reverse-proxy systemd units, exposing only 80/443;
+- enforcing the reviewed Docker CPU, memory-reservation, hard-memory, and no-swap-growth ceilings;
 - installing an idempotent backup timer that writes uniquely named objects under the granted backup prefix.
 - isolating root operational locks/temp/quarantine from the app-writable state
   directory and exposing only the backup marker through a read-only container
@@ -104,7 +112,8 @@ The data disk survives VM replacement and is guarded by Terraform `prevent_destr
 Default retention is bounded where automatic deletion is recovery-safe: online
 backups 90 days, crash-consistent disk snapshots 14 days, noncurrent corpus
 generations 90 days, and registry images 90 days while always keeping the ten
-most recent versions. The live pinned corpus object is intentionally exempt;
+most recent versions, the active deployment digest, and explicitly declared
+recovery digests. The live pinned corpus object is intentionally exempt;
 quarterly operator cleanup must compare object name/generation with Terraform
 before deleting older uniquely named releases. With the timer/host healthy, the
 scheduled RPO target is roughly 6h15 plus backup duration (including randomized

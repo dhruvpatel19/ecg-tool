@@ -6,9 +6,11 @@
  * honest and the axis-vector drag physically correct (limb-lead QRS = projection
  * of the heart's axis onto each lead).
  *
- * v1 uses a faithful synthetic model so every knob (rate, PR, QRS, axis, ST, T)
- * is manipulable. The production swap-in is real PTB-XL median beats + 12-leads;
- * the render/measure API is identical, so scenes don't change. See storyboard v7.
+ * Real patient-trace examples and every patient-trace score use the checked-in,
+ * provenance-validated PTB-XL teaching bundle. The parameterized functions below
+ * are retained only for explicitly labelled mechanism schematics (wave sequence,
+ * rate spacing, ST displacement, and vector projection). They are never presented
+ * as a patient case and never create independent ECG evidence.
  */
 (function (global) {
   'use strict';

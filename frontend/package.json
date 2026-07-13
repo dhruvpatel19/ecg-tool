@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:coords": "node scripts/check-coordinate.mjs",
+    "test:foundations-boundary": "node scripts/check-foundations-boundary.mjs",
     "e2e": "playwright test",
     "e2e:ui": "playwright test --ui"
   },

@@ -108,11 +108,20 @@ LLM_IP_HOURLY_LIMIT="$(metadata instance/attributes/ecg-llm-ip-hourly-limit)"
 LLM_GLOBAL_DAILY_LIMIT="$(metadata instance/attributes/ecg-llm-global-daily-limit)"
 BACKUP_MAX_AGE_SECONDS="$(metadata instance/attributes/ecg-backup-max-age-seconds)"
 MIN_STATE_FREE_BYTES="$(metadata instance/attributes/ecg-min-state-free-bytes)"
+BACKEND_MEMORY_LIMIT_MB="$(metadata instance/attributes/ecg-backend-memory-limit-mb)"
+BACKEND_MEMORY_RESERVATION_MB="$(metadata instance/attributes/ecg-backend-memory-reservation-mb)"
+BACKEND_CPU_LIMIT="$(metadata instance/attributes/ecg-backend-cpu-limit)"
 require_sha256 "${CORPUS_SHA}"
 [[ "${BACKEND_IMAGE}" =~ @sha256:[a-f0-9]{64}$ ]] || die "backend image is not digest-pinned"
 [[ "${BACKEND_DOMAIN}" =~ ^[A-Za-z0-9.-]+$ && "${BACKEND_DOMAIN}" == *.* ]] \
   || die "backend DNS hostname is invalid"
 [[ "${ACME_EMAIL}" == *@*.* ]] || die "ACME contact email is invalid"
+[[ "${BACKEND_MEMORY_LIMIT_MB}" =~ ^[0-9]+$ && "${BACKEND_MEMORY_RESERVATION_MB}" =~ ^[0-9]+$ ]] \
+  || die "backend memory controls must be integer MiB values"
+(( BACKEND_MEMORY_RESERVATION_MB <= BACKEND_MEMORY_LIMIT_MB )) \
+  || die "backend memory reservation exceeds its hard limit"
+[[ "${BACKEND_CPU_LIMIT}" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+  || die "backend CPU limit must be a positive numeric value"
 
 CORPUS_RELEASE="release-${CORPUS_SHA:0:16}"
 umask 077
@@ -148,6 +157,15 @@ CONFIG_NEW="$(mktemp "$(dirname "${CONFIG_PATH}")/deployment.env.XXXXXX")"
 } >"${CONFIG_NEW}"
 chmod 0600 "${CONFIG_NEW}"
 mv -f "${CONFIG_NEW}" "${CONFIG_PATH}"
+
+RESOURCE_ENV_NEW="$(mktemp /etc/ecg/resources.env.XXXXXX)"
+{
+  printf 'ECG_BACKEND_MEMORY_LIMIT=%sm\n' "${BACKEND_MEMORY_LIMIT_MB}"
+  printf 'ECG_BACKEND_MEMORY_RESERVATION=%sm\n' "${BACKEND_MEMORY_RESERVATION_MB}"
+  printf 'ECG_BACKEND_CPU_LIMIT=%s\n' "${BACKEND_CPU_LIMIT}"
+} >"${RESOURCE_ENV_NEW}"
+chmod 0600 "${RESOURCE_ENV_NEW}"
+mv -f "${RESOURCE_ENV_NEW}" /etc/ecg/resources.env
 
 log "installing reviewed runtime assets"
 install -d -m 0755 /usr/local/lib/ecg-deploy /etc/caddy /etc/systemd/system/caddy.service.d

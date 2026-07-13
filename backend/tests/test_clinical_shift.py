@@ -292,6 +292,29 @@ def test_shift_prioritizes_weak_concept():
     assert "qtc_prolongation" in targets, f"expected a QTc-targeting case, got {nxt['itemId']} ({targets})"
 
 
+def test_shift_prefers_training_rapid_exact_mastery_over_conflicting_legacy_row():
+    from app.ontology import CONCEPT_BY_ID
+
+    learner = "t-exact-qtc"
+    _set_mastery(learner, {concept: 0.95 for concept in CONCEPT_BY_ID})
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO subskill_mastery "
+            "(learner_id, concept, subskill, independent_mastery, attempts, "
+            "independent_attempts, correct, last_practiced_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                learner, "qtc_prolongation", "recognize", 0.05,
+                4, 4, 0, "2026-06-29T00:00:00+00:00",
+            ),
+        )
+    session_id = store.create_shift_session(learner, "clinic", "shift", 3)
+    nxt = shift.next_shift_item(store, clinical_item_store, clinical_packet, session_id)
+    item = clinical_item_store.get_item(nxt["itemId"])
+    targets = [c.objective_id for c in item.evidence_manifest.ecg_supports]
+    assert "qtc_prolongation" in targets
+
+
 def test_guided_handoff_focus_selects_a_compatible_first_clinical_item():
     start = client.post(
         "/clinical/shift/start",

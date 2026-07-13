@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type AdaptivePlan, type CompetencyObjective, type CompetencyState } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { conceptLabel } from "@/lib/coordinates";
+import { competencyPracticeHref } from "@/lib/competencyRoutes";
 import type { LearnerProfile } from "@/lib/types";
 
 function masteryClass(value: number) {
@@ -176,7 +177,8 @@ export default function ProfilePage() {
               </summary>
               <div className="profile-objective-cells">
                 {visibleCells.map((cell) => {
-                  const trainConcept = objective.caseConcepts[0] ?? objective.objectiveId;
+                  const receipt = cell.independentReceipt;
+                  const practiceHref = competencyPracticeHref(receipt);
                   return <article key={`${objective.objectiveId}:${cell.subskill}`} className={`profile-objective-cell state-${cell.state}`}>
                     <div><strong>{cell.subskill.replaceAll("_", " ")}</strong><span>{cell.state}{cell.isDue ? ` · ${cell.dueState}` : ""}</span></div>
                     {cell.state === "unseen" ? <p>No observation yet.</p> : <p>{Math.round(cell.independentMastery * 100)}% independent · {Math.round(cell.formativeScore * 100)}% formative · {cell.attempts} attempts</p>}
@@ -185,7 +187,7 @@ export default function ProfilePage() {
                       {cell.nextDueAt ? ` · ${cell.isDue ? "due" : "next"} ${new Date(cell.nextDueAt).toLocaleDateString()}` : ""}
                     </small> : null}
                     {cell.evidenceUncertainty ? <small>{cell.evidenceUncertainty}</small> : null}
-                    {objective.caseConcepts.length ? <Link href={`/train?concept=${encodeURIComponent(trainConcept)}&subskill=${encodeURIComponent(cell.subskill)}`}>Train this skill <ArrowRight size={13} /></Link> : null}
+                    {practiceHref ? <Link href={practiceHref}>{receipt?.mode === "rapid" ? "Open Rapid check" : "Open Competency Lab"} <ArrowRight size={13} /></Link> : <small>Independent assessment unavailable</small>}
                   </article>;
                 })}
               </div>

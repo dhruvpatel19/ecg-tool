@@ -53,6 +53,13 @@ ptb-xl-plus/
 records100/
 records500/
 
+# Small, provenance-pinned learner bundle required by the deployed Foundations
+# module. Keep both the canonical copy and the self-contained frontend snapshot.
+!foundations/data/
+!foundations/data/cases.json
+!frontend/public/foundations/data/
+!frontend/public/foundations/data/cases.json
+
 # Logs & OS cruft
 *.log
 *.part

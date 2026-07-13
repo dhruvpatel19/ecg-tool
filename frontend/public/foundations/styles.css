@@ -246,3 +246,21 @@ input[type=range]{accent-color:var(--accent);height:22px;cursor:pointer;box-shad
   .partrail{grid-template-columns:1fr 1fr;} .map-parts{grid-template-columns:1fr 1fr;}
   .solo-fields{grid-template-columns:1fr 1fr;} .axis-leads{grid-template-columns:1fr 1fr;}
 }
+.model-disclosure {
+  margin: 8px 0 12px;
+  padding: 9px 11px;
+  border: 1px solid #d7c38b;
+  border-radius: 9px;
+  background: #fff9e9;
+  color: #59491e;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.real-case-label {
+  margin: 0 0 4px;
+  color: #50616a;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}

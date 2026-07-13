@@ -8,9 +8,10 @@ calibration label (§16C/§16-4).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Callable
 
-from ..adaptive import _stale_bonus
+from ..adaptive import _stale_bonus, independent_subskill_index, priority_exact_row
 from . import grounding
 from .clinical_grading import grade_clinical_answer
 from .constants import clock_for
@@ -236,7 +237,12 @@ def _clinical_competency_events(
     return events
 
 
-def _score_item(item: ClinicalCaseItem, mastery: dict[str, Any], recent_ecgs: set[str]) -> float:
+def _score_item(
+    item: ClinicalCaseItem,
+    mastery: dict[str, Any],
+    exact_mastery: dict[str, list[dict[str, Any]]],
+    recent_ecgs: set[str],
+) -> float:
     """Mastery-driven priority (mirrors adaptive.next_case): weak / stale / high-confidence-wrong
     target concepts score higher, so a struggling student keeps getting that pathology until
     mastery rises; the same tracing is de-prioritized to keep variety."""
@@ -245,11 +251,35 @@ def _score_item(item: ClinicalCaseItem, mastery: dict[str, Any], recent_ecgs: se
     # multi-concept item always outranks the single-concept case on the pathology you're failing.
     best = 0.0
     for obj in targets:
-        row = mastery.get(obj, {})
-        mastery_score = float(row.get("mastery", 0.25))
+        preferred = {"recognize"}
+        if item.question_type == "stepwise":
+            preferred.add("synthesize")
+        if item.roi_target and item.roi_target.concept == obj:
+            preferred.add("localize")
+        exact = priority_exact_row(
+            exact_mastery.get(obj, []),
+            as_of=datetime.now(UTC),
+            preferred_subskills=preferred,
+        )
+        # Training/Rapid exact receipts are authoritative. Legacy objective
+        # mastery remains only for profiles that have no independent exact cell
+        # for this objective yet.
+        row = exact or mastery.get(obj, {})
+        mastery_score = float(
+            row.get("independentMastery", 0.15)
+            if exact
+            else row.get("mastery", 0.25)
+        )
+        attempts = int(
+            row.get("independentAttempts", 0) if exact else row.get("attempts", 0)
+        )
         signal = (1.0 - mastery_score) * 1.6 + _stale_bonus(row.get("lastPracticedAt"))
         signal += min(0.5, int(row.get("highConfidenceWrong", 0)) * 0.12)
-        if int(row.get("attempts", 0)) < 2:
+        if exact and row.get("isDue"):
+            signal += 1.0 + min(0.6, float(row.get("overdueDays", 0.0)) * 0.08)
+        if exact:
+            signal += min(0.35, int(row.get("lapses", 0)) * 0.1)
+        if attempts < 2:
             signal += 0.25
         best = max(best, signal)
     value = best if targets else 0.1
@@ -305,8 +335,12 @@ def _select_next(
         candidates = focused
     profile = store.ensure_profile(learner_id)
     mastery = {row["objective"]: row for row in profile["mastery"]}
+    exact_mastery = independent_subskill_index(profile)
     recent_ecgs = set(store.recent_case_ids(learner_id))
-    return max(candidates, key=lambda it: _score_item(it, mastery, recent_ecgs))
+    return max(
+        candidates,
+        key=lambda it: _score_item(it, mastery, exact_mastery, recent_ecgs),
+    )
 
 
 def _serve_payload(

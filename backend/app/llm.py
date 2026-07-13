@@ -1136,9 +1136,73 @@ def _packet_for_llm(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def _profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
+    exact_rows = [
+        row for row in profile.get("subskillMastery", [])
+        if int(row.get("attempts", 0)) > 0
+    ]
+
+    def priority(row: dict[str, Any]) -> tuple[Any, ...]:
+        due_lane = {"overdue": 0, "due": 1, "unseen": 2, "scheduled": 3}.get(
+            str(row.get("dueState") or "unseen"), 2
+        )
+        return (
+            due_lane,
+            -float(row.get("overdueDays", 0.0)),
+            -int(row.get("highConfidenceWrong", 0)),
+            float(row.get("independentMastery", 0.15)),
+            int(row.get("independentAttempts", 0)),
+            str(row.get("concept") or ""),
+            str(row.get("subskill") or ""),
+        )
+
+    ranked = sorted(exact_rows, key=priority)
+    compact = [
+        {
+            "objectiveId": row.get("concept"),
+            "subskillId": row.get("subskill"),
+            "independentMastery": row.get("independentMastery"),
+            "independentAttempts": int(row.get("independentAttempts", 0)),
+            "formativeScore": row.get("formativeScore"),
+            "dueState": row.get("dueState"),
+            "overdueDays": float(row.get("overdueDays", 0.0)),
+            "nextDueAt": row.get("nextDueAt"),
+            "stabilityDays": float(row.get("stabilityDays", 0.0)),
+            "lapses": int(row.get("lapses", 0)),
+            "spacedRetrievals": int(row.get("spacedRetrievals", 0)),
+            "distinctSuccessfulEcgs": int(row.get("distinctSuccessfulEcgs", 0)),
+            "distinctMorphologies": int(row.get("distinctMorphologies", 0)),
+            "highConfidenceWrong": int(row.get("highConfidenceWrong", 0)),
+            "lastIndependentCorrect": row.get("lastIndependentCorrect"),
+            "retentionUncertainty": row.get("retentionUncertainty"),
+        }
+        for row in ranked[:8]
+    ]
+    exact_weak: list[str] = []
+    for row in ranked:
+        concept = str(row.get("concept") or "")
+        needs_work = (
+            int(row.get("independentAttempts", 0)) == 0
+            or float(row.get("independentMastery", 0.15)) < 0.6
+            or bool(row.get("isDue"))
+            or int(row.get("highConfidenceWrong", 0)) > 0
+        )
+        if concept and needs_work and concept not in exact_weak:
+            exact_weak.append(concept)
+        if len(exact_weak) == 6:
+            break
+    exact_objectives = {str(row.get("concept") or "") for row in exact_rows}
+    legacy_weak = [
+        objective for objective in profile.get("weakObjectives", [])
+        if objective not in exact_objectives
+    ][:6]
+    weak_objectives = list(dict.fromkeys(exact_weak + legacy_weak))[:6]
     return {
         "learnerId": profile.get("learnerId"),
-        "weakObjectives": profile.get("weakObjectives", [])[:6],
+        "competencySource": "exact_subskill_receipts" if exact_rows else "legacy_objective_fallback",
+        "weakObjectives": weak_objectives,
+        "priorityCompetencies": compact,
+        "dueCompetencyCount": sum(1 for row in exact_rows if row.get("isDue")),
+        "legacyWeakObjectives": legacy_weak,
         "recentMisconceptions": [m.get("tag") if isinstance(m, dict) else m for m in profile.get("misconceptions", [])][:5],
     }
 

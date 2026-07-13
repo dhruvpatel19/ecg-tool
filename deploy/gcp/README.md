@@ -26,7 +26,9 @@ flowchart LR
 - Public firewall ingress is TCP 80/443 only. TCP 22 accepts only Google's IAP
   tunnel range; OS Login and a short explicit operator list control access.
 - Caddy terminates public HTTPS. Uvicorn binds `127.0.0.1`, trusts only Caddy,
-  and starts exactly one worker.
+  and starts exactly one worker. Terraform-controlled Docker CPU, memory
+  reservation, hard-memory, and swap ceilings leave capacity for host recovery
+  services.
 - Vercel injects `ECG_ORIGIN_SHARED_SECRET` in its server-only proxy. The
   backend rejects direct learner API calls; `/livez`, `/health`, and `/readyz`
   remain available to probes.
@@ -122,7 +124,7 @@ terraform apply foundation.tfplan
 
 This reserves the static IP and creates the protected disk, buckets, registry,
 secret containers, network, and least-privilege identity. There is no VM yet.
-The reserved unattached IP and 50 GiB disk can still incur charges during this
+The reserved unattached IP and 20 GiB disk can still incur charges during this
 phase, so do not leave an unused foundation running indefinitely.
 
 ## Publish immutable prerequisites
@@ -157,7 +159,7 @@ Build and push the backend. Record the returned digest URI, not its tag:
 
 ```bash
 bash ../scripts/build-backend-image.sh \
-  YOUR_PROJECT us-east4 ecg-tool-backend
+  YOUR_PROJECT us-east1 ecg-tool-backend
 ```
 
 The Docker build installs `backend/requirements-prod.txt` with
@@ -166,7 +168,9 @@ produce a new image digest.
 
 GitHub CI in `.github/workflows/ci.yml` runs the complete backend tests,
 frontend lint/type-check/hosted build, Terraform format/validate, shell syntax
-and ShellCheck, a non-root/read-only Docker smoke test, and a secret scan. The
+and ShellCheck, an executable SQLite backup/restore regression, the complete
+Playwright student-flow suite against the checked real-PTB CI corpus, a
+non-root/read-only Docker smoke test, and a secret scan. The
 manual `publish-backend.yml` workflow intentionally fails unless it is run from
 a protected `main` or `release/*` branch whose exact commit has successful CI.
 Configure a reviewer-protected `backend-release` GitHub environment, Workload
@@ -213,7 +217,7 @@ for it to resolve before starting the VM so Caddy can obtain its certificate.
 Fill these values in the ignored tfvars file:
 
 ```hcl
-backend_image           = "us-east4-docker.pkg.dev/PROJECT/ecg-tool-backend/ecg-backend@sha256:..."
+backend_image           = "us-east1-docker.pkg.dev/PROJECT/ecg-tool-backend/ecg-backend@sha256:..."
 source_image            = "projects/debian-cloud/global/images/debian-12-bookworm-vYYYYMMDD"
 corpus_object_name       = "releases/ecg-corpus-2026-07-13.tar.zst"
 corpus_object_generation = "1234567890123456"
@@ -454,10 +458,18 @@ stays stopped and both source and failed-candidate evidence remain quarantined.
 Copy needed forensic evidence to an approved restricted location, then remove
 the local quarantine only under the incident-retention policy.
 
-Roll out a new backend image only by digest. The script restores the previous
-image automatically when readiness fails. First change `backend_image` in the
-ignored tfvars and apply that metadata change; the rollout script refuses a
-digest that is not already the durable Terraform declaration:
+Roll out a new backend image only by digest. Before changing `backend_image`,
+put the currently deployed digest in `artifact_recovery_image_digests`; the
+registry keep policy then protects both the active declaration and intentional
+recovery artifact. Apply the metadata change, then run the rollout script. It
+refuses a digest that is not already the durable Terraform declaration.
+
+The script pulls first, takes the single writer briefly out of service, and
+must complete a verified append-only SQLite online-backup snapshot before the
+candidate can touch learner data. If candidate readiness fails, it restores
+both that exact recovery point and the previous image. The learner database has
+an explicit schema ledger/`user_version`; a binary encountering a newer,
+unsupported schema fails before mutation:
 
 ```bash
 sudo /bin/bash /usr/local/lib/ecg-deploy/install-release.sh \
@@ -521,9 +533,11 @@ high availability.
   approved rollback window. Hydration retains inactive local releases/artifacts
   for 30 days.
 - Artifact Registry deletes images older than 90 days except for the ten most
-  recent versions; the VM prunes unused local images after 30 days. Image
-  rollout keeps an immediate previous digest and performs automatic rollback
-  before local cleanup.
+  recent versions, the exact active `backend_image` digest, and every explicitly
+  listed `artifact_recovery_image_digests` entry. The VM prunes unused local
+  images after 30 days. Add the previous digest to the recovery list before
+  switching the active declaration; remove it only after the reviewed rollback
+  window closes.
 - Learner backups use unique append-only names and expire after 90 days (plus
   configured soft-delete behavior). Recovery drills should select and verify a
   checksum sidecar inside that window.
@@ -559,7 +573,14 @@ RPO, and rollback-cost review.
 - Application clinical-review and institutional privacy/compliance approval are
   separate release gates; infrastructure does not satisfy them automatically.
 
-The conservative demo defaults are `e2-medium` and a 50 GiB balanced disk.
+The controlled-demo defaults are an `e2-small` VM with 20 GiB standard boot and
+data disks in `us-east1`. This preserves the full application behavior while
+trading concurrency and latency headroom for lower fixed cost. The backend
+container remains capped at 1.5 CPUs and 1536 MiB memory (1024 MiB soft
+reservation, with swap capped at the same hard limit); Caddy, Docker, and
+recovery jobs share the remaining host capacity. Change these values only with
+a load/cost review, and move to `e2-medium`/`pd-balanced` if the thresholds below
+are reached.
 Scale the single VM vertically only after sustained CPU above 70%, memory above
 75%, or measured request-latency pressure, with a cost review; vertical sizing
 does not relax the no-replica gate.

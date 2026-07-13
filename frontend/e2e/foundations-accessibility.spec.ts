@@ -25,7 +25,7 @@ test.describe("Foundations accessibility and tutor continuity", () => {
     await page.evaluate((key) => localStorage.removeItem(key), STATE_KEY);
   });
 
-  test("keyboard-only waveform completion records a guided synthetic receipt and preserves tangent state", async ({ page }) => {
+  test("keyboard-only waveform completion records a guided schematic receipt and preserves tangent state", async ({ page }) => {
     const errors = collectConsoleErrors(page);
     const guidedBodies: Array<Record<string, unknown>> = [];
     await page.route("**/api/backend/learning-events/guided", async (route) => {
@@ -41,7 +41,9 @@ test.describe("Foundations accessibility and tutor continuity", () => {
     const lesson = page.frameLocator('iframe[title="Foundations — Reading an ECG"]');
 
     await expect(lesson.getByRole("heading", { name: "A gentle start" })).toBeVisible();
+    await expect(lesson.getByText(/Real PTB-XL ECG \d+ · lead II/)).toBeVisible();
     await lesson.getByRole("button", { name: "Next ›" }).press("Enter");
+    await expect(lesson.getByText("Interactive mechanism schematic — not a patient ECG.", { exact: false })).toBeVisible();
 
     const beatPosition = lesson.getByRole("slider", { name: "One-beat animation position" });
     await beatPosition.focus();
@@ -82,6 +84,21 @@ test.describe("Foundations accessibility and tutor continuity", () => {
     await expect(lesson.getByRole("button", { name: "Next ›" })).toBeEnabled();
     await expect(lesson.locator("#sceneRoot")).toBeFocused();
     expect(errors).toEqual([]);
+  });
+
+  test("missing PTB teaching bundle fails closed without mounting a simulated tracing", async ({ page }) => {
+    await page.route("**/foundations/data/cases.json", async (route) => {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
+    });
+
+    await page.goto("/learn/foundations");
+    const lesson = page.frameLocator('iframe[title="Foundations — Reading an ECG"]');
+
+    await expect(lesson.getByRole("heading", { name: "Foundations is temporarily unavailable" })).toBeVisible();
+    await expect(lesson.getByText("No simulated ECG will replace missing real data.", { exact: false })).toBeVisible();
+    await expect(lesson.locator(".real-case-label, .model-disclosure, .ecg-svg")).toHaveCount(0);
+    await expect(lesson.getByRole("button", { name: "Next ›" })).toBeDisabled();
+    await expect(lesson.getByRole("button", { name: "‹ Back" })).toBeDisabled();
   });
 
   test("remote tutor output is rendered as text and cannot inject lesson DOM", async ({ page }) => {

@@ -110,6 +110,20 @@ resource "google_artifact_registry_repository" "backend" {
     }
   }
 
+  dynamic "cleanup_policies" {
+    for_each = length(local.protected_backend_digests) > 0 ? [true] : []
+
+    content {
+      id     = "keep-pinned-deployment-images"
+      action = "KEEP"
+
+      condition {
+        tag_state             = "ANY"
+        version_name_prefixes = local.protected_backend_digests
+      }
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
   }

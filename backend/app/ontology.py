@@ -75,7 +75,7 @@ PRACTICE_GROUPS = [
     {
         "id": "mi_infarction",
         "label": "MI and infarction",
-        "concepts": ["myocardial_infarction", "anterior_mi", "inferior_mi", "lateral_mi", "septal_mi"],
+        "concepts": ["myocardial_infarction", "anterior_mi", "inferior_mi", "lateral_mi", "septal_mi", "posterior_mi"],
     },
     {
         "id": "st_t_changes",
@@ -87,6 +87,7 @@ PRACTICE_GROUPS = [
             "nonspecific_st_t_change",
             "pathologic_q_waves",
             "st_elevation",
+            "electrolyte_drug_pattern",
         ],
     },
     {
@@ -101,6 +102,7 @@ PRACTICE_GROUPS = [
             "left_posterior_fascicular_block",
             "nonspecific_intraventricular_conduction_delay",
             "wolff_parkinson_white",
+            "paced_rhythm",
         ],
     },
     {

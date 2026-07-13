@@ -6,13 +6,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 require_root
-BREAK_GLASS=0
+RESTORE_MODE=healthy
 if [[ "${1:-}" == "--corrupt-source-break-glass" ]]; then
-  BREAK_GLASS=1
+  RESTORE_MODE=corrupt
+  shift
+elif [[ "${1:-}" == "--release-rollback" ]]; then
+  RESTORE_MODE=release
   shift
 fi
 [[ $# -eq 2 ]] \
-  || die "usage: $0 [--corrupt-source-break-glass] gs://BACKUP.sqlite3.gz SHA256"
+  || die "usage: $0 [--corrupt-source-break-glass|--release-rollback] gs://BACKUP.sqlite3.gz SHA256"
 BACKUP_URI="$1"
 EXPECTED_SHA="${2,,}"
 require_sha256 "${EXPECTED_SHA}"
@@ -27,8 +30,10 @@ source "${CONFIG_FILE}"
 : "${ECG_OPS_ROOT:?ECG_OPS_ROOT is required}"
 validate_ops_root "${ECG_OPS_ROOT}"
 
-exec 8>"${ECG_OPS_ROOT}/maintenance.lock"
-flock -n 8 || die "learner database is already in backup/maintenance"
+if [[ "${ECG_MAINTENANCE_LOCK_HELD:-0}" != "1" ]]; then
+  exec 8>"${ECG_OPS_ROOT}/maintenance.lock"
+  flock -n 8 || die "learner database is already in backup/maintenance"
+fi
 
 WORK="$(mktemp -d "${ECG_OPS_ROOT}/.restore.XXXXXX")"
 trap 'remove_ops_worktree "${ECG_OPS_ROOT}" "${WORK}"' EXIT
@@ -67,12 +72,12 @@ chmod 0600 "${CANDIDATE}"
 # recovery point succeeds. Break-glass mode is for
 # an unreadable/corrupt source: stop the writer and quarantine the raw DB/WAL/SHM
 # without trying to open them.
-if [[ "${BREAK_GLASS}" == "0" ]]; then
+if [[ "${RESTORE_MODE}" == "healthy" ]]; then
   ECG_MAINTENANCE_LOCK_HELD=1 /bin/bash "${SCRIPT_DIR}/backup-sqlite.sh"
   systemctl stop ecg-backend.service
   ORIGINAL="${WORK}/original"
   mkdir -m 0700 "${ORIGINAL}"
-else
+elif [[ "${RESTORE_MODE}" == "corrupt" ]]; then
   log "BREAK GLASS: stopping the writer and quarantining the unreadable source"
   systemctl stop ecg-backend.service
   QUARANTINE_ROOT="${ECG_OPS_ROOT}/quarantine"
@@ -81,6 +86,14 @@ else
   QUARANTINE="$(mktemp -d "${QUARANTINE_ROOT}/corrupt-source-$(date -u +'%Y%m%dT%H%M%SZ').XXXXXX")"
   chmod 0700 "${QUARANTINE}"
   ORIGINAL="${QUARANTINE}"
+else
+  # install-release.sh already proved and recorded the exact append-only remote
+  # recovery point while the writer was stopped. Preserve the candidate state
+  # locally until the previous image passes readiness against the restored DB.
+  log "release rollback: stopping the candidate and restoring the pre-release snapshot"
+  systemctl stop ecg-backend.service
+  ORIGINAL="${WORK}/post-release-source"
+  mkdir -m 0700 "${ORIGINAL}"
 fi
 
 # With the writer stopped, move the exact DB/WAL/SHM set into a root-owned
@@ -98,7 +111,7 @@ install -o 10001 -g 10001 -m 0640 "${CANDIDATE}" "${READY_CANDIDATE}"
 mv -f -- "${READY_CANDIDATE}" "${ECG_STATE_DB}"
 RESTORE_READY=0
 if systemctl start ecg-backend.service; then
-  if [[ "${BREAK_GLASS}" == "1" ]]; then
+  if [[ "${RESTORE_MODE}" == "corrupt" ]]; then
     # The restored database itself must produce a new application-consistent
     # recovery point before public readiness can reopen.
     if wait_live 180 \
@@ -111,7 +124,7 @@ if systemctl start ecg-backend.service; then
   fi
 fi
 if [[ "${RESTORE_READY}" == "1" ]]; then
-  if [[ "${BREAK_GLASS}" == "1" ]]; then
+  if [[ "${RESTORE_MODE}" == "corrupt" ]]; then
     log "restore succeeded; corrupt source evidence remains quarantined at ${QUARANTINE}"
   fi
   log "restore succeeded and readiness passed"
@@ -119,7 +132,7 @@ if [[ "${RESTORE_READY}" == "1" ]]; then
 fi
 
 systemctl stop ecg-backend.service || true
-if [[ "${BREAK_GLASS}" == "1" ]]; then
+if [[ "${RESTORE_MODE}" == "corrupt" ]]; then
   log "break-glass candidate failed; preserving both evidence sets"
   for suffix in '' '-wal' '-shm'; do
     failed_file="${ECG_STATE_DB}${suffix}"

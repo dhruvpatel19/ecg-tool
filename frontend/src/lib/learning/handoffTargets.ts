@@ -25,10 +25,11 @@ const ALIAS_RULES: AliasRule[] = [
   { pattern: /tachycardia_with_pulse|palpitations_tachycardia|tachyarrhythmia|tachycardia_matrix|irregular_narrow/, candidates: ["atrial_fibrillation", "supraventricular_tachycardia", "atrial_flutter"], rationale: "the vetted tachyarrhythmia family supports rhythm discrimination" },
   { pattern: /sinus_vs_svt|svt_atrial_timing/, candidates: ["supraventricular_tachycardia"], rationale: "the SVT family supports the requested narrow-tachycardia contrast" },
   { pattern: /chamber|voltage|poor_r_wave|lvh_chronic/, candidates: ["left_ventricular_hypertrophy", "right_ventricular_hypertrophy", "atrial_enlargement"], rationale: "the vetted chamber/voltage family supplies the relevant morphology" },
-  { pattern: /repolarization|st_t_morphology|primary_secondary|secondary_repolarization|nonischemic_st_t/, candidates: ["nonspecific_st_t_change", "st_depression", "t_wave_inversion"], rationale: "the vetted ST–T family supports descriptive recovery-pattern work" },
+  { pattern: /repolarization|st_t_morphology|primary_secondary|secondary_repolarization|nonischemic_st_t|st_depression_t_inversion/, candidates: ["nonspecific_st_t_change", "st_depression", "t_wave_inversion"], rationale: "the vetted ST–T family supports descriptive recovery-pattern work" },
   { pattern: /medication_qt|integrated_medication_qt|wide_qrs_qt|qtc|qt_/, candidates: ["qtc_prolongation", "qt_interval"], rationale: "the QT/QTc family supplies measured interval evidence; medication action remains separately governed" },
   { pattern: /chest_pain|ischemia|contiguous_reciprocal|inferior_right_sided|anterior_lateral/, candidates: ["myocardial_ischemia", "anterior_mi", "inferior_mi"], rationale: "the ischemia/infarction family supports lead geography without creating acute timing" },
   { pattern: /infarct|posterior_mi|pathologic_q|mi$/, candidates: ["myocardial_infarction", "pathologic_q_waves", "anterior_mi"], rationale: "the established-infarction family supports chronic pattern evidence without acute timing" },
+  { pattern: /interpretation_framework|prioritized_ecg|integrated_interpretation|integrated_capstone|machine_read_audit/, candidates: ["normal_ecg"], rationale: "a complete normal 12-lead supports the grounded whole-ECG framework without inventing a pathology" },
 ];
 
 export function resolveHandoffTarget(requestedConcept: string, availableConcepts: Iterable<string>): HandoffTargetResolution | null {
@@ -42,4 +43,3 @@ export function resolveHandoffTarget(requestedConcept: string, availableConcepts
   if (!rule || !caseConcept) return null;
   return { requestedConcept, caseConcept, exact: false, rationale: rule.rationale };
 }
-

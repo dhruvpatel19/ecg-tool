@@ -9,6 +9,14 @@
   var E = global.ECG, Eng = global.Engines, T = global.Tutor, NV = global.NVCard;
   function el(tag, cls, html) { var d = document.createElement(tag); if (cls) d.className = cls; if (html != null) d.innerHTML = html; return d; }
   function add(root, cls, html) { var d = el('div', cls, html); root.appendChild(d); return d; }
+  function realCase(category, index) {
+    var c = global.pickCase && global.pickCase(category, index || 0);
+    if (!c) throw new Error('Verified PTB Foundations case unavailable for ' + category + '[' + (index || 0) + ']');
+    return c;
+  }
+  function modelDisclosure(root, copy) {
+    return add(root, 'model-disclosure', '<b>Interactive mechanism schematic — not a patient ECG.</b> ' + copy + ' Scored patient-trace work on this page uses the identified real PTB ECGs.');
+  }
   // A quiet "you've got this section" cue — not a gamified score chip.
   function masteryBar(root, label) {
     var m = add(root, 'lesson-done', '<span class="ld-tick">✓</span><span>Nice — you’ve got <b>' + label + '</b>. Continue when you’re ready.</span>');
@@ -41,7 +49,8 @@
     id: 'S0', part: 1, title: 'A gentle start', sub: 'what an ECG even is',
     mount: function (root, ctx) {
       T.clear(); T.setScope('intro');
-      add(root, 'hero', '<div class="hero-beat">' + E.renderLead('II', E.params({ rate: 66 }), { w: 620, h: 150, cal: true }) + '</div>' +
+      var introCase = realCase('normal', 0);
+      add(root, 'hero', '<div class="hero-beat"><div class="real-case-label">Real PTB-XL ECG ' + introCase.ecg_id + ' · lead II</div>' + E.renderRealStrip(introCase.lead_ii, 50, { w: 620, h: 150 }) + '</div>' +
         '<h2 class="hero-h">An ECG is the heart’s electrical signal, drawn over time.</h2>' +
         '<p class="hero-p">In Foundations you’ll learn the <b>beginner sweep</b>, start to finish: find the main waves, measure the basics, and <b>describe</b> what the tracing supports — one piece at a time. No prior knowledge needed. ' +
         'Clinical meaning, diagnoses, and urgency come in later modules.</p>');
@@ -65,6 +74,7 @@
     mount: function (root, ctx) {
       T.clear(); T.setScope('waves: P, QRS, T');
       add(root, 'lead-note', 'Watch the electrical wave sweep the heart and <b>draw the tracing in real time</b>. Then you’ll name the three parts.');
+      modelDisclosure(root, 'This controllable drawing separates P, QRS, and T so their sequence can be learned before marking them on real tracings.');
       var host = add(root, 'wf-host');
       var m = masteryBar(root, 'the waves');
       Eng.wavefront(host, {
@@ -120,22 +130,18 @@
       var m = masteryBar(root, 'quality check');
       var grid = add(root, 'classify-grid');
       // Real clean strips (acceptable-quality normals) vs real noisy strips (poor-quality records).
-      var cleanCs = [global.pickCase && global.pickCase('normal', 0), global.pickCase && global.pickCase('brady', 0)].filter(Boolean);
+      var cleanCs = [realCase('normal', 0), realCase('brady', 0)];
       var noisyCs = (global.CASES_BY && global.CASES_BY.noisy) || [];
       var cases = [];
       if (cleanCs[0] && cleanCs[0].lead_ii) cases.push({ strip: cleanCs[0].lead_ii, clean: true });
       if (noisyCs[0]) cases.push({ strip: noisyCs[0].lead_ii, clean: false });
       if (cleanCs[1] && cleanCs[1].lead_ii) cases.push({ strip: cleanCs[1].lead_ii, clean: true });
       if (noisyCs[1]) cases.push({ strip: noisyCs[1].lead_ii, clean: false });
-      // fallback to synthetic if data missing
-      if (cases.length < 2) cases = [
-        { p: E.params({ rate: 70, artifact: 0 }), clean: true }, { p: E.params({ rate: 75, artifact: 1.0 }), clean: false },
-        { p: E.params({ rate: 64, artifact: 0 }), clean: true }, { p: E.params({ rate: 80, artifact: 0.85 }), clean: false }
-      ];
+      if (cases.length !== 4) throw new Error('Verified PTB quality examples are incomplete');
       var rights = 0;   // must get them all right (wrong cards can be re-tagged) — the scene's own lesson
       cases.forEach(function (c, i) {
         var card = el('div', 'classify-card');
-        card.innerHTML = (c.strip ? E.renderRealStrip(c.strip, 50, { w: 300, h: 96, leadLabel: false }) : E.renderLead('II', c.p, { w: 300, h: 96, cal: false, leadLabel: false })) +
+        card.innerHTML = E.renderRealStrip(c.strip, 50, { w: 300, h: 96, leadLabel: false }) +
           '<div class="row classify-btns"><button data-v="clean" aria-label="Strip ' + (i + 1) + ': readable">Readable</button><button data-v="noise" aria-label="Strip ' + (i + 1) + ': too noisy">Too noisy</button></div>';
         grid.appendChild(card);
         card.querySelectorAll('button').forEach(function (b) {
@@ -177,8 +183,9 @@
         { label: 'Still use 300 ÷ big boxes', fb: 'The 300-rule assumes even spacing — for an irregular rhythm, count beats in 6 s × 10.' }
       ], function () { irregOK = true; maybeDone(); });
       var host = add(root, 'measure-host');
+      modelDisclosure(root, 'The spacing slider is a ruler demonstration; the rate answer beneath it is graded on a real PTB rhythm strip.');
       T.say('Drag the spacing slider and feel it: closer R’s = faster. Then estimate the rate yourself and compare with the printed value on the quiz strip. Within ~10–12 bpm is a good beginner estimate.');
-      Eng.rateLab(host, { quizCase: (global.pickCase && global.pickCase('tachy', 0)), onScore: function (ok) { if (ok) { rateOK = true; maybeDone(); } } });
+      Eng.rateLab(host, { quizCase: realCase('tachy', 0), onScore: function (ok) { if (ok) { rateOK = true; maybeDone(); } } });
     }
   });
 
@@ -192,14 +199,14 @@
       var m = masteryBar(root, 'rhythm / sinus');
       var grid = add(root, 'classify-grid');
       var cases = [
-        { p: E.params({ rate: 72 }), sinus: true, why: 'Upright P before every QRS, same shape, steady PR — sinus.' },
-        { p: E.params({ rate: 46 }), sinus: true, why: 'Slow, yes — but every P still conducts, upright and uniform. This is a <b>sinus pattern with a slow rate</b> (later called sinus bradycardia). Slow ≠ not-sinus.' },
-        { p: E.params({ rate: 84, pMorph: 0.4, pAxis: -40 }), sinus: false, why: 'Look closely at the P here — it’s <b>inverted in lead II</b> and its shape shifts beat to beat. That breaks two of the sinus rules (P upright in II, same shape every beat), so it isn’t sinus. (What it actually <i>is</i> gets its own module.)' }
+        { caseObj: realCase('normal', 0), sinus: true, why: 'A consistent upright P precedes each QRS with a steady relationship — sinus pattern.' },
+        { caseObj: realCase('brady', 0), sinus: true, why: 'Slow, yes — but the repeated P–QRS relationship remains sinus. Slow ≠ not-sinus.' },
+        { caseObj: realCase('non_sinus', 0), sinus: false, why: 'There is no consistent, repeatable P-before-every-QRS pattern. That fails the sinus checklist; the exact rhythm is taught later.' }
       ];
       var done = 0;
       cases.forEach(function (c) {
         var card = el('div', 'classify-card');
-        card.innerHTML = E.renderLead('II', c.p, { w: 300, h: 100, cal: false }) +
+        card.innerHTML = '<div class="real-case-label">Real PTB-XL ECG ' + c.caseObj.ecg_id + ' · lead II</div>' + E.renderRealStrip(c.caseObj.lead_ii, 50, { w: 300, h: 100 }) +
           '<div class="row classify-btns"><button data-v="1">Sinus pattern</button><button data-v="0">Not sinus pattern</button></div>';
         grid.appendChild(card);
         card.querySelectorAll('button').forEach(function (b) {
@@ -231,20 +238,20 @@
       T.clear(); T.setScope('PR and QRS intervals');
       add(root, 'lead-note', 'Now that you can find P and QRS, you can measure from the <b>start of P to the start of QRS</b> (the PR), and across the QRS itself. Two intervals you try to measure on every <i>readable</i> ECG: span each one and read the boxes, then compare with the printed value.');
       var m = masteryBar(root, 'intervals');
-      var prCase = global.pickCase && global.pickCase('normal', 0);
-      var qrsCase = global.pickCase && (global.pickCase('wide_qrs', 2) || global.pickCase('wide_qrs', 0));
+      var prCase = realCase('normal', 0);
+      var qrsCase = realCase('wide_qrs', 2);
       var step1 = add(root, 'step', '<div class="step-h">1 · PR interval <span class="sec">(start of P → start of QRS)</span></div>');
       var prDone = false, qrsDone = false;
       Eng.intervalHandle(step1, {
-        which: 'PR', caseObj: prCase, params: E.params({ pr: 160 }),
-        onScore: function (ok, ms, attempts) { ctx.evidence({ interactionId: 's6-pr-calipers', concept: 'pr_interval', subskills: ['measure'], correct: ok, score: ok ? 1 : 0.35, attempts: attempts, caseId: prCase && prCase.ecg_id, caseProvenance: prCase ? 'real_eligible' : 'authored_simulation', caseEligible: !!prCase }); if (ok && !prDone) { prDone = true; NV.reveal(['pr']); showQRS(); maybeDone(); } }
+        which: 'PR', caseObj: prCase,
+        onScore: function (ok, ms, attempts) { ctx.evidence({ interactionId: 's6-pr-calipers', concept: 'pr_interval', subskills: ['measure'], correct: ok, score: ok ? 1 : 0.35, attempts: attempts, caseId: prCase.ecg_id, caseProvenance: 'real_eligible', caseEligible: true }); if (ok && !prDone) { prDone = true; NV.reveal(['pr']); showQRS(); maybeDone(); } }
       });
       function showQRS() {
         if (root.querySelector('#qrsStep')) return;
         var s2 = add(root, 'step'); s2.id = 'qrsStep';
         s2.innerHTML = '<div class="step-h">2 · QRS duration <span class="sec">(start of the first deflection → return to baseline)</span></div>';
-        T.say('PR done. Now the <b>QRS</b>' + (qrsCase ? ' on a real beat that runs wide' : '') + ' — we’ll just describe it as "wide" (the cause is a later module).');
-        Eng.intervalHandle(s2, { which: 'QRS', caseObj: qrsCase, params: E.params({ qrs: 130 }), onScore: function (ok, ms, attempts) { ctx.evidence({ interactionId: 's6-qrs-calipers', concept: 'qrs_duration', subskills: ['measure'], correct: ok, score: ok ? 1 : 0.35, attempts: attempts, caseId: qrsCase && qrsCase.ecg_id, caseProvenance: qrsCase ? 'real_eligible' : 'authored_simulation', caseEligible: !!qrsCase }); if (ok && !qrsDone) { qrsDone = true; NV.reveal(['qrs']); maybeDone(); } } });
+        T.say('PR done. Now the <b>QRS</b> on a real beat that runs wide — we’ll just describe it as "wide" (the cause is a later module).');
+        Eng.intervalHandle(s2, { which: 'QRS', caseObj: qrsCase, onScore: function (ok, ms, attempts) { ctx.evidence({ interactionId: 's6-qrs-calipers', concept: 'qrs_duration', subskills: ['measure'], correct: ok, score: ok ? 1 : 0.35, attempts: attempts, caseId: qrsCase.ecg_id, caseProvenance: 'real_eligible', caseEligible: true }); if (ok && !qrsDone) { qrsDone = true; NV.reveal(['qrs']); maybeDone(); } } });
       }
       function maybeDone() { if (prDone && qrsDone) { m.hidden = false; ctx.complete(); T.say('You can now measure both — and describe "long PR" / "wide QRS" without needing to know yet what they mean.'); } }
       T.say('Move the two handles to span the <b>PR</b>. Drag or tap, use the marker buttons, or focus a handle and press the arrow keys. The bar turns green inside the normal range (120–200 ms).');
@@ -257,6 +264,7 @@
     mount: function (root, ctx) {
       T.clear(); T.setScope('ST segment, T wave, normal template');
       add(root, 'lead-note', 'The last pieces: the <b>ST segment</b> (from the end of the QRS — the <b>J point</b> — toward the T) and the <b>T wave</b>. Then we’ll assemble a simple picture of a <b>normal-appearing</b> beat.');
+      modelDisclosure(root, 'The movable baseline/ST activity isolates one component for mechanism learning; the reference beat revealed afterward is real PTB data.');
       var m = masteryBar(root, 'segments + reference');
       var base = add(root, 'step', '<div class="step-h">1 · Tap the baseline — choose the reference first</div>');
       var stOk = false, baselineDone = false;
@@ -276,9 +284,10 @@
       }
       function showTemplate() {
         if (root.querySelector('#tmpl')) return;
+        var templateCase = realCase('normal', 0);
         var box = add(root, 'template'); box.id = 'tmpl';
-        box.innerHTML = '<div class="step-h">A simple normal reference — later modules compare findings against this</div>' +
-          E.renderLead('II', E.params({ rate: 70 }), { w: 520, h: 160, cal: false }) +
+        box.innerHTML = '<div class="step-h">A real normal reference — PTB-XL ECG ' + templateCase.ecg_id + '</div>' +
+          E.renderRealStrip(templateCase.lead_ii, 50, { w: 520, h: 160 }) +
           '<ul class="tmpl-list">' +
           '<li><b>P</b> small &amp; upright (in II)</li>' +
           '<li><b>PR</b> 120–200 ms</li>' +
@@ -300,13 +309,13 @@
     id: 'S8', part: 3, title: 'One lead → twelve', sub: '12 views + R-wave progression',
     mount: function (root, ctx) {
       T.clear(); T.setScope('12-lead layout, R-wave progression, aVR');
-      var real = (global.pickCase && global.pickCase('normal', 1)) || null;
+      var real = realCase('normal', 1);
       add(root, 'lead-note', 'Twelve leads = <b>twelve cameras</b> on the same beats — different views recorded at the <i>same time</i>, not twelve separate events. One quick orientation now: how the <b>R wave grows</b> across V1→V6 (and a glance at aVR). <span class="sec">(Which camera sees which wall is a later module' + (real ? '; this is real ECG ' + real.ecg_id : '') + '.)</span>');
       var m = masteryBar(root, '12-lead + R-wave');
       // The interactive task first (kept above the fold); the dense 12-lead goes below as reference.
-      var host = add(root, 'measure-host', '<div class="step-h">1 · R-wave progression — scrub V1 → V6 ' + (real ? '<span class="sec">(real precordial leads)</span>' : '') + '</div>');
+      var host = add(root, 'measure-host', '<div class="step-h">1 · R-wave progression — scrub V1 → V6 <span class="sec">(real precordial leads)</span></div>');
       var done = function (transLead) {
-        ctx.evidence({ interactionId: 's8-r-wave-scrub', concept: 'r_wave_progression', subskills: ['localize', 'discriminate'], correct: true, score: 1, attempts: 1, caseId: real && real.ecg_id, caseProvenance: real ? 'real_eligible' : 'authored_simulation', caseEligible: !!real });
+        ctx.evidence({ interactionId: 's8-r-wave-scrub', concept: 'r_wave_progression', subskills: ['localize', 'discriminate'], correct: true, score: 1, attempts: 1, caseId: real.ecg_id, caseProvenance: 'real_eligible', caseEligible: true });
         NV.reveal(['rwave']);
         var leads = ['V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
         var i = leads.indexOf(transLead); if (i < 1) i = 3;        // fallback to V4 if unknown
@@ -314,10 +323,10 @@
         var opts = trio.map(function (l) { return l === leads[i] ? { label: l, correct: true, fb: '✓ Right — that’s where R first became taller than S (the transition).' } : { label: l }; });
         miniCheck(root, 'On this tracing, which lead was the first where R became taller than S (the transition)?', opts, function () { m.hidden = false; ctx.complete(); });
       };
-      if (real && real.median && real.median.V3) Eng.rwaveScrubReal(host, real, { onDone: done });
-      else Eng.rwaveScrub(host, { onDone: done });
+      if (!real.median || !real.median.V3) throw new Error('Verified PTB precordial median beats are incomplete');
+      Eng.rwaveScrubReal(host, real, { onDone: done });
       add(root, 'aside', '<b>Also — the aVR glance.</b> For the sinus check, the <b>P wave</b> in aVR usually points <b>down</b>. The QRS and T often point down too, because aVR looks from the opposite shoulder.');
-      add(root, 'twelve', '<div class="step-h">The full 12-lead <span class="sec">— for reference; glance, don’t measure</span></div>' + (real ? E.render12Real(real, {}) : E.render12(E.params({ rate: 72 }), {})));
+      add(root, 'twelve', '<div class="step-h">The full 12-lead <span class="sec">— real PTB-XL ECG ' + real.ecg_id + '; glance, don’t measure</span></div>' + E.render12Real(real, {}));
       T.say('Step through V1→V6 with the slider, lead buttons, or Previous/Next — watch the R grow and the S shrink (transition often around V3–V4). Then glance at the full 12-lead below and notice aVR pointing the opposite way.');
     }
   });
@@ -328,6 +337,7 @@
     mount: function (root, ctx) {
       T.clear(); T.setScope('cardiac axis basics');
       add(root, 'lead-note', 'With the 12 leads as 12 views, the <b>axis</b> is the overall direction they reveal — the net direction the ventricles depolarize, as one arrow. It sits down-and-left in most hearts (the big left ventricle dominates). Quick read off the limb leads: <b>I up + aVF up = normal</b>; I up but aVF down = <b>leftward</b> (call it left axis only when it’s clearly past the normal zone); I down + aVF up = <b>right axis</b>.');
+      modelDisclosure(root, 'The rotatable vector predicts lead polarity; it is a physics diagram, not a diagnostic tracing.');
       var m = masteryBar(root, 'the idea of axis direction');
       var host = add(root, 'axis-host');
       var track = add(root, 'zone-track', '<b>Explore both:</b> <span class="zt" data-z="normal">○ normal (green)</span> <span class="zt" data-z="off">○ left / right axis (amber–red)</span>');
@@ -382,21 +392,18 @@
           { rail: 6, say: '<b>Synthesis:</b> "' + synth + '" — all <i>described</i>, nothing diagnosed yet.' }
         ];
       }
-      var nbCase = global.pickCase && global.pickCase('normal', 0);
-      var devCase = global.pickCase && (global.pickCase('wide_qrs', 1) || global.pickCase('long_pr', 0) || global.pickCase('tachy', 0));
-      var cases = [];
-      if (nbCase) cases.push({ caseObj: nbCase, steps: caseSteps(nbCase) });
-      if (devCase) cases.push({ caseObj: devCase, steps: caseSteps(devCase) });
-      if (!cases.length) cases.push({ p: E.params({ rate: 72 }), steps: [{ rail: 6, say: '<b>Synthesis:</b> normal sinus, ~72.' }] });
+      var nbCase = realCase('normal', 0);
+      var devCase = realCase('wide_qrs', 1);
+      var cases = [{ caseObj: nbCase, steps: caseSteps(nbCase) }, { caseObj: devCase, steps: caseSteps(devCase) }];
       var ci = 0;
       function runCase() {
         var c = cases[ci];
         var view = root.querySelector('#sweepView') || add(root, 'sweep-view'); view.id = 'sweepView';
-        var head = function () { return '<div class="sec">Case ' + (ci + 1) + ' of ' + cases.length + (c.caseObj ? ' · real ECG ' + c.caseObj.ecg_id : '') + '</div>'; };
-        var draw = function (hl) { return head() + (c.caseObj ? E.render12Real(c.caseObj, hl ? { highlight: hl } : {}) : E.render12(c.p, hl ? { highlight: hl } : {})); };
+        var head = function () { return '<div class="sec">Case ' + (ci + 1) + ' of ' + cases.length + ' · real PTB-XL ECG ' + c.caseObj.ecg_id + '</div>'; };
+        var draw = function (hl) { return head() + E.render12Real(c.caseObj, hl ? { highlight: hl } : {}); };
         view.innerHTML = draw();
         var si = 0;
-        T.say('Here’s case ' + (ci + 1) + (c.caseObj ? ' (real ECG ' + c.caseObj.ecg_id + ')' : '') + '. Step through the sweep with the buttons <b>right under the ECG</b> — each reveal shows the finding and its evidence (predict first where it asks).');
+        T.say('Here’s case ' + (ci + 1) + ' (real PTB-XL ECG ' + c.caseObj.ecg_id + '). Step through the sweep with the buttons <b>right under the ECG</b> — each reveal shows the finding and its evidence (predict first where it asks).');
         nextStep();
         function nextStep() {
           if (si >= c.steps.length) { ci++; if (ci < cases.length) { T.say('Now a second one — this time spot the differences as I read.'); runCase(); } else { m.hidden = false; ctx.complete(); T.say('That’s the model. Your turn next — you’ll do the sweep with me coaching each step.'); } return; }
@@ -436,15 +443,9 @@
       add(root, 'lead-note', 'Now you run the sweep, step by step. I’ll prompt you — and I’ll ease off as you go.');
       var m = masteryBar(root, 'guided read');
       // Real cases: a clean normal (full scaffold) then a real deviation (lighter).
-      var gc1 = global.pickCase && global.pickCase('normal', 2);
-      var gc2 = global.pickCase && (global.pickCase('left_axis', 0) || global.pickCase('long_pr', 1) || global.pickCase('tachy', 1));
-      var cases = [];
-      if (gc1) cases.push({ caseObj: gc1, truth: E.caseTruth(gc1) });
-      if (gc2) cases.push({ caseObj: gc2, truth: E.caseTruth(gc2) });
-      if (!cases.length) cases = [
-        { p: E.params({ rate: 60 }), truth: { rate: 'normal_rate', rhythm: 'sinus', axis: 'normal_axis', pr: 'normal_pr', qrs: 'normal_qrs', st: 'flat_st' } },
-        { p: E.params({ rate: 100, axis: -50 }), truth: { rate: 'tachy', rhythm: 'sinus', axis: 'left_axis', pr: 'normal_pr', qrs: 'normal_qrs', st: 'flat_st' } }
-      ];
+      var gc1 = realCase('normal', 2);
+      var gc2 = realCase('left_axis', 0);
+      var cases = [{ caseObj: gc1, truth: E.caseTruth(gc1) }, { caseObj: gc2, truth: E.caseTruth(gc2) }];
       var ci = 0;
       var stepsByCase = [
         [ // case 1 — full scaffold
@@ -464,7 +465,7 @@
       function runCase() {
         var c = cases[ci];
         var view = root.querySelector('#gView') || add(root, 'sweep-view'); view.id = 'gView';
-        view.innerHTML = '<div class="sec">Case ' + (ci + 1) + ' of ' + cases.length + ' · ' + (ci === 0 ? 'full coaching' : 'lighter coaching') + (c.caseObj ? ' · real ECG ' + c.caseObj.ecg_id : '') + '</div>' + (c.caseObj ? E.render12Real(c.caseObj, {}) : E.render12(c.p, {}));
+        view.innerHTML = '<div class="sec">Case ' + (ci + 1) + ' of ' + cases.length + ' · ' + (ci === 0 ? 'full coaching' : 'lighter coaching') + ' · real PTB-XL ECG ' + c.caseObj.ecg_id + '</div>' + E.render12Real(c.caseObj, {});
         T.say(ci === 0 ? 'Case 1. I’ll prompt each step. Answer in your own words — a number or a word is fine (e.g. “about 75, normal rate” or “PR 260, long”).' : 'Case 2 — I’ll step back a bit; you carry more of it.');
         var steps = stepsByCase[ci], si = 0;
         ask();
@@ -513,10 +514,10 @@
       add(root, 'lead-note', 'Two on your own. First with the step-rail as a checklist (no coaching), then a blank read. <b>“Not assessable”</b> is a good answer when the tracing doesn’t support a confident call. I’m here only if you ask.');
       var m = masteryBar(root, 'the foundational read');
       // case 1 — rail visible, fill each field (a real normal ECG)
-      var rc1 = global.pickCase && global.pickCase('normal', 3);
-      var truth1 = rc1 ? E.caseTruth(rc1) : { rate: 'normal_rate', rhythm: 'sinus', axis: 'normal_axis', pr: 'normal_pr', qrs: 'normal_qrs', st: 'flat_st' };
+      var rc1 = realCase('normal', 3);
+      var truth1 = E.caseTruth(rc1);
       var box1 = add(root, 'solo');
-      box1.innerHTML = '<div class="sec">Case 1 — fill each step (rail as your checklist)' + (rc1 ? ' · real ECG ' + rc1.ecg_id : '') + '</div>' + (rc1 ? E.render12Real(rc1, {}) : E.render12(E.params({ rate: 75 }), {})) +
+      box1.innerHTML = '<div class="sec">Case 1 — fill each step (rail as your checklist) · real PTB-XL ECG ' + rc1.ecg_id + '</div>' + E.render12Real(rc1, {}) +
         '<div class="solo-fields">' +
         field('rate', 'Rate') + field('rhythm', 'Rhythm') + field('axis', 'Axis') +
         field('pr', 'PR') + field('qrs', 'QRS') + field('st', 'ST / T') +
@@ -540,14 +541,14 @@
       function showCase2(acc1) {
         if (root.querySelector('#solo2')) return;
         // a real ECG that genuinely has the two target deviations (wide QRS + left axis)
-        var rc2 = global.pickCase && (global.pickCase('wide_qrs', 0) || global.pickCase('left_axis', 1));
-        var tt = rc2 ? E.caseTruth(rc2) : { rhythm: 'sinus', rate: 'tachy', axis: 'left_axis', qrs: 'wide_qrs', st: 'flat_st' };
+        var rc2 = realCase('wide_qrs', 0);
+        var tt = E.caseTruth(rc2);
         var truth2 = [tt.rhythm || 'sinus', tt.rate, tt.axis, tt.qrs, tt.st].filter(Boolean);
         // the deviations THIS real case actually has — the learner must catch these to pass
         var devLabel = { tachy: 'the fast rate', brady: 'the slow rate', left_axis: 'the left axis (lead I vs aVF)', right_axis: 'the right axis (lead I vs aVF)', long_pr: 'the long PR', wide_qrs: 'the wide QRS (measure it)' };
         var devs = [tt.rate !== 'normal_rate' ? tt.rate : null, tt.axis !== 'normal_axis' ? tt.axis : null, tt.qrs === 'wide_qrs' ? 'wide_qrs' : null, tt.pr === 'long_pr' ? 'long_pr' : null].filter(Boolean);
         var box2 = add(root, 'solo'); box2.id = 'solo2';
-        box2.innerHTML = '<div class="sec">Case 2 — blank read, one line covering rhythm, rate, axis, intervals, ST/T (order doesn’t matter — just include each part).' + (rc2 ? ' · real ECG ' + rc2.ecg_id : '') + '</div>' + (rc2 ? E.render12Real(rc2, {}) : E.render12(E.params({ rate: 110, qrs: 150, axis: -60 }), {})) +
+        box2.innerHTML = '<div class="sec">Case 2 — blank read, one line covering rhythm, rate, axis, intervals, ST/T (order doesn’t matter — just include each part). · real PTB-XL ECG ' + rc2.ecg_id + '</div>' + E.render12Real(rc2, {}) +
           '<div class="ask-row"><input id="solo2in" placeholder="your full read in one line…"><button class="accent" id="solo2go">Submit</button></div><div id="solo2fb"></div>';
         T.say('Now a blank one — no fields, no rail prompts. Describe everything you see in one line.');
         var tries = 0;

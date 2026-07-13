@@ -19,6 +19,13 @@ from .objectives import (
 from .retention import due_snapshot, parse_instant, retention_uncertainty, update_retention
 
 
+LEARNER_SCHEMA_VERSION = 1
+
+
+class SchemaCompatibilityError(RuntimeError):
+    """Raised before mutation when this binary cannot safely open the database."""
+
+
 _PATHWAY_STATUS_RANK = {
     "not-started": 0,
     "viewed": 1,
@@ -62,8 +69,12 @@ class LearningStore:
     def connect(self):
         if self._memory_conn is not None:
             with self._lock:
-                yield self._memory_conn
-                self._memory_conn.commit()
+                try:
+                    yield self._memory_conn
+                    self._memory_conn.commit()
+                except Exception:
+                    self._memory_conn.rollback()
+                    raise
             return
         # File-backed: WAL + a busy timeout so concurrent writers wait instead of
         # raising "database is locked" (V1 audit fix).
@@ -72,19 +83,45 @@ class LearningStore:
         conn.execute("PRAGMA busy_timeout=5000")
         try:
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # Learner progress is acknowledged state. FULL keeps WAL commits
+            # durable across host/persistent-disk power loss, not only process
+            # crashes; performance changes must be justified by load evidence.
+            conn.execute("PRAGMA synchronous=FULL")
         except sqlite3.OperationalError:
             pass
         try:
             yield conn
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
     def init_db(self) -> None:
         with self.connect() as conn:
+            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if current_version > LEARNER_SCHEMA_VERSION:
+                raise SchemaCompatibilityError(
+                    "learner database schema "
+                    f"{current_version} is newer than this binary's supported "
+                    f"schema {LEARNER_SCHEMA_VERSION}"
+                )
+            if current_version not in {0, LEARNER_SCHEMA_VERSION}:
+                raise SchemaCompatibilityError(
+                    f"learner database schema {current_version} has no reviewed migration "
+                    f"to {LEARNER_SCHEMA_VERSION}"
+                )
             conn.executescript(
                 """
+                BEGIN IMMEDIATE;
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    description TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS learner_profiles (
                     learner_id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
@@ -456,6 +493,17 @@ class LearningStore:
             for name, declaration in additive_retention_columns.items():
                 if name not in subskill_columns:
                     conn.execute(f"ALTER TABLE subskill_mastery ADD COLUMN {name} {declaration}")
+
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at, description) "
+                "VALUES (?, ?, ?)",
+                (
+                    LEARNER_SCHEMA_VERSION,
+                    utc_now(),
+                    "Versioned baseline for the complete learner/auth/mode schema",
+                ),
+            )
+            conn.execute(f"PRAGMA user_version={LEARNER_SCHEMA_VERSION}")
 
     def ensure_profile(self, learner_id: str = "demo", display_name: str | None = None) -> dict[str, Any]:
         now = utc_now()

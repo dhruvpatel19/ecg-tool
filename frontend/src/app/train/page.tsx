@@ -927,7 +927,7 @@ export default function TrainPage() {
                   Focused campaign · {currentSlot ? `Case ${currentSlot.position + 1}` : `${committedCount} cases`} of {campaign.length.toLocaleString()}
                 </p>
                 <h2>{activeRecipe.label}</h2>
-                <p className="muted">{activeRecipe.purpose}. Early exposures are labeled practice. In transfer, only an exact waveform localization or measurement can earn an independent receipt; every other response remains formative.</p>
+                <p className="muted">{activeRecipe.purpose}. Early exposures are labeled practice. In transfer, only an exact server-graded localization, measurement, contrast, mechanism, or confidence task can earn an independent receipt; every other response remains formative.</p>
               </div>
               <strong>{committedCount.toLocaleString()}/{campaign.length.toLocaleString()} committed</strong>
             </div>
@@ -1255,7 +1255,7 @@ export default function TrainPage() {
               <p className="eyebrow">Campaign complete · durable evidence debrief</p>
               <h2>{sessionCorrect.toLocaleString()}/{campaign.length.toLocaleString()} competency gates met</h2>
               <p className="muted">
-                A gate requires the target decision and the selected {trainingSubskill.replaceAll("_", " ")} evidence. Build, mimic, negative, and non-trace responses remain formative; {independentReceipts} exact trace-native transfer receipt{independentReceipts === 1 ? "" : "s"} cleared the evidence ceiling.
+                A gate requires the target decision and the selected {trainingSubskill.replaceAll("_", " ")} evidence. Build, mimic, negative, and unsupported responses remain formative; {independentReceipts} exact server-graded transfer receipt{independentReceipts === 1 ? "" : "s"} cleared the evidence ceiling.
               </p>
               <div className="train-debrief-grid">
                 {PHASE_SUMMARY.map((item) => {

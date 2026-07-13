@@ -1,8 +1,8 @@
 # Copy to terraform.tfvars and replace every example. Never put a secret value
 # in this file; Secret Manager versions are added through an out-of-band step.
 project_id = "your-gcp-project"
-region     = "us-east4"
-zone       = "us-east4-b"
+region     = "us-east1"
+zone       = "us-east1-b"
 
 environment = "demo"
 name_prefix = "ecg-tool"
@@ -47,12 +47,26 @@ artifact_repository_id = "ecg-tool-backend"
 backend_image           = ""
 artifact_delete_after_days = 90
 artifact_keep_recent_count  = 10
+# Add the previous deployed digest here before changing backend_image so cleanup
+# cannot remove the explicitly retained recovery artifact.
+artifact_recovery_image_digests = []
 # Required final shape:
-# backend_image = "us-east4-docker.pkg.dev/your-gcp-project/ecg-tool-backend/backend@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# backend_image = "us-east1-docker.pkg.dev/your-gcp-project/ecg-tool-backend/backend@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 # The image or another explicit operator step must stage this trusted script.
 # Startup will not clone a repository or download executable code.
 startup_install_script_path = "/opt/ecg-tool/deploy/gcp/scripts/install-host.sh"
+
+# Reviewed controlled-demo shape. It preserves all application features but is
+# capacity-limited; move back to e2-medium/pd-balanced after measured pressure.
+machine_type      = "e2-small"
+boot_disk_size_gb = 20
+boot_disk_type    = "pd-standard"
+data_disk_size_gb = 20
+data_disk_type    = "pd-standard"
+backend_memory_limit_mb       = 1536
+backend_memory_reservation_mb = 1024
+backend_cpu_limit             = 1.5
 runtime_config_path          = "/etc/ecg/deployment.env"
 data_mount_path              = "/srv/ecg-data"
 # Required for the first boot of the new Terraform-created blank disk. The
