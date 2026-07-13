@@ -1,0 +1,40 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rapid 2 — Name the rhythm</title><link rel="stylesheet" href="style.css"></head>
+<body><div class="wrap">
+<div class="row" style="justify-content:space-between"><h1>Rapid recognition — name the rhythm</h1><span class="pill" id="streak">streak 0</span></div>
+<div class="muted">Type what you see in your own words — the tutor grades the call <em>and</em> your precision.</div>
+<div class="soft" style="margin-top:10px"><div id="stem" class="sec" style="margin-bottom:4px"></div><div id="strip"></div></div>
+<div class="row" style="margin-top:10px"><input id="ans" placeholder="e.g. irregularly irregular, no P waves…" autocomplete="off"><button class="accent" id="go">Call it</button></div>
+<div id="conv" class="chat" style="margin-top:10px"></div>
+</div>
+<script src="shared.js"></script>
+<script>
+var cases=[
+ {stem:"71M, palpitations, irregular pulse.",gen:"afib",dx:"Atrial fibrillation",
+  accept:["atrial fib","afib","a-fib","a fib","af"],near:{"irregular":"You clocked the irregularity — now name it.","no p":"Right, no organized P's — that's the clue.","fibrill":"Almost — say the full name."},
+  teach:"Irregularly irregular, no discrete P waves, fibrillatory baseline."},
+ {stem:"63F, fluttering sensation, HR ~150.",gen:"flutter",dx:"Atrial flutter",
+  accept:["flutter"],near:{"sawtooth":"You saw the sawtooth — that IS flutter, name it.","tach":"It's fast, yes, but be specific about the atrial activity.","svt":"Reasonable instinct, but look at the baseline — sawtooth flutter waves."},
+  teach:"Sawtooth flutter waves, often 2:1 conduction → ~150 ventricular rate."},
+ {stem:"58M, lightheaded, wide fast rhythm.",gen:"vt",dx:"Ventricular tachycardia",
+  accept:["ventricular tach","v tach","vtach","vt"],near:{"wide":"Wide + fast + regular — push it to the actual name.","tach":"Be specific: wide-complex tachycardia is VT until proven otherwise."},
+  teach:"Wide, fast, regular, monomorphic — treat as VT."},
+ {stem:"24F, asymptomatic, routine ECG.",gen:"sinus",dx:"Normal sinus rhythm",
+  accept:["sinus","nsr","normal"],near:{"regular":"Regular, yes — and the P-QRS relationship makes it…"},
+  teach:"P before every QRS, rate ~75, narrow QRS."}
+];
+var i=-1,streak=0;var conv=document.getElementById('conv'),inp=document.getElementById('ans');
+function ai(h){var d=document.createElement('div');d.className='msg ai';d.innerHTML='<span class="who">AI tutor</span><div class="body">'+h+'</div>';conv.appendChild(d);conv.scrollTop=1e9;}
+function you(t){var d=document.createElement('div');d.className='msg you';d.innerHTML='<span class="who">You</span><div class="body">'+t+'</div>';conv.appendChild(d);conv.scrollTop=1e9;}
+function ch(o){var w=document.createElement('div');w.className='row';o.forEach(function(x){var b=document.createElement('button');b.innerHTML=x.label;b.onclick=function(){w.remove();x.go();};w.appendChild(b);});conv.appendChild(w);}
+function next(){i=(i+1)%cases.length;var c=cases[i];document.getElementById('stem').textContent=c.stem;document.getElementById('strip').innerHTML=ECG.strip(c.gen,{w:640,h:120});inp.value='';inp.disabled=false;document.getElementById('go').disabled=false;inp.focus();}
+function grade(){var c=cases[i],raw=inp.value.trim();if(!raw)return;you(raw);var t=raw.toLowerCase();inp.disabled=true;document.getElementById('go').disabled=true;
+ if(c.accept.some(function(a){return t.indexOf(a)>=0;})){streak++;ai("Yes — <b>"+c.dx+"</b>. "+c.teach);}
+ else{var hit=null;for(var k in c.near){if(t.indexOf(k)>=0){hit=c.near[k];break;}}streak=0;
+   if(hit)ai(hit+" It's <b>"+c.dx+"</b>. "+c.teach);
+   else ai("Not quite — this is <b>"+c.dx+"</b>. "+c.teach+" <span class='sec'>Tip: describe rate, regularity, P waves, QRS width — the name follows.</span>");}
+ document.getElementById('streak').textContent='streak '+streak;
+ ch([{label:'Why?',go:function(){ai(c.teach+" Ask yourself: regular or not? P waves? narrow or wide? — those three pin almost every rhythm.");}},{label:'Next ▸',go:next}]);}
+document.getElementById('go').onclick=grade;inp.addEventListener('keydown',function(e){if(e.key==='Enter')grade();});
+ai("I'll show a strip; you type the rhythm in plain words. I'll grade the call and tighten your wording. Ready — first one's up.");next();
+</script></body></html>

@@ -1,0 +1,1 @@
+"""ECG learning platform backend."""

@@ -1,0 +1,10 @@
+# `public/foundations/` is a checked-in deployment snapshot of the canonical
+# repo-root module. `scripts/sync-foundations.mjs` refreshes it whenever the
+# canonical source is available, while Vercel can build from `frontend/` alone.
+
+# Playwright E2E artifacts
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/.last-run.json

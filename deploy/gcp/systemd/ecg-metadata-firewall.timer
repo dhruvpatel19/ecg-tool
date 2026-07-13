@@ -1,0 +1,12 @@
+[Unit]
+Description=Continuously reconcile TRACE backend metadata-server isolation
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=ecg-metadata-firewall.service
+
+[Install]
+WantedBy=timers.target

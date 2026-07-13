@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Concept drill — AV conduction</title><link rel="stylesheet" href="style.css"></head>
+<body><div class="wrap">
+<div class="row" style="justify-content:space-between"><h1>Nail it — AV conduction</h1><span class="pill" id="run">0 in a row</span></div>
+<div class="muted">Massed practice: one concept, back-to-back, until it's automatic. The tutor drills the discriminator.</div>
+<div style="height:8px;background:var(--surface-1);border-radius:6px;overflow:hidden;margin:10px 0"><div id="bar" style="height:100%;width:0%;background:var(--text-success);transition:width .3s"></div></div>
+<div class="soft"><div class="sec" id="stem" style="margin-bottom:4px">Lead II</div><div id="strip"></div></div>
+<div class="row" id="acts" style="margin-top:12px"><button data-a="normal">Normal conduction</button><button data-a="first">1° block (long PR)</button><button data-a="third">3° block (dissociation)</button></div>
+<div id="fb" style="min-height:22px;margin-top:8px"></div>
+</div>
+<script src="shared.js"></script>
+<script>
+var pool=[
+ {gen:"sinus",a:"normal",coach:"Every P → a QRS at a constant, normal PR. Conducting fine."},
+ {gen:"brady",a:"normal",coach:"Slow — but every P still conducts at a constant PR. Sinus bradycardia, NOT block. Slow ≠ blocked."},
+ {gen:"first_degree",a:"first",coach:"Every P conducts, but the PR is long and constant (>200 ms). That's first-degree."},
+ {gen:"chb",a:"third",coach:"P's and QRS's march independently — none conduct. Complete (third-degree) block."}
+];
+var lbl={normal:"Normal conduction",first:"First-degree block",third:"Third-degree block"};
+var TARGET=6,run=0,cur;
+var strip=document.getElementById('strip'),fb=document.getElementById('fb'),bar=document.getElementById('bar');
+function ai(h,cls){fb.innerHTML='<div class="fb '+(cls||'')+'">'+h+'</div>';}
+function btns(on){document.querySelectorAll('#acts button').forEach(function(b){b.disabled=!on;});}
+function next(){cur=pool[Math.floor(Math.random()*pool.length)];strip.innerHTML=ECG.strip(cur.gen,{w:640,h:120});fb.innerHTML='';btns(true);}
+function answer(a){btns(false);var ok=a===cur.a;
+ if(ok){run++;ai("✓ "+cur.coach,'ok');}else{run=0;ai("That was <b>"+lbl[cur.a]+"</b>. "+cur.coach+" <span class='sec'>Ask every time: does each P conduct, and is the PR constant?</span>",'bad');}
+ document.getElementById('run').textContent=run+' in a row';bar.style.width=Math.min(100,100*run/TARGET)+'%';
+ if(run>=TARGET){ai("Locked in — "+TARGET+" straight. You can tell normal, delayed, and dissociated apart on sight. Mastery: AV conduction ↑.",'ok');setTimeout(function(){run=0;bar.style.width='0%';document.getElementById('run').textContent='0 in a row';next();},2600);}
+ else setTimeout(next,1700);}
+document.querySelectorAll('#acts button').forEach(function(b){b.onclick=function(){answer(b.getAttribute('data-a'));};});
+next();
+</script></body></html>

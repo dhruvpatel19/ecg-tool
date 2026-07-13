@@ -1,0 +1,40 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tutorial B — Animated concept (hyperkalemia)</title><link rel="stylesheet" href="style.css"></head>
+<body><div class="wrap">
+<h1>Hyperkalemia — watch it evolve</h1><div class="muted">Tutorial B · manipulate-and-observe — drive the physiology yourself</div>
+<div class="grid2" style="margin-top:12px">
+  <div class="soft">
+    <div class="row" style="justify-content:space-between"><div class="sec">Lead II</div><div><b id="kval" style="font-size:18px">5.0</b> <span class="muted">mmol/L K⁺</span></div></div>
+    <svg viewBox="0 0 480 120" role="img" aria-label="ECG morphing with potassium"><g stroke="var(--grid)" stroke-width="0.6"><line x1="0" y1="30" x2="480" y2="30"/><line x1="0" y1="60" x2="480" y2="60"/><line x1="0" y1="90" x2="480" y2="90"/></g>
+      <polyline id="trace" points="" fill="none" stroke="var(--trace)" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    <input type="range" id="k" min="40" max="92" value="50" step="1" style="margin-top:10px">
+    <div class="row" style="justify-content:space-between;margin-top:4px"><span class="muted">4.0 normal</span><span class="muted">9.0 peri-arrest</span></div>
+    <div id="stage" class="fb" style="margin-top:8px"></div>
+  </div>
+  <div class="card" style="display:flex;flex-direction:column;min-height:300px"><div id="conv" class="chat" style="flex:1;overflow:auto"></div></div>
+</div></div>
+<script>
+function g(t,c,a,w){return a*Math.exp(-((t-c)*(t-c))/(2*w*w));}
+function yAt(k,x){var t=x%96;var pF=Math.max(0,Math.min(1,1-(k-5.4)/1.8));var qw=2.4+Math.max(0,(k-5))*1.5;var tA=11+Math.max(0,(k-5))*15;var tW=Math.max(3,7.2-Math.max(0,(k-5))*1.0);
+  var y=60+g(t,16,-7*pF,5)+g(t,42,-34,qw)+g(t,48,20,qw)+g(t,70,-tA,tW);
+  var s=Math.max(0,Math.min(1,(k-7.6)/1.6));return (1-s)*y+s*(60+18*Math.sin(x/8.5));}
+var trace=document.getElementById('trace'),kEl=document.getElementById('k'),kval=document.getElementById('kval'),stage=document.getElementById('stage'),conv=document.getElementById('conv');
+function ai(h){var d=document.createElement('div');d.className='msg ai';d.innerHTML='<span class="who">AI tutor</span><div class="body">'+h+'</div>';conv.appendChild(d);conv.scrollTop=1e9;}
+function ch(o){var w=document.createElement('div');w.className='row';o.forEach(function(x){var b=document.createElement('button');b.innerHTML=x.label;b.onclick=function(){w.remove();x.go();};w.appendChild(b);});conv.appendChild(w);}
+function draw(){var k=kEl.value/10;kval.textContent=k.toFixed(1);var p=[];for(var x=0;x<=480;x+=2)p.push(x+","+yAt(k,x).toFixed(1));trace.setAttribute('points',p.join(' '));return k;}
+var seen={};function stageFor(k){
+  if(k<5.4){stage.className='fb';stage.textContent='Normal-looking tracing.';return 'normal';}
+  if(k<6.5){stage.className='fb warn';stage.textContent='Tall, peaked, narrow-based T waves — the earliest change.';return 'peakedT';}
+  if(k<7.6){stage.className='fb warn';stage.textContent='P waves flattening, PR lengthening — conduction slowing.';return 'pflat';}
+  if(k<8.6){stage.className='fb bad';stage.textContent='QRS widening — dangerous now.';return 'wide';}
+  stage.className='fb bad';stage.textContent='Sine-wave pattern — peri-arrest. Treat immediately.';return 'sine';}
+kEl.oninput=function(){var k=draw();var st=stageFor(k);if(!seen[st]){seen[st]=1;
+  if(st=='peakedT')ai("There — feel that? The <b>T waves peaked first</b>. That's your earliest, most subtle hyperkalemia clue. Keep going.");
+  if(st=='pflat')ai("Now the <b>P waves are flattening</b> and the PR is stretching — the atria are giving up. Higher.");
+  if(st=='wide')ai("The <b>QRS is widening</b> now — this patient is in danger. What's the <em>first</em> drug you reach for?",ch([{label:'Calcium gluconate',go:function(){ai("Yes — <b>calcium</b> stabilizes the myocardium in minutes. Insulin+glucose and albuterol shift K⁺ after. Keep climbing if you dare.");}},{label:'Insulin + glucose',go:function(){ai("That shifts K⁺ but takes ~15 min. First give <b>calcium</b> to stabilize the membrane — the QRS is wide NOW.");}}]));
+  if(st=='sine')ai("<div class='fb bad'>Sine wave = peri-arrest. This is a 'call it the second you see it' pattern.</div> Now drag it back down and watch the changes reverse.");
+}};
+ai("This is one ECG, but the potassium is a dial. Drag K⁺ up slowly and tell me the <b>first</b> thing that changes. (Move the slider.)");
+draw();stageFor(5.0);
+setTimeout(function(){ch([{label:'Quiz me when I\'m done',go:function(){ai("At roughly what K⁺ did the <b>T waves first peak</b>?");ch([{label:'~5.5–6',go:function(){ai("Right — peaked T's are the early, easy-to-miss sign. Mastery: hyperkalemia ↑.");}},{label:'~8',go:function(){ai("Earlier than that — peaking starts ~5.5–6. By 8 you're into wide-QRS/sine territory.");}}]);}}]);},400);
+</script></body></html>

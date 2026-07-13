@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case 1 — Systematic read to disposition</title><link rel="stylesheet" href="style.css"></head>
+<body><div class="wrap">
+<h1>Case read — to a disposition</h1><div class="muted">Case mode · you lead the systematic sweep; the tutor connects ECG → patient → action.</div>
+<div class="card" style="margin-top:10px"><b>62M</b>, 1 hour of crushing chest pain, diaphoretic. <span class="sec">Read it, then decide what to do.</span></div>
+<div class="soft" style="margin-top:10px"><div class="sec" style="margin-bottom:4px">Inferior leads II · III · aVF &nbsp;|&nbsp; high-lateral aVL</div>
+<svg viewBox="0 0 640 200" role="img" aria-label="Inferior leads with ST elevation and reciprocal change in aVL">
+<g stroke="var(--grid)" stroke-width="0.6"><line x1="0" y1="40" x2="640" y2="40"/><line x1="0" y1="100" x2="640" y2="100"/><line x1="0" y1="160" x2="640" y2="160"/></g>
+<text x="4" y="22" style="font-size:11px;fill:var(--text-secondary)">II / III / aVF</text>
+<polyline points="6,60 70,60 80,54 92,60 108,40 116,80 130,40 150,52 175,40 196,58 220,60 280,60 290,54 302,60 318,40 326,80 340,40 360,52 385,40 406,58 430,60 490,60 500,54 512,60 528,40 536,80 550,40 570,52 595,40 616,58 640,60" fill="none" stroke="var(--trace)" stroke-width="1.6" stroke-linejoin="round"/>
+<text x="4" y="150" style="font-size:11px;fill:var(--text-secondary)">aVL</text>
+<polyline points="6,140 90,140 100,135 112,140 128,118 136,170 150,150 175,164 196,150 220,140 320,140 330,135 342,140 358,118 366,170 380,150 405,164 426,150 450,140 640,140" fill="none" stroke="var(--trace)" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+<div id="conv" class="chat" style="margin-top:10px"></div>
+</div>
+<script>
+var conv=document.getElementById('conv');
+function ai(h){var d=document.createElement('div');d.className='msg ai';d.innerHTML='<span class="who">AI tutor</span><div class="body">'+h+'</div>';conv.appendChild(d);conv.scrollTop=1e9;}
+function you(t){var d=document.createElement('div');d.className='msg you';d.innerHTML='<span class="who">You</span><div class="body">'+t+'</div>';conv.appendChild(d);conv.scrollTop=1e9;}
+function ch(o){var w=document.createElement('div');w.className='row';o.forEach(function(x){var b=document.createElement('button');if(x.cls)b.className=x.cls;b.innerHTML=x.label;b.onclick=function(){w.remove();you(x.label);x.go();};w.appendChild(b);});conv.appendChild(w);}
+function rate(){ai("Lead your read — start with rate and rhythm. What's the rate, roughly?");ch([{label:"~80, regular",go:rhythm},{label:"Fast >100",go:function(){ai("Look again at the R-R spacing — it's regular at ~80. Rate rarely the story here. Rhythm?");rhythm();}}]);}
+function rhythm(){ai("Rhythm?");ch([{label:"Sinus",go:stt},{label:"AFib",go:function(){ai("There are P's before each QRS — it's sinus. Now the part that matters: the ST segments.");stt();}}]);}
+function stt(){ai("Now scan ST/T. Anything jump out — and <em>where</em>?");ch([{label:"ST elevation in II/III/aVF",go:recip},{label:"Looks normal",go:function(){ai("Look harder at II/III/aVF — the ST segments are lifted off baseline. That's the finding. Which territory is that?");recip();}},{label:"ST elevation anterior (V leads)",go:function(){ai("Careful — the elevated leads here are II/III/aVF (inferior), not the precordials. Territory?");recip();}}]);}
+function recip(){ai("Good — <b>inferior ST elevation</b>. Now a pro move: check the mirror. What's aVL doing?");ch([{label:"Reciprocal ST depression",go:localize},{label:"Nothing",go:function(){ai("Look again — aVL is depressed, the reciprocal of the inferior injury. That reciprocal change makes this a real STEMI, not early-repol.");localize();}}]);}
+function localize(){ai("So: inferior STEMI with reciprocal change. <b>Which artery</b>, usually?");ch([{label:"RCA",go:dispo},{label:"LAD",go:function(){ai("LAD feeds the anterior wall. Inferior = RCA (or sometimes a dominant circumflex). On to the decision.");dispo();}}]);}
+function dispo(){ai("This is the whole point of reading it — <b>what do you do now?</b>");ch([{label:"Activate cath lab",cls:"success",go:win},{label:"Order a stress test",go:function(){ai("No — a stress test on an active STEMI is dangerous. Time is muscle. Right call?");ch([{label:"Activate cath lab",cls:"success",go:win}]);}},{label:"Discharge with follow-up",cls:"danger",go:function(){ai("That could kill him. Active STEMI = emergent reperfusion. Right call?");ch([{label:"Activate cath lab",cls:"success",go:win}]);}}]);}
+function win(){ai("<div class='fb ok'>Yes — emergent cath lab, aspirin now. Two connections worth keeping: (1) inferior MI → check <b>right-sided leads</b> for RV involvement; (2) if RV infarct, be careful with <b>nitrates</b> — they drop preload and can tank the BP.</div> Nicely read end-to-end: rate → rhythm → localized ST → reciprocal → artery → action.");}
+ai("You're driving — I'll only step in if you take a wrong turn. Read it like you would on the floor.");rate();
+</script></body></html>

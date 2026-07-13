@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule consistent ECG learner SQLite backups
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:17:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=ecg-sqlite-backup.service
+
+[Install]
+WantedBy=timers.target

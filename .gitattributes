@@ -1,0 +1,12 @@
+# Deployment and CI entrypoints must keep Unix line endings even when the
+# repository is prepared from Windows.
+*.sh text eol=lf
+*.tftpl text eol=lf
+*.tf text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+
+# Checked test data is binary and must never pass through text normalization.
+*.gz binary
+*.npy binary

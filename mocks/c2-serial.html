@@ -1,0 +1,39 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Case 2 — Serial comparison + present</title><link rel="stylesheet" href="style.css"></head>
+<body><div class="wrap">
+<h1>Compare with the prior — then present</h1><div class="muted">Case mode · "what's changed?" is half of real ward reading. Then hand it to the attending.</div>
+<div class="card" style="margin-top:10px"><b>59M</b>, chest pain earlier (now resolved), looks well. <span class="sec">You have today's ECG and one from last year.</span></div>
+<div class="grid2" style="margin-top:10px">
+ <div class="soft"><div class="sec">Prior (last year) — V2 · V3</div>
+  <svg viewBox="0 0 300 130" role="img" aria-label="prior precordial upright T"><g stroke="var(--grid)" stroke-width="0.6"><line x1="0" y1="35" x2="300" y2="35"/><line x1="0" y1="95" x2="300" y2="95"/></g>
+   <polyline points="6,35 40,35 50,30 60,35 76,12 86,52 100,35 124,20 140,35 160,35 200,35 210,30 220,35 236,12 246,52 260,35 284,20 300,35" fill="none" stroke="var(--trace)" stroke-width="1.6" stroke-linejoin="round"/>
+   <polyline points="6,95 40,95 50,90 60,95 76,72 86,112 100,95 124,80 140,95 160,95 200,95 210,90 220,95 236,72 246,112 260,95 284,80 300,95" fill="none" stroke="var(--trace)" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+ <div class="soft"><div class="sec">Today — V2 · V3</div>
+  <svg viewBox="0 0 300 130" role="img" aria-label="today precordial deep inverted T"><g stroke="var(--grid)" stroke-width="0.6"><line x1="0" y1="35" x2="300" y2="35"/><line x1="0" y1="95" x2="300" y2="95"/></g>
+   <polyline points="6,35 40,35 50,30 60,35 76,12 86,52 100,40 116,58 132,40 150,35 200,35 210,30 220,35 236,12 246,52 260,40 276,58 292,40 300,35" fill="none" stroke="var(--trace)" stroke-width="1.6" stroke-linejoin="round"/>
+   <polyline points="6,95 40,95 50,90 60,95 76,72 86,112 100,100 116,118 132,100 150,95 200,95 210,90 220,95 236,72 246,112 260,100 276,118 292,100 300,95" fill="none" stroke="var(--trace)" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+</div>
+<div id="conv" class="chat" style="margin-top:10px"></div>
+<div class="row" id="presentRow" style="margin-top:8px;display:none"><input id="pres" placeholder="One-line presentation: what is it + what you want…" autocomplete="off"><button class="accent" id="presgo">Present</button></div>
+</div>
+<script>
+var conv=document.getElementById('conv');
+function ai(h,who){var d=document.createElement('div');d.className='msg ai';d.innerHTML='<span class="who">'+(who||'AI tutor')+'</span><div class="body">'+h+'</div>';conv.appendChild(d);conv.scrollTop=1e9;}
+function you(t){var d=document.createElement('div');d.className='msg you';d.innerHTML='<span class="who">You</span><div class="body">'+t+'</div>';conv.appendChild(d);conv.scrollTop=1e9;}
+function ch(o){var w=document.createElement('div');w.className='row';o.forEach(function(x){var b=document.createElement('button');b.innerHTML=x.label;b.onclick=function(){w.remove();you(x.label);x.go();};w.appendChild(b);});conv.appendChild(w);}
+function start(){ai("Pain's gone, he looks fine — easy to wave off. But put today next to the prior. <b>What changed?</b>");ch([
+ {label:"New deep/biphasic T inversions in V2–V3",go:name},
+ {label:"Nothing meaningful",go:function(){ai("Look at the T waves in V2–V3: upright last year, now deep and biphasic. That's a real, new change — and the pain just resolved. Name it?");name();}},
+ {label:"New atrial fibrillation",go:function(){ai("Rhythm's unchanged sinus — it's the T waves in V2–V3 that flipped. New, biphasic. Recognize the pattern?");name();}}]);}
+function name(){ai("Right — new biphasic/deep precordial T inversions with the pain now <em>resolved</em>. That triad has a name.");ch([
+ {label:"Wellens syndrome",go:present},
+ {label:"Benign T changes",go:function(){ai("This is the dangerous one to call benign. New biphasic V2–V3 T's + recent-but-resolved pain = <b>Wellens</b> — critical proximal LAD stenosis. A widow-maker in waiting.");present();}}]);}
+function present(){ai("Exactly — <b>Wellens</b>: critical proximal LAD. Now hand it off. I'm your attending — <b>present it to me in one line</b>: what it is and what you want.","Attending");document.getElementById('presentRow').style.display='flex';document.getElementById('pres').focus();}
+document.getElementById('presgo').onclick=function(){var t=document.getElementById('pres').value.trim();if(!t)return;you(t);document.getElementById('presentRow').style.display='none';var l=t.toLowerCase();
+ var probe=(l.indexOf('stress')>=0)?"Stress test? On Wellens that can provoke the infarct — we do <b>not</b> stress these. ":"";
+ var good=(l.indexOf('cath')>=0||l.indexOf('cardiology')>=0||l.indexOf('angio')>=0);
+ ai(probe+(good?"Good — admit, antiplatelets, and cardiology for <b>angiography</b>; don't be reassured by the resolved pain or a normal troponin. Clean handoff.":"Decent read, but tell me the <em>plan</em>: this needs admission and cardiology for angiography — not discharge, not a stress test. Try the one-liner again with a disposition."),"Attending");
+ if(!good){document.getElementById('presentRow').style.display='flex';document.getElementById('pres').value='';}};
+document.getElementById('pres').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('presgo').click();});
+start();
+</script></body></html>

@@ -1,0 +1,110 @@
+# Copy to terraform.tfvars and replace every example. Never put a secret value
+# in this file; Secret Manager versions are added through an out-of-band step.
+project_id = "your-gcp-project"
+region     = "us-east4"
+zone       = "us-east4-b"
+
+environment = "demo"
+name_prefix = "ecg-tool"
+
+# Resolve the family immediately before launch and paste the returned concrete
+# image name into the resource path here; family aliases are rejected:
+# gcloud compute images describe-from-family debian-12 --project=debian-cloud --format='value(name)'
+source_image = "projects/debian-cloud/global/images/debian-12-bookworm-vYYYYMMDD"
+
+# STOP: setting this true allows billable foundation resources to be planned
+# and applied. Do so only after a named operator reviews cost and teardown.
+billing_acknowledged = false
+billing_account_id   = ""
+# Required final shape: billing_account_id = "000000-000000-000000"
+monthly_budget_usd   = 100
+
+# Auditable non-secret references (ticket IDs, provider limit-page evidence,
+# or internal change records). Terraform requires both before any foundation
+# resource can be planned/applied.
+vercel_spend_limit_reference = ""
+llm_spend_limit_reference    = ""
+
+# Cloud Storage names are globally unique. These are dedicated app buckets,
+# not the private MIMIC source bucket.
+corpus_bucket_name = "your-project-ecg-release-corpus"
+backup_bucket_name = "your-project-ecg-learner-backups"
+corpus_noncurrent_generation_retention_days = 90
+backup_retention_days                      = 90
+# Required when environment="production" after comparing the bucket inventory
+# with corpus_object_name + corpus_object_generation.
+corpus_inventory_review_reference = ""
+
+# First apply with false. Upload the corpus/image and add secret versions, then
+# fill the immutable values below and deliberately change this to true.
+provision_instance = false
+
+corpus_object_name       = "releases/ecg-corpus-2026-07-13.tar.zst"
+corpus_object_generation = ""
+corpus_archive_sha256    = ""
+
+artifact_repository_id = "ecg-tool-backend"
+backend_image           = ""
+artifact_delete_after_days = 90
+artifact_keep_recent_count  = 10
+# Required final shape:
+# backend_image = "us-east4-docker.pkg.dev/your-gcp-project/ecg-tool-backend/backend@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+# The image or another explicit operator step must stage this trusted script.
+# Startup will not clone a repository or download executable code.
+startup_install_script_path = "/opt/ecg-tool/deploy/gcp/scripts/install-host.sh"
+runtime_config_path          = "/etc/ecg/deployment.env"
+data_mount_path              = "/srv/ecg-data"
+# Required for the first boot of the new Terraform-created blank disk. The
+# installer still refuses any disk with a signature, partition, or wrong UUID.
+allow_initial_disk_format = true
+
+# Secret *container IDs* only. Add values later; never commit them here.
+auth_rate_limit_secret_id = "ecg-auth-rate-limit-secret"
+origin_shared_secret_id   = "ecg-origin-shared-secret"
+enable_llm_secret         = true
+llm_api_key_secret_id     = "ecg-llm-api-key"
+
+# Prefer a DNS name with a valid certificate for the final deployment. The
+# default can probe the raw IP without certificate validation during staging.
+health_check_host         = "api.example.edu"
+health_check_use_ssl      = true
+health_check_validate_ssl = true
+acme_email               = "ops@example.edu"
+
+# The final showcase uses the live grounded tutor path. Add the key as a Secret
+# Manager version; never put it in this file or Terraform state. Replace the
+# model with one approved and enabled for the selected account.
+llm_provider = "openai-compatible"
+llm_required = true
+llm_model    = "replace-with-approved-model"
+llm_base_url = "https://api.openai.com/v1"
+
+# Hard request and aggregate reservation budgets. Tune only after observing the
+# demo workload and reviewing cost; quota exhaustion falls back to the grounded
+# deterministic tutor instead of making an unbounded remote call.
+llm_max_completion_tokens     = 1200
+llm_request_timeout_seconds   = 30
+llm_max_request_bytes         = 131072
+llm_max_response_bytes        = 131072
+llm_authenticated_daily_limit = 60
+llm_guest_daily_limit         = 15
+llm_ip_hourly_limit            = 240
+llm_global_daily_limit         = 500
+
+# Four application-consistent backups run daily. Readiness fails after more
+# than two missed six-hour intervals (14 hours by default).
+backup_max_age_seconds = 50400
+
+# Readiness fails before the learner-state disk has less than 2 GiB free.
+min_state_free_bytes = 2147483648
+
+# Existing Monitoring notification channels. At least one is mandatory when
+# environment="production"; demo can leave this empty only as an acknowledged
+# non-production limitation.
+alert_notification_channels = []
+
+# Optional, tightly scoped operator access. There is no public SSH rule.
+iap_ssh_members = [
+  "user:operator@example.edu",
+]

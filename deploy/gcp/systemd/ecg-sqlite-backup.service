@@ -1,0 +1,23 @@
+[Unit]
+Description=Consistent ECG learner SQLite backup to private GCS
+RequiresMountsFor=/srv/ecg-data
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=CLOUDSDK_CONFIG=/var/lib/ecg-gcloud
+ExecStart=/bin/bash /usr/local/lib/ecg-deploy/backup-sqlite.sh
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true
+TimeoutStartSec=45min
+TimeoutStopSec=60s
+
+[Install]
+WantedBy=multi-user.target

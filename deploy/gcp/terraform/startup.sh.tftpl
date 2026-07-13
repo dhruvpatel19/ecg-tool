@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+exec > >(logger --tag ecg-startup --stderr 2>/dev/console) 2>&1
+
+# The stock GCE image normally includes these utilities, but bootstrap does not
+# rely on that implicit contract.
+export DEBIAN_FRONTEND=noninteractive
+for attempt in 1 2 3 4 5 6; do
+  apt-get update -y && break
+  [[ "${attempt}" == 6 ]] && exit 67
+  sleep $((attempt * 5))
+done
+for attempt in 1 2 3 4 5 6; do
+  apt-get install -y --no-install-recommends ca-certificates coreutils curl gzip && break
+  [[ "${attempt}" == 6 ]] && exit 68
+  sleep $((attempt * 5))
+done
+
+readonly METADATA_BASE="http://metadata.google.internal/computeMetadata/v1/instance/attributes"
+
+metadata_value() {
+  curl --fail --silent --show-error --retry 8 --retry-all-errors \
+    --retry-delay 2 --connect-timeout 5 --max-time 30 \
+    --header "Metadata-Flavor: Google" \
+    "${METADATA_BASE}/$1"
+}
+
+INSTALL_SCRIPT_PATH="$(metadata_value ecg-install-script-path)"
+readonly INSTALL_SCRIPT_PATH
+RUNTIME_CONFIG_PATH="$(metadata_value ecg-runtime-config-path)"
+readonly RUNTIME_CONFIG_PATH
+ASSET_BUNDLE="$(metadata_value ecg-runtime-assets)"
+readonly ASSET_BUNDLE
+
+if [[ "${INSTALL_SCRIPT_PATH}" != /* || "${RUNTIME_CONFIG_PATH}" != /* ]]; then
+  echo "Refusing non-absolute install/config path from instance metadata."
+  exit 64
+fi
+
+ASSET_ROOT="$(dirname "$(dirname "${INSTALL_SCRIPT_PATH}")")"
+readonly ASSET_ROOT
+BUNDLE_MANIFEST="$(mktemp)"
+readonly BUNDLE_MANIFEST
+trap 'rm -f "${BUNDLE_MANIFEST}"' EXIT
+printf '%s' "${ASSET_BUNDLE}" | base64 --decode | gzip --decompress >"${BUNDLE_MANIFEST}"
+
+install -d -m 0755 "${ASSET_ROOT}"
+while IFS=$'\t' read -r relative encoded; do
+  [[ -n "${relative}" && -n "${encoded}" ]] || continue
+  case "${relative}" in
+    scripts/install-host.sh|scripts/lib.sh|scripts/hydrate-corpus.sh|scripts/render-runtime-env.sh|scripts/backup-sqlite.sh|scripts/restore-sqlite.sh|scripts/install-release.sh|scripts/ensure-metadata-firewall.sh|systemd/ecg-backend.service|systemd/ecg-metadata-firewall.service|systemd/ecg-metadata-firewall.timer|systemd/ecg-sqlite-backup.service|systemd/ecg-sqlite-backup.timer|caddy/Caddyfile) ;;
+    *) echo "Refusing unexpected runtime asset: ${relative}"; exit 65 ;;
+  esac
+  target="${ASSET_ROOT}/${relative}"
+  install -d -m 0755 "$(dirname "${target}")"
+  printf '%s' "${encoded}" | base64 --decode >"${target}"
+  case "${target}" in *.sh) chmod 0755 "${target}" ;; *) chmod 0644 "${target}" ;; esac
+done <"${BUNDLE_MANIFEST}"
+
+if [[ ! -f "${INSTALL_SCRIPT_PATH}" || ! -x "${INSTALL_SCRIPT_PATH}" ]]; then
+  echo "Terraform-staged trusted installer is missing: ${INSTALL_SCRIPT_PATH}"
+  exit 66
+fi
+
+# The reviewed bundle comes from Terraform configuration, not a repository clone
+# or runtime executable download. No secret value is passed in metadata.
+exec "${INSTALL_SCRIPT_PATH}" --config "${RUNTIME_CONFIG_PATH}"

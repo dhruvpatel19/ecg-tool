@@ -1,0 +1,111 @@
+name: Publish reviewed backend image
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_reason:
+        description: "Reviewed release or rollback reason"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: backend-image-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish immutable image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: backend-release
+    outputs:
+      image_ref: "${{ steps.publish.outputs.image_ref }}"
+    env:
+      WIF_PROVIDER: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+      DEPLOY_SERVICE_ACCOUNT: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}"
+      PROJECT_ID: "${{ vars.GCP_PROJECT_ID }}"
+      REGION: "${{ vars.GCP_REGION }}"
+      REPOSITORY: "${{ vars.GCP_ARTIFACT_REPOSITORY }}"
+    steps:
+      - name: Require protected reviewed branch
+        env:
+          REF_PROTECTED: "${{ github.ref_protected }}"
+        run: |
+          set -Eeuo pipefail
+          case "${GITHUB_REF}" in
+            refs/heads/main|refs/heads/release/*) ;;
+            *) echo "Publish is allowed only from main or release/*." >&2; exit 1 ;;
+          esac
+          [[ "${REF_PROTECTED}" == "true" ]] || { echo "The selected branch must be protected." >&2; exit 1; }
+      - name: Require successful CI for this commit
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        run: |
+          set -Eeuo pipefail
+          successful_runs="$(gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f "head_sha=${GITHUB_SHA}" \
+            -f "status=success" \
+            -f "per_page=1" \
+            --jq ".total_count")"
+          [[ "${successful_runs}" -gt 0 ]] || { echo "No successful CI run exists for ${GITHUB_SHA}." >&2; exit 1; }
+      - name: Check out reviewed source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Validate release configuration
+        run: |
+          set -Eeuo pipefail
+          [[ -n "${WIF_PROVIDER}" ]] || { echo "Missing GCP_WORKLOAD_IDENTITY_PROVIDER secret." >&2; exit 1; }
+          [[ -n "${DEPLOY_SERVICE_ACCOUNT}" ]] || { echo "Missing GCP_DEPLOY_SERVICE_ACCOUNT secret." >&2; exit 1; }
+          [[ "${PROJECT_ID}" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || { echo "Invalid GCP_PROJECT_ID variable." >&2; exit 1; }
+          [[ "${REGION}" =~ ^[a-z]+-[a-z]+[0-9]$ ]] || { echo "Invalid GCP_REGION variable." >&2; exit 1; }
+          [[ "${REPOSITORY}" =~ ^[a-z][a-z0-9-]{2,62}$ ]] || { echo "Invalid GCP_ARTIFACT_REPOSITORY variable." >&2; exit 1; }
+      - name: Authenticate to Google Cloud with Workload Identity
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: "${{ env.WIF_PROVIDER }}"
+          service_account: "${{ env.DEPLOY_SERVICE_ACCOUNT }}"
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - name: Build and publish
+        id: publish
+        env:
+          RELEASE_REASON: "${{ inputs.release_reason }}"
+        run: |
+          set -Eeuo pipefail
+          registry="${REGION}-docker.pkg.dev"
+          image="${registry}/${PROJECT_ID}/${REPOSITORY}/ecg-backend"
+          tag="sha-${GITHUB_SHA:0:12}-run-${GITHUB_RUN_ID}"
+          gcloud auth configure-docker "${registry}" --quiet
+          docker build \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --build-arg "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --file backend/Dockerfile \
+            --tag "${image}:${tag}" \
+            backend
+          docker push "${image}:${tag}"
+
+          digest=""
+          for attempt in {1..8}; do
+            digest="$(gcloud artifacts docker images describe "${image}:${tag}" \
+              --project "${PROJECT_ID}" \
+              --format="value(image_summary.digest)" 2>/dev/null || true)"
+            [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]] && break
+            sleep $((attempt * 2))
+          done
+          [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "Published digest could not be verified." >&2; exit 1; }
+
+          image_ref="${image}@${digest}"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Published backend image"
+            echo ""
+            echo "Reason: ${RELEASE_REASON}"
+            echo ""
+            echo "\`${image_ref}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

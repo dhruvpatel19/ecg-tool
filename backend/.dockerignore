@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+tests/
+scripts/
+requirements-dev.txt
+requirements-data.txt
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+Dockerfile*

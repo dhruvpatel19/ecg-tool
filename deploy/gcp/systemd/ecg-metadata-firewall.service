@@ -1,0 +1,14 @@
+[Unit]
+Description=Reconcile TRACE backend metadata-server isolation
+After=network-pre.target
+Before=ecg-backend.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/local/lib/ecg-deploy/ensure-metadata-firewall.sh
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+TimeoutStartSec=30s

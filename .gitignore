@@ -1,0 +1,60 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Node / Next
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+frontend/.turbo/
+.vercel/
+frontend/.vercel/
+
+# Terraform/deployment state and populated host environment files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+*.tfplan
+backend.hcl
+crash.log
+deploy/gcp/env/*.local
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/.playwright/
+
+# Env & secrets (all framework/environment variants, at every depth)
+**/.env
+**/.env.*
+!**/.env.example
+
+# Databases (runtime learner state)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Built data: corpus, datasets, raw PTB-XL (large, regenerable)
+data/
+datasets/
+ptb-xl/
+ptb-xl-plus/
+records100/
+records500/
+
+# Logs & OS cruft
+*.log
+*.part
+.DS_Store
+Thumbs.db

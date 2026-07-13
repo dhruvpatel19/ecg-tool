@@ -1,0 +1,56 @@
+{
+	email {$ECG_ACME_EMAIL}
+	admin off
+	log default {
+		output stdout
+		format filter {
+			fields {
+				request>headers>X-Ecg-Origin-Key delete
+				request>headers>X-Ecg-Client-Ip delete
+			}
+			wrap json
+		}
+	}
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$ECG_BACKEND_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Cache-Control "no-store"
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		# Never trust forwarding headers presented by the public client. Caddy is
+		# Uvicorn's only trusted peer and writes a fresh client/protocol identity.
+		header_up -Forwarded
+		header_up -X-Forwarded-For
+		header_up -X-Forwarded-Host
+		header_up -X-Forwarded-Proto
+		header_up -X-Real-IP
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+		health_uri /readyz
+		health_interval 15s
+		health_timeout 5s
+	}
+
+	log {
+		output stdout
+		format filter {
+			fields {
+				request>headers>X-Ecg-Origin-Key delete
+				request>headers>X-Ecg-Client-Ip delete
+			}
+			wrap json
+		}
+	}
+}

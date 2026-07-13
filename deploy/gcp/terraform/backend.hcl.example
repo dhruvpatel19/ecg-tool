@@ -1,0 +1,6 @@
+# Copy to ignored backend.hcl only after a separately approved state bucket is
+# created with uniform access, public-access prevention, versioning, retention,
+# and tightly scoped Terraform-operator IAM. GCS backend locking uses object
+# generation preconditions.
+bucket = "your-dedicated-terraform-state-bucket"
+prefix = "ecg-tool/demo"
