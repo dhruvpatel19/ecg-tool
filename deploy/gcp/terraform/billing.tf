@@ -5,7 +5,7 @@ data "google_project" "current" {
 }
 
 resource "google_billing_budget" "project" {
-  billing_account = "billingAccounts/${var.billing_account_id}"
+  billing_account = var.billing_account_id
   display_name    = "${var.name_prefix}-${var.environment}-monthly"
 
   budget_filter {
@@ -14,7 +14,7 @@ resource "google_billing_budget" "project" {
 
   amount {
     specified_amount {
-      currency_code = "USD"
+      currency_code = var.budget_currency_code
       units         = tostring(var.monthly_budget_usd)
     }
   }

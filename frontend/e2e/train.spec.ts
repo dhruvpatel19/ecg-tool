@@ -137,6 +137,10 @@ test.describe("Mode 2 · durable Training campaigns", () => {
   });
 
   test("focused WCT campaigns expose all 130 expert targets and open on a Leipzig rhythm window", async ({ page }) => {
+    test.skip(
+      process.env.E2E_CORPUS_PROFILE === "compact-clinical",
+      "Requires the audited full release corpus and Leipzig rhythm windows; the checked CI fixture contains only the 103 real PTB Clinical ECGs.",
+    );
     test.setTimeout(120_000);
     const errors = collectConsoleErrors(page);
     const poolResponse = page.waitForResponse((response) => {

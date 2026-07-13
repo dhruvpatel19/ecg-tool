@@ -104,7 +104,10 @@ jobs:
       - name: Start isolated backend
         working-directory: backend
         env:
-          APP_ENV: test
+          # Browser tests must exercise production-like per-browser guest
+          # isolation. APP_ENV=test deliberately collapses every guest to the
+          # shared deterministic `demo` principal used by unit tests.
+          APP_ENV: development
           DATABASE_URL: sqlite:///${{ runner.temp }}/ecg-e2e.sqlite3
           ECG_CORPUS_ROOT: ${{ runner.temp }}/ecg-ci-corpus
           ECG_REQUIRE_REAL_DATA: "0"
@@ -125,6 +128,9 @@ jobs:
         working-directory: frontend
         env:
           E2E_BACKEND_BASE: http://localhost:8000
+          # The checked fixture contains the 103 real PTB ECGs bound to the
+          # Clinical bank, not the 22,497-ECG release corpus or Leipzig windows.
+          E2E_CORPUS_PROFILE: compact-clinical
         run: npm run e2e
       - name: Report backend log
         if: always()

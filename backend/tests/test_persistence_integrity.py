@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 
 from fastapi.testclient import TestClient
@@ -226,8 +227,16 @@ def test_supported_selector_concepts_are_exposed_by_the_live_catalog() -> None:
             for concept in group["concepts"]
             if concept["available"]
         }
-        assert {
-            "paced_rhythm",
-            "electrolyte_drug_pattern",
-            "posterior_mi",
-        } <= available
+        if os.getenv("ECG_TEST_USE_CI_CORPUS") == "1":
+            # The committed clean-runner fixture is intentionally only the 103
+            # real PTB ECGs bound to the Clinical bank. It must fail closed for
+            # concepts below the same three-case release threshold; exhaustive
+            # selector coverage is asserted against the full release corpus.
+            assert "electrolyte_drug_pattern" in available
+            assert {"paced_rhythm", "posterior_mi"}.isdisjoint(available)
+        else:
+            assert {
+                "paced_rhythm",
+                "electrolyte_drug_pattern",
+                "posterior_mi",
+            } <= available

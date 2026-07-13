@@ -66,13 +66,24 @@ variable "billing_account_id" {
 }
 
 variable "monthly_budget_usd" {
-  description = "Project-scoped monthly Cloud Billing budget in USD. Budgets alert but do not hard-cap spend."
+  description = "Project-scoped monthly Cloud Billing budget amount. The billing account's currency must be selected with budget_currency_code. Budgets alert but do not hard-cap spend."
   type        = number
   default     = 100
 
   validation {
     condition     = var.monthly_budget_usd == floor(var.monthly_budget_usd) && var.monthly_budget_usd >= 10 && var.monthly_budget_usd <= 100000
     error_message = "monthly_budget_usd must be a whole-dollar value from 10 through 100000."
+  }
+}
+
+variable "budget_currency_code" {
+  description = "ISO 4217 currency code for the billing budget; this must match the Cloud Billing account currency."
+  type        = string
+  default     = "USD"
+
+  validation {
+    condition     = can(regex("^[A-Z]{3}$", var.budget_currency_code))
+    error_message = "budget_currency_code must be a three-letter uppercase ISO 4217 currency code."
   }
 }
 

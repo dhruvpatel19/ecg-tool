@@ -18,6 +18,8 @@ billing_acknowledged = false
 billing_account_id   = ""
 # Required final shape: billing_account_id = "000000-000000-000000"
 monthly_budget_usd   = 100
+# Must match the selected billing account's currency.
+budget_currency_code = "USD"
 
 # Auditable non-secret references (ticket IDs, provider limit-page evidence,
 # or internal change records). Terraform requires both before any foundation
