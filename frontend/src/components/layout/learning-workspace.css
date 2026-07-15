@@ -1646,6 +1646,10 @@ progress.clinical-axis-progress::-moz-progress-bar {
   width: 100%;
 }
 
+.clinical-response-rail .clinical-first-look-submit {
+  min-height: 44px;
+}
+
 .clinical-response-rail .clinical-stem {
   outline-offset: -3px;
 }
@@ -1825,6 +1829,7 @@ progress.clinical-axis-progress::-moz-progress-bar {
 }
 
 .clinical-disclosure {
+  flex-wrap: nowrap;
   row-gap: 4px;
 }
 

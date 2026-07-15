@@ -520,6 +520,13 @@
     grid-column: 1;
   }
 
+  .nextAction :global(.button) {
+    min-width: 0;
+    padding-inline: 10px;
+    text-align: center;
+    white-space: normal;
+  }
+
   .modeCard {
     gap: 8px;
     padding-inline: 10px;

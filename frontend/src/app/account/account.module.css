@@ -699,7 +699,7 @@
 
 @media (max-width: 720px) {
   .page {
-    width: min(100% - 28px, 880px);
+    width: min(100%, 880px);
     padding-top: 30px;
   }
 

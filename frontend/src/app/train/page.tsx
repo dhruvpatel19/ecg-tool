@@ -1273,7 +1273,7 @@ export default function TrainPage() {
                   {poolInfo.roleCounts.target.toLocaleString()} pattern present · {poolInfo.roleCounts.mimic.toLocaleString()} close comparisons · {poolInfo.roleCounts.negative.toLocaleString()} other contrasts
                 </span> : null}
                 {!poolLoading && poolInfo && campaignLength > poolInfo.eligibleDistinct ? (
-                  <span className="uncertainty">Your {campaignLength.toLocaleString()} request will be capped at {poolInfo.eligibleDistinct.toLocaleString()}; only unique real ECGs are used.</span>
+                  <span className="uncertainty">Your {campaignLength.toLocaleString()} request will be capped at {poolInfo.eligibleDistinct.toLocaleString()}; only unique real ECGs are used—no synthetic or repeated case will fill the gap.</span>
                 ) : null}
               </div>
               {!poolLoading && poolInfo?.eligibleDistinct === 0 ? (

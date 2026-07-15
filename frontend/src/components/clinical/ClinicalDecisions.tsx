@@ -1372,7 +1372,6 @@ export function ClinicalDecisions() {
         <DisclosureArea className="clinical-disclosure">
           <span className="clinical-provenance"><ShieldCheck size={14} aria-hidden="true" /> {provenanceBadge(item.tracing_provenance)}</span>
           <span className="pill subtle">Patient context authored for learning</span>
-          <span className="pill subtle">{item.content_label ?? "Automated-screened formative"} · clinician sign-off pending</span>
         </DisclosureArea>
 
         <TutorDrawer title="Case tutor">

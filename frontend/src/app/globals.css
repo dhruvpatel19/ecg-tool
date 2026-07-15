@@ -297,6 +297,16 @@ a {
   }
 }
 
+@media (max-width: 360px) {
+  .public-brand {
+    gap: 0;
+  }
+
+  .public-brand > span:last-child {
+    display: none;
+  }
+}
+
 .side-nav {
   position: sticky;
   top: 0;

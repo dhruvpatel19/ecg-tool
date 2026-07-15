@@ -60,8 +60,8 @@ test("Guided keeps corpus identity and answer fields behind an owner-bound ECG c
   });
 
   const waveform = await waveformRequest;
-  expect(new URL(waveform.url()).pathname).toContain(
-    `/tutorials/lead-territories/waveform/${payload.recommendedCase.caseId}`,
+  expect(new URL(waveform.url()).pathname).toMatch(
+    /^\/api\/backend\/tutorials\/lead-territories\/waveform\/ec_[A-Za-z0-9_-]{43}$/,
   );
   await expect(page.getByRole("img", { name: /12-lead ECG/i })).toBeVisible({ timeout: 30_000 });
   expect(await page.locator("body").evaluate((body, reference) => body.innerHTML.includes(reference), payload.recommendedCase.caseId)).toBe(false);
