@@ -1,16 +1,16 @@
 # The Vercel project has `frontend` configured as its Root Directory. Keep the
 # deployment upload bounded to source that can affect that application.
-.agents/
-.claude/
-.github/
-.tmp/
-backend/
-data/
-deploy/
-docs/
-foundations/
-mocks/
-scripts/
+/.agents/
+/.claude/
+/.github/
+/.tmp/
+/backend/
+/data/
+/deploy/
+/docs/
+/foundations/
+/mocks/
+/scripts/
 
 # Local build, test, dependency, and secret material inside the app root.
 frontend/.next/
