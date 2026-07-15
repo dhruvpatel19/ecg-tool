@@ -78,6 +78,7 @@ allow_initial_disk_format = true
 # Secret *container IDs* only. Add values later; never commit them here.
 auth_rate_limit_secret_id = "ecg-auth-rate-limit-secret"
 origin_shared_secret_id   = "ecg-origin-shared-secret"
+auth_smtp_password_secret_id = "ecg-auth-smtp-password"
 enable_llm_secret         = true
 llm_api_key_secret_id     = "ecg-llm-api-key"
 
@@ -87,6 +88,21 @@ health_check_host         = "api.example.edu"
 health_check_use_ssl      = true
 health_check_validate_ssl = true
 acme_email               = "ops@example.edu"
+
+# Account registration, verification, recovery, and email 2FA are release
+# dependencies. These are non-secret SMTP settings; SMTP mode creates the
+# dedicated password secret container and production requires authentication.
+# Add the password as a Secret Manager version out of band before enabling the
+# instance. No email provider is selected or activated by this configuration.
+auth_email_delivery_mode  = "smtp"
+auth_email_from_address   = "TRACE <no-reply@example.edu>"
+auth_email_reply_to       = "TRACE support <support@example.edu>"
+auth_public_app_url       = "https://ecg.example.edu"
+auth_smtp_host            = "smtp.example.edu"
+auth_smtp_port            = 587
+auth_smtp_username        = "provider-account"
+auth_smtp_starttls        = true
+auth_smtp_timeout_seconds = 10
 
 # The final showcase uses the live grounded tutor path. Add the key as a Secret
 # Manager version; never put it in this file or Terraform state. Replace the
@@ -114,6 +130,14 @@ backup_max_age_seconds = 50400
 
 # Readiness fails before the learner-state disk has less than 2 GiB free.
 min_state_free_bytes = 2147483648
+
+# External governance gate. Keep false/empty until product/legal owners approve
+# the authenticated-learner retention/deletion policy, including backup expiry,
+# restore suppression, legal holds, and institutional deprovisioning. Then set
+# true plus its non-secret policy ID or documentation URL; Terraform never
+# chooses a duration or treats this acknowledgement as the policy itself.
+authenticated_retention_policy_acknowledged = false
+authenticated_retention_policy_reference    = ""
 
 # Existing Monitoring notification channels. At least one is mandatory when
 # environment="production"; demo can leave this empty only as an acknowledged

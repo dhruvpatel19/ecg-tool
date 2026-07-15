@@ -1785,7 +1785,6 @@ const M02_SCENES = [
     handoffs: [
       handoff("train", "Train lead locations and opposites", "lead_territories", "localize", "faded"),
       handoff("train", "Train axis with target, mimic, and normal cases", "axis", "discriminate", "independent"),
-      handoff("rapid", "Try an untimed localization quick-look", "lead_territories", "synthesize", "independent"),
     ],
   }),
 ] satisfies ProductionModule["scenes"];

@@ -1,5 +1,7 @@
 # Advanced live-use report — senior resident / skeptical ECG educator
 
+> **Historical audit snapshot.** This report records the build and date named below; it is retained as defect-discovery evidence, not current product status. See [the remediation ledger](../PRODUCT_REMEDIATION_LEDGER.md) for reconciled fixes, verification, and remaining gates.
+
 Date: 2026-07-10  
 Build tested: `http://localhost:3100`  
 Perspective: senior internal-medicine resident who teaches ECG interpretation and treats mastery claims as assessment claims, not engagement metrics.

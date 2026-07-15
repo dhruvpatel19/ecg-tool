@@ -14,6 +14,7 @@ import json
 import re
 from typing import Any, Callable
 
+from ..ontology import concept_label
 from .harness import run_harness
 from .provenance import assert_learner_item_provenance
 from .schemas import (
@@ -21,7 +22,11 @@ from .schemas import (
     DisplaySpec,
     EvidenceClaim,
     EvidenceManifest,
+    FillInTask,
     MachineLine,
+    MatchingChoice,
+    MatchingRow,
+    MatchingTask,
     Option,
     RoiTarget,
     StemChips,
@@ -336,6 +341,42 @@ REAL_QT_INTERVAL_CLICK = ClinicalCaseItem(
     chips=StemChips(age=61, setting="clinic", symptom="none"),
     prompt="In lead II, click the QT interval from QRS onset through the end of the T wave.",
     roi_target=RoiTarget(concept="qtc_prolongation", leads=["II"], target_type="interval"),
+    evidence_manifest=EvidenceManifest(
+        ecg_supports=[
+            EvidenceClaim(objective_id="qtc_prolongation", threshold="qtc_ms>=480", leads=["II"], roi_concept="qt_segment", source_type="measured")
+        ],
+        stem_adds=["medication-safety review"],
+        action_rationale="The QT interval must be localized and verified before medication and electrolyte decisions are made.",
+        forbidden_claims=["torsades captured", "ventricular tachycardia"],
+        acceptable_range=["QT interval", "verify QTc"],
+    ),
+    tested_scope="zoom_lead",
+    display_spec=DisplaySpec(mode="zoom_lead", zoom_lead="II", tested_scope="zoom_lead"),
+)
+
+
+REAL_QT_INTERVAL_FILLIN = ClinicalCaseItem(
+    item_id="ptb-320-qt-interval-fillin",
+    ecg_id="320",
+    situation="clinic",
+    question_type="fillin",
+    acuity_tier="moderate",
+    stem="A medication-safety review requires a manual QT estimate before the interval is interpreted clinically.",
+    chips=StemChips(age=73, setting="clinic", symptom="none"),
+    prompt=(
+        "Using the ECG grid in lead II, estimate the raw QT interval from QRS onset "
+        "through the end of the T wave. Enter the closest value."
+    ),
+    fill_in_task=FillInTask(
+        response_label="Estimated QT interval",
+        unit="ms",
+        objective_id="qtc_prolongation",
+        expected_feature="qt_ms",
+        tolerance=40,
+        min_value=200,
+        max_value=800,
+        step=10,
+    ),
     evidence_manifest=EvidenceManifest(
         ecg_supports=[
             EvidenceClaim(objective_id="qtc_prolongation", threshold="qtc_ms>=480", leads=["II"], roi_concept="qt_segment", source_type="measured")
@@ -678,6 +719,7 @@ REAL_AUTHORED_ITEMS = (
     REAL_BRADY_CLINIC_TRIAGE,
     REAL_LVH_VOLTAGE_CLICK,
     REAL_QT_INTERVAL_CLICK,
+    REAL_QT_INTERVAL_FILLIN,
     REAL_AF_WARD_STEPWISE,
     REAL_SLOW_AF_WARD_MCQ,
     REAL_RBBB_WARD_SPOTERROR,
@@ -713,7 +755,8 @@ REAL_ECGS_BY_SCENARIO: dict[str, tuple[str, ...]] = {
     "ptb-195-rbbb-click": ("195", "172", "269", "287", "310"),
     "ptb-2-brady-clinic-triage": ("2", "78", "284", "289", "543"),
     "ptb-138-lvh-voltage-click": ("138", "191", "223", "273", "277"),
-    "ptb-39-qt-interval-click": ("39", "316", "320", "409", "520"),
+    "ptb-39-qt-interval-click": ("39", "316"),
+    "ptb-320-qt-interval-fillin": ("320", "409", "520"),
     "ptb-330-af-ward-stepwise": ("330", "282", "318", "321", "337"),
     "ptb-307-slow-af-medication": ("307", "581", "637", "722", "731"),
     "ptb-621-rbbb-spoterror": ("621", "424", "455", "600", "635"),
@@ -725,6 +768,30 @@ REAL_ECGS_BY_SCENARIO: dict[str, tuple[str, ...]] = {
     "ptb-959-chb-ed-triage": ("959", "4838", "8620", "21533"),
     "ptb-7806-st-depression-ed-spoterror": ("7806", "1178", "1524", "6594", "11849"),
     "ptb-12-brady-ed-stepwise": ("12", "568", "611", "612", "658"),
+}
+
+
+# Twelve existing real-ECG encounters become source-matching tasks.  These are
+# conversions, never additions, so the release bank remains 103 distinct PTB
+# records.  Four tasks appear in each learner lane; the LVH exemplar is first so
+# focused keyboard/browser tests can request it deterministically without
+# depending on adaptive ordering or consuming unrelated cases.
+MATCHING_ORDINALS_BY_SCENARIO: dict[str, tuple[int, ...]] = {
+    # clinic
+    "ptb-3-normal-triage": (4,),
+    "ptb-28-qtc-medication": (4,),
+    "ptb-2-brady-clinic-triage": (4,),
+    "ptb-138-lvh-voltage-click": (0,),
+    # ward
+    "ptb-8911-chb-stepwise": (3,),
+    "ptb-307-slow-af-medication": (4,),
+    "ptb-299-lvh-context-mcq": (4,),
+    "ptb-621-rbbb-spoterror": (4,),
+    # emergency department
+    "ptb-3267-svt-ed-triage": (4,),
+    "ptb-567-af-rvr-ed-triage": (4,),
+    "ptb-959-chb-ed-triage": (3,),
+    "ptb-7806-st-depression-ed-spoterror": (4,),
 }
 
 
@@ -763,6 +830,7 @@ CLINICAL_FAMILY_BY_SCENARIO: dict[str, str] = {
     "ptb-2-brady-clinic-triage": "syncope_brady",
     "ptb-138-lvh-voltage-click": "chamber_voltage",
     "ptb-39-qt-interval-click": "qt_drug_safety",
+    "ptb-320-qt-interval-fillin": "qt_drug_safety",
     "ptb-330-af-ward-stepwise": "palpitations_rhythm",
     "ptb-307-slow-af-medication": "palpitations_rhythm",
     "ptb-621-rbbb-spoterror": "machine_audit",
@@ -792,6 +860,7 @@ APPLICATION_OBJECTIVES_BY_SCENARIO: dict[str, tuple[str, ...]] = {
     "ptb-2-brady-clinic-triage": ("bradycardia",),
     "ptb-138-lvh-voltage-click": (),
     "ptb-39-qt-interval-click": (),
+    "ptb-320-qt-interval-fillin": (),
     "ptb-330-af-ward-stepwise": ("atrial_fibrillation",),
     "ptb-307-slow-af-medication": ("atrial_fibrillation",),
     "ptb-621-rbbb-spoterror": (),
@@ -875,9 +944,11 @@ AUTHORED_VARIANTS_BY_SCENARIO: dict[str, tuple[AuthoredScenarioVariant, ...]] = 
     "ptb-39-qt-interval-click": (
         _v(61, "medication safety clinic", "none", "A medication-safety review requires direct verification of a long ventricular repolarization interval on the ECG.", "In lead II, mark the QT interval from QRS onset through T-wave end."),
         _v(49, "behavioral health prescribing clinic", "asymptomatic", "A prescribing clinic requests an ECG interval check before changing a QT-active medicine.", "Select the complete QRS-onset-to-T-end interval in lead II."),
-        _v(73, "polypharmacy clinic", "none", "A polypharmacy assessment includes an ECG whose repolarization timing should be measured rather than accepted from the machine.", "Locate one full QT interval in lead II."),
-        _v(36, "antiemetic planning clinic", "asymptomatic", "An outpatient antiemetic plan prompts manual review of ventricular depolarization-plus-repolarization timing.", "Place the click within the QT measurement window in lead II, ending at T-wave completion."),
-        _v(66, "specialty medication review", "none", "A specialty medication review flags a prolonged ECG interval and asks for trace-level confirmation.", "Demonstrate the QT interval boundaries on a representative beat in lead II."),
+    ),
+    "ptb-320-qt-interval-fillin": (
+        _v(73, "polypharmacy clinic", "none", "A polypharmacy assessment includes an ECG whose repolarization timing should be measured rather than accepted from the machine.", "Count the lead II grid from QRS onset through T-wave end, then enter your raw QT estimate."),
+        _v(36, "antiemetic planning clinic", "asymptomatic", "An outpatient antiemetic plan prompts manual review of ventricular depolarization-plus-repolarization timing.", "Measure a representative lead II QT interval and report its duration in milliseconds."),
+        _v(66, "specialty medication review", "none", "A specialty medication review flags a prolonged ECG interval and asks for trace-level confirmation.", "Estimate QRS-onset-to-T-end time on a representative lead II beat and enter the nearest QT value."),
     ),
     "ptb-330-af-ward-stepwise": (
         _v(72, "morning medical ward round", "none", "A morning ward round notes an irregular pulse, and the team asks for a structured ECG review before medicines or stroke risk are discussed.", "Determine ventricular rate and atrial organization, then choose the next clinical assessment."),
@@ -1030,6 +1101,78 @@ def _materialize_authored_case(
             for option in step.options:
                 replacement = rounded_rate if option.correct else distractor_rate
                 option.text = _RATE_TEXT.sub(f"About {replacement}/min", option.text)
+    if ordinal in MATCHING_ORDINALS_BY_SCENARIO.get(template.item_id, ()):
+        claims = item.evidence_manifest.ecg_supports
+        forbidden = item.evidence_manifest.forbidden_claims
+        if not claims or not forbidden or not item.chips.setting:
+            raise RuntimeError(
+                f"{item.item_id}: matching materialization requires ECG evidence, "
+                "an authored setting, and a forbidden claim."
+            )
+        objective = claims[0].objective_id
+        setting_reference = f"authored setting: {item.chips.setting}"
+        forbidden_reference = forbidden[0]
+        matching_choices = [
+            MatchingChoice(id="ecg", label="Supported by this ECG packet"),
+            MatchingChoice(id="context", label="Provided only by the authored vignette"),
+            MatchingChoice(id="unsupported", label="Not established by this ECG or vignette"),
+        ]
+        matching_rows = [
+            MatchingRow(
+                id="ecg-evidence",
+                clause=concept_label(objective),
+                source_type="ecg_support",
+                correct_choice_id="ecg",
+                objective_id=objective,
+                source_reference=objective,
+            ),
+            MatchingRow(
+                id="authored-context",
+                clause=f"Encounter setting: {item.chips.setting}",
+                source_type="authored_context",
+                correct_choice_id="context",
+                source_reference=setting_reference,
+            ),
+            MatchingRow(
+                id="unsupported-claim",
+                clause=f"Claim: {forbidden_reference}",
+                source_type="unsupported_claim",
+                correct_choice_id="unsupported",
+                source_reference=forbidden_reference,
+            ),
+        ]
+        # Vary both visual orders deterministically.  The mapping remains stable
+        # across refresh/replay, but position cannot become an accidental key.
+        seed = sum(ord(character) for character in template.item_id) + ordinal * 17
+        choice_shift = seed % len(matching_choices)
+        row_shift = (seed // len(matching_choices)) % len(matching_rows)
+        matching_choices = matching_choices[choice_shift:] + matching_choices[:choice_shift]
+        matching_rows = matching_rows[row_shift:] + matching_rows[:row_shift]
+        for index, row in enumerate(matching_rows):
+            # Public row ids are transport handles, not semantic hints.  Assign
+            # them only after shuffling so an id cannot reveal the hidden key.
+            row.id = f"clause-{chr(ord('a') + index)}"
+        item = item.model_copy(
+            deep=True,
+            update={
+                "item_id": f"{item.item_id}-matching",
+                "question_type": "matching",
+                "prompt": "Match each clause to the strongest evidence boundary for this case.",
+                "options": [],
+                "steps": [],
+                "roi_target": None,
+                "fill_in_task": None,
+                "machine_read": [],
+                "application_objectives": [],
+                "matching_task": MatchingTask(
+                    choices=matching_choices,
+                    rows=matching_rows,
+                ),
+            },
+        )
+        # ``model_copy(update=...)`` intentionally avoids coercion; re-validate
+        # the final converted interaction so a future template edit fails closed.
+        item = ClinicalCaseItem.model_validate(item.model_dump())
     return item
 
 
@@ -1062,6 +1205,10 @@ def normalized_scenario_signature(item: ClinicalCaseItem) -> str:
             for step in item.steps
         ],
         "machineRead": [norm(line.text) for line in item.machine_read],
+        "matching": {
+            "choices": [norm(choice.label) for choice in item.matching_task.choices],
+            "rows": [norm(row.clause) for row in item.matching_task.rows],
+        } if item.matching_task else None,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -1101,6 +1248,28 @@ def vetted_real_items(packet_provider: PacketProvider) -> list[ClinicalCaseItem]
                 f"{scenario_id}: {len(ecg_ids)} ECGs require exactly {len(ecg_ids)} "
                 f"authored variants, found {len(variants)}."
             )
+
+    unknown_matching = set(MATCHING_ORDINALS_BY_SCENARIO) - family_ids
+    matching_count = sum(len(ordinals) for ordinals in MATCHING_ORDINALS_BY_SCENARIO.values())
+    if unknown_matching or matching_count != 12:
+        raise RuntimeError(
+            "Clinical matching conversion contract is invalid "
+            f"(unknown={sorted(unknown_matching)}, count={matching_count}; expected 12)."
+        )
+    templates_by_id = {template.item_id: template for template in REAL_AUTHORED_ITEMS}
+    matching_by_lane = {"clinic": 0, "ward": 0, "ed": 0}
+    for scenario_id, ordinals in MATCHING_ORDINALS_BY_SCENARIO.items():
+        if len(ordinals) != len(set(ordinals)) or any(
+            ordinal < 0 or ordinal >= len(REAL_ECGS_BY_SCENARIO[scenario_id])
+            for ordinal in ordinals
+        ):
+            raise RuntimeError(f"{scenario_id}: matching ordinals are duplicated or out of range.")
+        lane = templates_by_id[scenario_id].situation
+        if lane not in matching_by_lane:
+            raise RuntimeError(f"{scenario_id}: matching tasks may only be served in clinic, ward, or ed.")
+        matching_by_lane[lane] += len(ordinals)
+    if matching_by_lane != {"clinic": 4, "ward": 4, "ed": 4}:
+        raise RuntimeError(f"Clinical matching lane mix must be 4/4/4, got {matching_by_lane}.")
 
     all_ecg_ids = [
         ecg_id

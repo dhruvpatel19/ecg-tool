@@ -100,3 +100,22 @@ def test_release_audit_enforces_complete_ptb_and_practice_minima():
     repo.settings.min_ptbxl_cases = 1
     repo.settings.min_practice_cases = 2
     assert repo._build_deployment_check() == (False, "practice_pool_below_release_minimum")
+
+
+def test_immutable_repository_caches_public_availability_counts():
+    class CountStore:
+        def __init__(self):
+            self.calls = 0
+
+        def distinct_case_count(self, concept_ids: list[str]) -> int:
+            self.calls += 1
+            return len(concept_ids) * 7
+
+    repo = CorpusRepository.__new__(CorpusRepository)
+    repo.store = CountStore()
+    repo._concept_ab_count_cache = {"sinus_rhythm": 42}
+
+    assert repo.concept_ab_counts() == {"sinus_rhythm": 42}
+    assert repo.group_reliable_count(["sinus_rhythm", "normal_ecg"]) == 14
+    assert repo.group_reliable_count(["normal_ecg", "sinus_rhythm"]) == 14
+    assert repo.store.calls == 1

@@ -36,6 +36,8 @@ jobs:
             backend/requirements-data.txt
       - name: Install test dependencies
         run: python -m pip install --requirement backend/requirements-dev.txt --requirement backend/requirements-data.txt
+      - name: Exercise every authentication email through local SMTP
+        run: python scripts/smoke_auth_email_local.py
       - name: Run backend test suite
         working-directory: backend
         run: python -m pytest tests --quiet
@@ -104,10 +106,10 @@ jobs:
       - name: Start isolated backend
         working-directory: backend
         env:
-          # Browser tests must exercise production-like per-browser guest
-          # isolation. APP_ENV=test deliberately collapses every guest to the
-          # shared deterministic `demo` principal used by unit tests.
-          APP_ENV: development
+          # Stateful mode suites use the internal credential fixture and a
+          # fresh database; registration and verification behavior is covered
+          # separately by the email-auth browser and backend contract tests.
+          APP_ENV: test
           DATABASE_URL: sqlite:///${{ runner.temp }}/ecg-e2e.sqlite3
           ECG_CORPUS_ROOT: ${{ runner.temp }}/ecg-ci-corpus
           ECG_REQUIRE_REAL_DATA: "0"

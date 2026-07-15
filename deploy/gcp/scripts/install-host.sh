@@ -91,9 +91,19 @@ CORPUS_SHA="$(metadata instance/attributes/ecg-corpus-sha256)"
 BACKUP_URI="$(metadata instance/attributes/ecg-backup-uri)"
 AUTH_SECRET="$(metadata instance/attributes/ecg-auth-secret)"
 ORIGIN_SECRET="$(metadata instance/attributes/ecg-origin-secret)"
+AUTH_SMTP_PASSWORD_SECRET="$(metadata instance/attributes/ecg-auth-smtp-password-secret || true)"
 LLM_SECRET="$(metadata instance/attributes/ecg-llm-secret || true)"
 BACKEND_DOMAIN="$(metadata instance/attributes/ecg-backend-domain)"
 ACME_EMAIL="$(metadata instance/attributes/ecg-acme-email)"
+AUTH_EMAIL_DELIVERY_MODE="$(metadata instance/attributes/ecg-auth-email-delivery-mode)"
+AUTH_EMAIL_FROM_ADDRESS="$(metadata instance/attributes/ecg-auth-email-from-address)"
+AUTH_EMAIL_REPLY_TO="$(metadata instance/attributes/ecg-auth-email-reply-to || true)"
+AUTH_PUBLIC_APP_URL="$(metadata instance/attributes/ecg-auth-public-app-url)"
+AUTH_SMTP_HOST="$(metadata instance/attributes/ecg-auth-smtp-host)"
+AUTH_SMTP_PORT="$(metadata instance/attributes/ecg-auth-smtp-port)"
+AUTH_SMTP_USERNAME="$(metadata instance/attributes/ecg-auth-smtp-username || true)"
+AUTH_SMTP_STARTTLS="$(metadata instance/attributes/ecg-auth-smtp-starttls)"
+AUTH_SMTP_TIMEOUT_SECONDS="$(metadata instance/attributes/ecg-auth-smtp-timeout-seconds)"
 LLM_PROVIDER="$(metadata instance/attributes/ecg-llm-provider)"
 LLM_MODEL="$(metadata instance/attributes/ecg-llm-model || true)"
 LLM_BASE_URL="$(metadata instance/attributes/ecg-llm-base-url || true)"
@@ -108,6 +118,8 @@ LLM_IP_HOURLY_LIMIT="$(metadata instance/attributes/ecg-llm-ip-hourly-limit)"
 LLM_GLOBAL_DAILY_LIMIT="$(metadata instance/attributes/ecg-llm-global-daily-limit)"
 BACKUP_MAX_AGE_SECONDS="$(metadata instance/attributes/ecg-backup-max-age-seconds)"
 MIN_STATE_FREE_BYTES="$(metadata instance/attributes/ecg-min-state-free-bytes)"
+AUTH_RETENTION_ACKNOWLEDGED="$(metadata instance/attributes/ecg-auth-retention-acknowledged)"
+AUTH_RETENTION_REFERENCE="$(metadata instance/attributes/ecg-auth-retention-reference || true)"
 BACKEND_MEMORY_LIMIT_MB="$(metadata instance/attributes/ecg-backend-memory-limit-mb)"
 BACKEND_MEMORY_RESERVATION_MB="$(metadata instance/attributes/ecg-backend-memory-reservation-mb)"
 BACKEND_CPU_LIMIT="$(metadata instance/attributes/ecg-backend-cpu-limit)"
@@ -116,12 +128,41 @@ require_sha256 "${CORPUS_SHA}"
 [[ "${BACKEND_DOMAIN}" =~ ^[A-Za-z0-9.-]+$ && "${BACKEND_DOMAIN}" == *.* ]] \
   || die "backend DNS hostname is invalid"
 [[ "${ACME_EMAIL}" == *@*.* ]] || die "ACME contact email is invalid"
+[[ "${AUTH_EMAIL_DELIVERY_MODE}" == "smtp" ]] \
+  || die "enabled backend requires AUTH email delivery mode smtp"
+[[ "${AUTH_EMAIL_FROM_ADDRESS}" == *@* && "${AUTH_EMAIL_FROM_ADDRESS}" != *$'\n'* && "${AUTH_EMAIL_FROM_ADDRESS}" != *$'\r'* ]] \
+  || die "authentication email From address is missing or invalid"
+[[ "${AUTH_PUBLIC_APP_URL}" =~ ^https://[A-Za-z0-9-]+([.][A-Za-z0-9-]+)+(:443)?$ ]] \
+  || die "authentication public app URL must be an HTTPS origin"
+[[ "${AUTH_SMTP_HOST}" =~ ^[A-Za-z0-9.-]+$ && "${AUTH_SMTP_HOST}" == *.* ]] \
+  || die "authentication SMTP hostname is invalid"
+[[ "${AUTH_SMTP_PORT}" == "587" ]] \
+  || die "authentication SMTP port must be 587 for explicit STARTTLS"
+[[ "${AUTH_SMTP_STARTTLS}" == "true" ]] \
+  || die "authentication SMTP STARTTLS must remain enabled"
+[[ "${AUTH_SMTP_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] && (( AUTH_SMTP_TIMEOUT_SECONDS >= 2 && AUTH_SMTP_TIMEOUT_SECONDS <= 60 )) \
+  || die "authentication SMTP timeout must be an integer from 2 through 60 seconds"
+[[ "${AUTH_EMAIL_REPLY_TO}" == *@* && "${AUTH_EMAIL_REPLY_TO}" != *$'\n'* && "${AUTH_EMAIL_REPLY_TO}" != *$'\r'* ]] \
+  || die "authentication email Reply-To address must be non-empty, monitored, and single-line"
+[[ -n "${AUTH_SMTP_USERNAME}" && "${AUTH_SMTP_USERNAME}" != *$'\n'* && "${AUTH_SMTP_USERNAME}" != *$'\r'* ]] \
+  || die "authentication SMTP username must be non-empty and single-line"
+[[ -n "${AUTH_SMTP_PASSWORD_SECRET}" ]] \
+  || die "authenticated SMTP requires a Secret Manager password container"
 [[ "${BACKEND_MEMORY_LIMIT_MB}" =~ ^[0-9]+$ && "${BACKEND_MEMORY_RESERVATION_MB}" =~ ^[0-9]+$ ]] \
   || die "backend memory controls must be integer MiB values"
 (( BACKEND_MEMORY_RESERVATION_MB <= BACKEND_MEMORY_LIMIT_MB )) \
   || die "backend memory reservation exceeds its hard limit"
 [[ "${BACKEND_CPU_LIMIT}" =~ ^[0-9]+([.][0-9]+)?$ ]] \
   || die "backend CPU limit must be a positive numeric value"
+[[ "${AUTH_RETENTION_ACKNOWLEDGED}" == "true" || "${AUTH_RETENTION_ACKNOWLEDGED}" == "false" ]] \
+  || die "authenticated retention policy acknowledgement must be true or false"
+if [[ "${AUTH_RETENTION_ACKNOWLEDGED}" == "true" ]]; then
+  [[ "${AUTH_RETENTION_REFERENCE}" =~ ^[A-Za-z0-9][A-Za-z0-9._:/#@+-]{7,511}$ ]] \
+    || die "approved authenticated retention policy reference is missing or invalid"
+else
+  [[ -z "${AUTH_RETENTION_REFERENCE}" ]] \
+    || die "authenticated retention policy reference cannot be set before acknowledgement"
+fi
 
 CORPUS_RELEASE="release-${CORPUS_SHA:0:16}"
 umask 077
@@ -139,6 +180,16 @@ CONFIG_NEW="$(mktemp "$(dirname "${CONFIG_PATH}")/deployment.env.XXXXXX")"
   printf 'GCP_PROJECT_ID=%q\n' "${PROJECT_ID}"
   printf 'ECG_AUTH_SECRET_ID=%q\n' "${AUTH_SECRET}"
   printf 'ECG_ORIGIN_SECRET_ID=%q\n' "${ORIGIN_SECRET}"
+  printf 'ECG_AUTH_EMAIL_DELIVERY_MODE=%q\n' "${AUTH_EMAIL_DELIVERY_MODE}"
+  printf 'ECG_AUTH_EMAIL_FROM_ADDRESS=%q\n' "${AUTH_EMAIL_FROM_ADDRESS}"
+  printf 'ECG_AUTH_EMAIL_REPLY_TO=%q\n' "${AUTH_EMAIL_REPLY_TO}"
+  printf 'ECG_AUTH_PUBLIC_APP_URL=%q\n' "${AUTH_PUBLIC_APP_URL}"
+  printf 'ECG_AUTH_SMTP_HOST=%q\n' "${AUTH_SMTP_HOST}"
+  printf 'ECG_AUTH_SMTP_PORT=%q\n' "${AUTH_SMTP_PORT}"
+  printf 'ECG_AUTH_SMTP_USERNAME=%q\n' "${AUTH_SMTP_USERNAME}"
+  printf 'ECG_AUTH_SMTP_PASSWORD_SECRET_ID=%q\n' "${AUTH_SMTP_PASSWORD_SECRET}"
+  printf 'ECG_AUTH_SMTP_STARTTLS=%q\n' "${AUTH_SMTP_STARTTLS}"
+  printf 'ECG_AUTH_SMTP_TIMEOUT_SECONDS=%q\n' "${AUTH_SMTP_TIMEOUT_SECONDS}"
   printf 'ECG_LLM_PROVIDER=%q\n' "${LLM_PROVIDER:-mock}"
   printf 'ECG_LLM_SECRET_ID=%q\n' "${LLM_SECRET}"
   printf 'ECG_LLM_MODEL=%q\n' "${LLM_MODEL}"
@@ -154,6 +205,8 @@ CONFIG_NEW="$(mktemp "$(dirname "${CONFIG_PATH}")/deployment.env.XXXXXX")"
   printf 'ECG_LLM_GLOBAL_DAILY_LIMIT=%q\n' "${LLM_GLOBAL_DAILY_LIMIT}"
   printf 'ECG_BACKUP_MAX_AGE_SECONDS=%q\n' "${BACKUP_MAX_AGE_SECONDS}"
   printf 'ECG_MIN_STATE_FREE_BYTES=%q\n' "${MIN_STATE_FREE_BYTES}"
+  printf 'ECG_AUTHENTICATED_RETENTION_POLICY_ACKNOWLEDGED=%q\n' "${AUTH_RETENTION_ACKNOWLEDGED}"
+  printf 'ECG_AUTHENTICATED_RETENTION_POLICY_REFERENCE=%q\n' "${AUTH_RETENTION_REFERENCE}"
 } >"${CONFIG_NEW}"
 chmod 0600 "${CONFIG_NEW}"
 mv -f "${CONFIG_NEW}" "${CONFIG_PATH}"

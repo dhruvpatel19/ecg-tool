@@ -12,7 +12,7 @@ os.environ.setdefault("ECG_CORPUS_ROOT", "data/ecg_corpus_smoke")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.main import app  # noqa: E402
+from app.main import _pending_assessment_case_ids, app, repo  # noqa: E402
 
 client = TestClient(app)
 _HAVE_CORPUS = Path("data/ecg_corpus_smoke/corpus.db").exists()
@@ -20,12 +20,34 @@ pytestmark = pytest.mark.skipif(not _HAVE_CORPUS, reason="smoke corpus not built
 
 
 def _mi_case() -> str:
-    cases = client.get("/cases?concept=myocardial_infarction").json()
-    return cases[0]["caseId"]
+    return str(repo.candidates("myocardial_infarction")[0]["case_id"])
 
 
 def test_tutor_message_is_multi_turn_grounded_and_persisted() -> None:
-    cid = _mi_case()
+    guided = client.get("/tutorials/mi-localization?concept=anterior_mi")
+    assert guided.status_code == 200, guided.text
+    guided_body = guided.json()
+    cid = guided_body["recommendedCase"]["caseId"]
+    committed = client.post(
+        "/learning-events/guided",
+        json={
+            "eventKey": "tutor-review-mi-commit",
+            "moduleId": "ischemia-infarction",
+            "sceneId": "tutor-review",
+            "interactionId": "mi-localization",
+            "concept": "anterior_mi",
+            "subskills": ["recognize"],
+            "score": 1.0,
+            "correct": True,
+            "attempts": 1,
+            "assistance": "independent",
+            "caseId": cid,
+            "guidedContext": guided_body["guidedContext"],
+            "caseProvenance": "real_eligible",
+            "caseEligible": True,
+        },
+    )
+    assert committed.status_code == 200, committed.text
     r1 = client.post(
         "/tutor/message",
         json={"mode": "tutorial", "lessonId": "mi-localization", "caseId": cid, "message": "How do I know this is an MI?"},
@@ -40,7 +62,7 @@ def test_tutor_message_is_multi_turn_grounded_and_persisted() -> None:
 
     r2 = client.post(
         "/tutor/message",
-        json={"mode": "tutorial", "caseId": cid, "threadId": r1["threadId"], "message": "What about the rate?"},
+        json={"mode": "tutorial", "lessonId": "mi-localization", "caseId": cid, "threadId": r1["threadId"], "message": "What about the rate?"},
     ).json()
     assert r2["threadId"] == r1["threadId"]
 
@@ -50,8 +72,16 @@ def test_tutor_message_is_multi_turn_grounded_and_persisted() -> None:
 
 
 def test_tutor_does_not_invent_absent_findings() -> None:
-    # normal-ish case: ask about a finding the packet does not support
-    cid = client.get("/cases?concept=normal_ecg").json()[0]["caseId"]
+    # Ask on a normal-ish case that is not currently protected by another
+    # assessment's answer boundary. Other lifecycle tests intentionally leave
+    # pending work behind; bypassing that guard would turn this grounding test
+    # into a cross-account answer-leak probe.
+    pending = _pending_assessment_case_ids()
+    cid = next(
+        str(candidate["case_id"])
+        for candidate in repo.candidates("normal_ecg")
+        if str(candidate["case_id"]) not in pending
+    )
     r = client.post(
         "/tutor/message",
         json={"mode": "freeform", "caseId": cid, "message": "Point out the anterior ST elevation."},
@@ -60,37 +90,67 @@ def test_tutor_does_not_invent_absent_findings() -> None:
     assert r["schemaError"] is None
 
 
-def test_review_session_progresses_to_mastery() -> None:
+def test_tutor_threads_are_partitioned_by_learning_waypoint() -> None:
+    first = client.post(
+        "/tutor/message",
+        json={
+            "mode": "freeform",
+            "scopeKey": "guided-rate:scene-a",
+            "message": "Help me reason through this first scene.",
+        },
+    )
+    assert first.status_code == 200
+    first_thread = first.json()["threadId"]
+
+    second = client.post(
+        "/tutor/message",
+        json={
+            "mode": "freeform",
+            "scopeKey": "guided-rate:scene-b",
+            "message": "Help me reason through this second scene.",
+        },
+    )
+    assert second.status_code == 200
+    second_thread = second.json()["threadId"]
+    assert second_thread != first_thread
+
+    scene_a = client.get(
+        "/tutor/threads",
+        params={"mode": "freeform", "scopeKey": "guided-rate:scene-a"},
+    )
+    assert scene_a.status_code == 200
+    assert [row["threadId"] for row in scene_a.json()["threads"]] == [first_thread]
+
+    cross_scene_continuation = client.post(
+        "/tutor/message",
+        json={
+            "mode": "freeform",
+            "scopeKey": "guided-rate:scene-b",
+            "threadId": first_thread,
+            "message": "Continue the old conversation here.",
+        },
+    )
+    assert cross_scene_continuation.status_code == 404
+
+
+def test_legacy_review_defers_to_the_evidence_tracked_adaptive_plan() -> None:
     start = client.post(
-        "/review/start", json={"learnerId": "rev", "conceptId": "anterior_mi", "targetMastery": 0.5, "maxCases": 15}
-    ).json()
-    sid = start["session"]["sessionId"]
-    assert start["case"] is not None
-    served = [start["case"]["caseId"]]
+        "/review/start",
+        json={
+            "learnerId": "rev",
+            "conceptId": "anterior_mi",
+            "targetMastery": 0.5,
+            "maxCases": 15,
+        },
+    )
+    assert start.status_code == 410
+    assert start.json()["detail"]["code"] == "legacy_review_deprecated"
+    assert start.json()["detail"]["replacement"] == {
+        "method": "GET",
+        "path": "/adaptive/plan",
+    }
 
-    done = False
-    for _ in range(15):
-        cid = served[-1]
-        client.post(
-            "/attempts",
-            json={
-                "learnerId": "rev",
-                "caseId": cid,
-                "mode": "concept_practice",
-                "focusObjective": "anterior_mi",
-                "structuredAnswer": {"st_t": "anterior st elevation", "synthesis": "anterior mi"},
-                "freeTextAnswer": "anterior mi",
-                "confidence": 3,
-                "hintsUsed": 0,
-            },
-        )
-        nxt = client.post(f"/review/{sid}/next").json()
-        if nxt["done"]:
-            done = True
-            assert "Mastery" in nxt["reason"] or "cap" in nxt["reason"].lower()
-            break
-        served.append(nxt["case"]["caseId"])
-
-    assert done, "review session should complete at the mastery goal"
-    # cases served within a session are distinct (no immediate repeats)
-    assert len(set(served)) == len(served)
+    plan = client.get("/adaptive/plan", params={"learnerId": "rev"})
+    assert plan.status_code == 200
+    assert plan.json()["learnerId"]
+    assert "stages" in plan.json()

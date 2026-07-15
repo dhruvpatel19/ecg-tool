@@ -107,6 +107,18 @@ export function mapPointToEcgCoordinate(
 }
 
 export function conceptLabel(id: string): string {
+  const exact: Record<string, string> = {
+    axis_normal: "Normal axis",
+    qtc_prolongation: "Prolonged QTc",
+    first_degree_av_block: "First-degree AV block",
+    second_degree_av_block: "Second-degree AV block",
+    third_degree_av_block: "Third-degree AV block",
+    premature_atrial_complex: "Premature atrial complex (PAC)",
+    premature_ventricular_complex: "Premature ventricular complex (PVC)",
+    mobitz_ii_av_block: "Mobitz II AV block",
+    wolff_parkinson_white: "Wolff–Parkinson–White (WPW)",
+  };
+  if (exact[id]) return exact[id];
   const acronyms: Record<string, string> = {
     av: "AV",
     ecg: "ECG",
@@ -122,8 +134,8 @@ export function conceptLabel(id: string): string {
   };
   return id
     .split("_")
-    .map((part) => acronyms[part.toLowerCase()] ?? part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part, index) => acronyms[part.toLowerCase()] ?? (index === 0 ? part.charAt(0).toUpperCase() + part.slice(1).toLowerCase() : part.toLowerCase()))
     .join(" ")
-    .replaceAll("R Wave", "R-Wave")
+    .replaceAll("R wave", "R-wave")
     .replaceAll("ST T", "ST-T");
 }

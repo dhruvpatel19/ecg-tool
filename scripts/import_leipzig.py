@@ -45,10 +45,7 @@ from app.ingest.source_contract import source_catalog_entry  # noqa: E402
 from app.store import CaseStore, LocalWaveformStore  # noqa: E402
 
 
-DEFAULT_SOURCE_ROOT = os.getenv("LEIPZIG_ECG_DATA_ROOT") or (
-    r"G:\.shortcut-targets-by-id\19dEk_3tejLyugli52WUa9C89WtwJDsTu\#6-ECG-VCG"
-    r"\leipzig-heart-center-ecg-database-arrhythmias-in-children-and-patients-with-congenital-heart-disease-1.0.0"
-)
+DEFAULT_SOURCE_ROOT = os.getenv("LEIPZIG_ECG_DATA_ROOT") or "data/raw/leipzig-heart-center-ecg/1.0.0"
 STATE_FILE = ".leipzig-import-state.json"
 
 
@@ -131,11 +128,14 @@ def _publish_manifest(
     """Write build state, then the complete runtime manifest as the final write."""
 
     base = dict(state.get("baseManifest") or {})
+    # Runtime provenance must be portable and safe to publish. Local Drive,
+    # mount, and staging paths belong only in the ignored resumability state.
+    for private_key in ("ptbxlDataRoot", "ptbxlPlusDataRoot", "sourceRoot", "stagingRoot"):
+        base.pop(private_key, None)
     catalog = dict(base.get("sourceCatalog") or {}) if isinstance(base.get("sourceCatalog"), dict) else {}
     source_counts = base.get("sourceCounts") if isinstance(base.get("sourceCounts"), dict) else {}
     has_ptbxl = bool(
-        base.get("ptbxlDataRoot")
-        or "ptbxl" in catalog
+        "ptbxl" in catalog
         or int((source_counts or {}).get("ptbxl") or 0) > 0
     )
     if has_ptbxl:

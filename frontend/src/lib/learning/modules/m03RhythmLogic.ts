@@ -1831,7 +1831,7 @@ const M03_SCENES = [
     },
     handoffs: [
       handoff("train", "Train my weakest rhythm distinction", "ectopy", "discriminate", "independent"),
-      handoff("rapid", "Try untimed mixed rhythm quick-looks", "rhythm_basics", "synthesize", "independent"),
+      handoff("rapid", "Rapid · Sinus-rhythm recognition", "rhythm_basics", "synthesize", "independent", { focus: "sinus_rhythm", receiptConcept: "sinus_rhythm", subskill: "recognize", pace: "untimed", suggestedLength: 5 }),
     ],
   }),
   productionScene({
@@ -1884,7 +1884,7 @@ const M03_SCENES = [
       reuseNext: "M10 clinical cases use the same evidence/context/unknown separation.",
       clinicalUse: "The learner communicates rhythm, supplied stability, timing, and uncertainty before supervised decisions.",
     },
-    handoffs: [handoff("clinical", "Use rhythm evidence in a palpitations context", "ectopy", "apply_in_context", "guided")],
+    handoffs: [],
   }),
   productionScene({
     id: "M03.S15",
@@ -1938,8 +1938,8 @@ const M03_SCENES = [
     },
     handoffs: [
       handoff("train", "Train my weakest rhythm distinction", "ectopy", "discriminate", "independent"),
-      handoff("rapid", "Try untimed mixed rhythm quick-looks", "rhythm_basics", "synthesize", "independent"),
-      handoff("clinical", "Use rhythm evidence in a monitored clinical case", "rhythm_basics", "apply_in_context", "faded"),
+      handoff("rapid", "Rapid · Sinus-rhythm recognition", "rhythm_basics", "synthesize", "independent", { focus: "sinus_rhythm", receiptConcept: "sinus_rhythm", subskill: "recognize", pace: "untimed", suggestedLength: 5 }),
+      handoff("clinical", "Clinical · Apply a normal ECG in context", "rhythm_basics", "apply_in_context", "faded", { focus: "normal_ecg", subskill: "apply_in_context", lane: "clinic", length: 5 }),
     ],
   }),
 ] satisfies ProductionModule["scenes"];

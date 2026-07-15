@@ -27,6 +27,9 @@ from app.store import CaseStore, LocalWaveformStore  # noqa: E402
 
 
 DEPLOYABLE_SOURCES = frozenset({"ptbxl", "prepared_bundle", "leipzig-heart-center"})
+PRIVATE_MANIFEST_PATH_KEYS = frozenset(
+    {"ptbxlDataRoot", "ptbxlPlusDataRoot", "sourceRoot", "stagingRoot"}
+)
 
 
 def fail(message: str) -> None:
@@ -54,6 +57,12 @@ def audit(root: Path) -> dict:
         fail(f"manifest is unreadable: {exc}")
     if manifest.get("complete") is not True:
         fail("manifest is not complete")
+    leaked_path_keys = sorted(PRIVATE_MANIFEST_PATH_KEYS.intersection(manifest))
+    if leaked_path_keys:
+        fail(
+            "manifest contains local source paths that cannot enter a release artifact: "
+            + ", ".join(leaked_path_keys)
+        )
 
     store = CaseStore(database_path, read_only=True)
     waveforms = LocalWaveformStore(waveform_root)

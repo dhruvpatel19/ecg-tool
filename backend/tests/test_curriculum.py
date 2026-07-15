@@ -6,7 +6,7 @@ a PTB-XL-absent concept, and click-tasks/modules stay consistent with the lesson
 
 from __future__ import annotations
 
-from app.curriculum import MODULES
+from app.curriculum import MODULES, curriculum_view
 from app.ontology import CONCEPT_BY_ID
 from app.tutorials import CLICK_TASKS, TUTORIALS
 
@@ -50,3 +50,25 @@ def test_modules_cover_every_lesson_exactly_once_with_valid_prereqs() -> None:
         for prereq in module["prerequisites"]:
             assert prereq in module_ids, f"{module['id']}: unknown prerequisite {prereq}"
             assert module_order[prereq] < order, f"{module['id']}: prerequisite must come first"
+
+
+def test_curriculum_never_presents_unseen_priors_as_earned_mastery() -> None:
+    class ReliableRepo:
+        @staticmethod
+        def group_reliable_count(_objectives: list[str]) -> int:
+            return 10
+
+    unseen = curriculum_view(ReliableRepo(), {})
+    assert all(module["mastery"] == 0 for module in unseen["modules"])
+    assert all(module["assessedObjectiveCount"] == 0 for module in unseen["modules"])
+    assert all(
+        lesson["assessedObjectiveCount"] == 0
+        for module in unseen["modules"]
+        for lesson in module["lessons"]
+    )
+
+    first_module = unseen["modules"][0]
+    first_objective = first_module["lessons"][0]["objectives"][0]["id"]
+    assessed = curriculum_view(ReliableRepo(), {first_objective: 0.82})["modules"][0]
+    assert assessed["assessedObjectiveCount"] == 1
+    assert assessed["mastery"] == 0.82

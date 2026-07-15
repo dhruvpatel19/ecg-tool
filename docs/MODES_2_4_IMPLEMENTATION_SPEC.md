@@ -208,15 +208,17 @@ Student accounts use revocable, expiring, opaque sessions in HttpOnly SameSite c
 
 Required behaviors:
 
-- register, sign in, sign out, and session hydration;
-- minimum password quality and normalized unique usernames;
+- verified-email registration, username-or-email sign in, sign out, recovery,
+  email change, optional email-code protection, and session hydration;
+- length-first password quality plus normalized unique usernames and emails;
 - generic invalid-credential responses and bounded failed-login throttling;
 - session rotation on sign-in and revocation on sign-out;
 - server-stored per-user pathway scene/action state;
-- guest mode clearly labeled and never merged across accounts;
-- optional one-time import of guest pathway state after registration;
+- no deployed guest learning mode or anonymous learning writes;
+- positive legacy browser records offered once for explicit attach or discard
+  after a verified account signs in;
 - no cross-user read or replay by changing an ID in a URL/body;
-- profile export/delete hooks reserved in the schema even if institution policy is not yet implemented.
+- password-confirmed profile export and transactional account deletion.
 
 ## 9. Student UI system
 

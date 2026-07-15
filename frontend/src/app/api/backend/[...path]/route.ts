@@ -18,16 +18,26 @@ function isSameOriginMutation(request: NextRequest): boolean {
   // if cookie policy changes later. Requests without browser provenance headers
   // remain available to trusted CLI/health tooling and carry no ambient cookie
   // unless that caller explicitly supplies one.
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite && fetchSite !== "same-origin") return false;
+
   const origin = request.headers.get("origin");
   if (origin) {
     try {
-      if (new URL(origin).origin !== request.nextUrl.origin) return false;
+      const originUrl = new URL(origin);
+      // `next start` can expose a public host/port while Next's internal
+      // `nextUrl.origin` retains its default listener origin. The HTTP Host is
+      // the authority the browser actually reached, so bind the Origin check
+      // to that value. Fetch Metadata above remains the browser-enforced
+      // schemeful same-origin signal; the protocol fallback protects clients
+      // that send Origin without Sec-Fetch-Site.
+      const requestHost = request.headers.get("host")?.trim();
+      if (!requestHost || requestHost.includes(",") || originUrl.host !== requestHost) return false;
+      if (!fetchSite && originUrl.protocol !== request.nextUrl.protocol) return false;
     } catch {
       return false;
     }
   }
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (fetchSite && fetchSite !== "same-origin") return false;
   return true;
 }
 
@@ -38,7 +48,10 @@ function learnerCookieHeader(raw: string | null): string | null {
     .map((part) => part.trim())
     .filter((part) => {
       const name = part.slice(0, part.indexOf("="));
-      return name === "ecg_session" || name === "ecg_guest";
+      return name === "__Host-ecg_session"
+        || name === "ecg_session"
+        || name === "ecg_guest"
+        || name === "ecg_export_auth";
     });
   return allowed.length ? allowed.join("; ") : null;
 }
@@ -59,7 +72,7 @@ function learnerResponseHeaders(upstream: Response): Headers {
 
   // Set-Cookie is intentionally the only repeatable upstream header. Node's
   // server-side Headers implementation exposes each cookie separately, which
-  // preserves simultaneous session + guest-identity rotation responses.
+  // preserves session, guest-identity, and one-use export-cookie responses.
   for (const cookie of upstream.headers.getSetCookie()) {
     headers.append("set-cookie", cookie);
   }
@@ -143,7 +156,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
   const backendBase = backendApiBase(request.nextUrl.origin);
   if (!backendBase) {
     return Response.json(
-      { detail: "Hosted backend is not configured", code: "backend_not_configured" },
+      { detail: "TRACE is temporarily unavailable", code: "backend_not_configured" },
       { status: 503 },
     );
   }
@@ -200,7 +213,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
     });
   } catch {
     return Response.json(
-      { detail: "Hosted backend is unavailable", code: "backend_unavailable" },
+      { detail: "TRACE is temporarily unavailable", code: "backend_unavailable" },
       { status: 502 },
     );
   }

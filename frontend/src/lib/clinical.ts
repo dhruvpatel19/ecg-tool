@@ -1,12 +1,12 @@
 // Clinical Decisions mode — frontend types + API client.
 // Mirrors the backend blinded item / grade contract (snake_case keys from the API).
 
-import { api, getAuthToken } from "./api";
-import type { ViewerAction } from "./types";
+import { getAuthToken, type ClinicalShiftTutorContextRef, type ClinicalTutorContextRef } from "./api";
+import type { EcgCapability, ViewerAction } from "./types";
 
 export type Lane = "clinic" | "ward" | "ed";
 export type Mode = "learn" | "shift";
-export type QuestionType = "triage" | "stepwise" | "click" | "spoterror" | "oldnew" | "mcq";
+export type QuestionType = "triage" | "stepwise" | "click" | "spoterror" | "fillin" | "matching" | "oldnew" | "mcq";
 
 export type ClinicalOption = {
   id: string;
@@ -16,7 +16,28 @@ export type ClinicalOption = {
 
 export type StepOption = { text: string };
 export type StepwiseStep = { prompt: string; options: StepOption[] };
+export type StepwiseState = {
+  totalSteps: number;
+  committed: Array<{
+    stepIndex: number;
+    prompt: string;
+    answerIndex: number;
+    answerText: string;
+  }>;
+  active: ({ stepIndex: number } & StepwiseStep) | null;
+  finalChoicesRevealed: boolean;
+};
 export type MachineLine = { id: string; text: string };
+export type FillInTask = {
+  response_label: string;
+  unit: "ms" | "bpm" | "mV" | "degrees";
+  min_value: number;
+  max_value: number;
+  step: number;
+};
+export type MatchingChoice = { id: string; label: string };
+export type MatchingRow = { id: string; clause: string };
+export type MatchingTask = { choices: MatchingChoice[]; rows: MatchingRow[] };
 export type StemChips = {
   age?: number | null;
   setting?: string | null;
@@ -34,8 +55,9 @@ export type DisplaySpec = {
 // A blinded item as served by /clinical/shift/{id}/next (answer key stripped).
 export type BlindedItem = {
   item_id: string;
-  ecg_id: string;
-  prior_ecg_id?: string | null;
+  /** Opaque session-scoped waveform capability. */
+  ecg_ref: EcgCapability;
+  prior_ecg_ref?: EcgCapability | null;
   situation: Lane;
   question_type: QuestionType;
   stem: string;
@@ -43,7 +65,10 @@ export type BlindedItem = {
   prompt?: string;
   options?: ClinicalOption[];
   steps?: StepwiseStep[];
+  stepwise_state?: StepwiseState;
   machine_read?: MachineLine[];
+  fill_in_task?: FillInTask;
+  matching_task?: MatchingTask;
   display_spec: DisplaySpec;
   clickable_leads?: string[];
   click_target_type?: string | null;
@@ -90,6 +115,7 @@ export type NextResult = {
 export type AxisScore = Record<string, number>;
 
 export type ClinicalGrade = {
+  /** Public Clinical item reference (not a corpus ECG id). */
   caseId: string;
   score: number;
   correctObjectives: string[];
@@ -107,7 +133,7 @@ export type ClinicalGrade = {
   clinicalApplicationEvidence?: "formative_only";
   competencyReceipts?: Array<{
     concept: string;
-    subskill: "apply_in_context" | "localize";
+    subskill: "apply_in_context" | "localize" | "measure";
     score: number;
     correct: boolean;
     formativeScore: number;
@@ -116,9 +142,24 @@ export type ClinicalGrade = {
     formativeOnly: true;
     retentionEligible: false;
     nextDueAt: string | null;
-    evidenceSource: "clinical_action_server_grade" | "clinical_trace_roi_server_grade";
+    evidenceSource: "clinical_action_server_grade" | "clinical_trace_roi_server_grade" | "clinical_measurement_server_grade";
   }>;
   stepResults?: boolean[];
+  matchingCorrect?: boolean;
+  matchingResults?: Array<{
+    rowId: string;
+    submittedChoiceId: string | null;
+    correctChoiceId: string;
+    correct: boolean;
+  }>;
+  firstLookAssessment?: {
+    submittedCategory: string | null;
+    confidence: number | null;
+    expectedCategories: string[];
+    agreement: boolean | null;
+    formativeOnly: true;
+    exactPathologyMasterySuppressed: true;
+  };
 };
 
 export type ShiftSession = {
@@ -129,16 +170,20 @@ export type ShiftSession = {
   focusObjective?: string | null;
   focusSubskill?: string | null;
   length: number;
+  requestedLength?: number;
+  availableDistinctEcgs?: number;
+  lengthReason?: string | null;
   pendingItemId?: string | null;
   feedbackItemId?: string | null;
   contextRevealed?: boolean;
   firstLook?: { firstLookFinding: string; firstLookConfidence: number } | null;
+  stepAnswers?: number[];
   orientStartedAt?: string | null;
   orientDeadlineAt?: string | null;
   decideStartedAt?: string | null;
   decideDeadlineAt?: string | null;
   position: number;
-  status: string;
+  status: "active" | "complete" | "abandoned";
 };
 
 export type ShiftReport = {
@@ -152,6 +197,94 @@ export type ShiftReport = {
   avgDecideMs: number | null;
   calibrationLabel: string;
   status: string;
+  performanceDomains?: {
+    ecgRecognitionFirstLook: {
+      broadCategory: { assessed: number; matched: number; score: number | null };
+      traceAxes: Record<string, { assessed: number; score: number }>;
+      formativeOnly: true;
+      exactPathologyMastery: false;
+    };
+    clinicalApplicationDecision: {
+      assessed: number;
+      score: number | null;
+      axes: Record<string, { assessed: number; score: number }>;
+      formativeOnly: true;
+    };
+    safety: {
+      assessed: number;
+      safe: number;
+      flagged: number;
+      unsafeChoices: number;
+      score: number | null;
+    };
+    confidenceCalibration: {
+      assessed: number;
+      broadCategoryMatches: number;
+      highConfidenceMismatches: number;
+      score: number | null;
+      label: string;
+    };
+  };
+  debrief?: {
+    evidenceBoundary: "completed_server_grades_plus_independent_competency_state";
+    clinicalEvidence: "formative_only";
+    conceptEvidence: Array<{
+      concept: string;
+      label: string;
+      caseCount: number;
+      distinctEcgs: number;
+      correctCount: number;
+      missedCount: number;
+      priorityScore: number;
+      independentEvidence: {
+        subskill: string | null;
+        independentAttempts: number;
+        independentMastery: number;
+        highConfidenceWrong: number;
+        isDue: boolean;
+        dueState: string;
+      };
+    }>;
+    priorityConcept: {
+      concept: string;
+      label: string;
+      correctCount: number;
+      missedCount: number;
+      independentEvidence: {
+        subskill: string | null;
+        independentAttempts: number;
+        independentMastery: number;
+        highConfidenceWrong: number;
+        isDue: boolean;
+        dueState: string;
+      };
+    } | null;
+    crossConceptBridge: {
+      primaryConcept: string;
+      primaryLabel: string;
+      secondaryConcept: string;
+      secondaryLabel: string;
+      prompt: string;
+      grounding: "completed_server_grades_only";
+    } | null;
+    nextCaseProposal: {
+      concept: string;
+      label: string;
+      subskill: "apply_in_context";
+      lane: Lane;
+      eligibleUnseenCases: number;
+      href: string;
+      reason: string;
+      learningEvidence: "formative_only";
+    } | null;
+    destinations: {
+      clinical: { href: string; concept: string; label: string } | null;
+      rapid: { href: string; concept: string; label: string; purpose: string } | null;
+      adaptiveReview: { href: "/review"; purpose: string };
+    };
+    aiPrompt: string;
+  };
+  tutorContext?: ClinicalShiftTutorContextRef;
 };
 
 export type ClinicalAnswerPayload = {
@@ -161,11 +294,13 @@ export type ClinicalAnswerPayload = {
   selectedOptionId?: string | null;
   click?: { lead: string; timeSec: number; amplitudeMv?: number } | null;
   machineLineId?: string | null;
+  fillInValue?: number | null;
   confidence?: number | null;
   answerTimeMs?: number | null;
   confidenceTimeMs?: number | null;
   timedOut?: boolean;
   stepAnswers?: number[];
+  matches?: Record<string, string>;
 };
 
 export type ClinicalLifecycle = {
@@ -173,6 +308,7 @@ export type ClinicalLifecycle = {
   state: "picker" | "orient" | "decide" | "feedback" | "report";
   current: NextResult | null;
   grade: ClinicalGrade | null;
+  tutorContext?: ClinicalTutorContextRef | null;
   answer?: ClinicalAnswerPayload | null;
   report: ShiftReport | null;
 };
@@ -219,20 +355,27 @@ export const clinicalApi = {
   bankStatus: () => get<{ counts: Record<string, number> }>("/clinical/bank/status"),
   bankCoverage: () => get<{
     coverage: Record<string, { items: number; distinctEcgs: number }>;
+    applicationCoverage: Record<string, Partial<Record<Lane, { items: number; distinctEcgs: number }>>>;
     clinicianReviewed: boolean;
     reviewStatus: string;
   }>("/clinical/bank/coverage"),
   start: (body: { lane: Lane; tier: Mode; length: number; learnerId?: string; focus?: string; subskill?: string }) =>
     post<{ session: ShiftSession; next: NextResult }>("/clinical/shift/start", body),
   active: () => get<ClinicalLifecycle>("/clinical/shift/active"),
+  abandon: (sessionId: string) =>
+    post<ClinicalLifecycle>(`/clinical/shift/${sessionId}/abandon`, {}),
   next: (sessionId: string) => post<NextResult>(`/clinical/shift/${sessionId}/next`, {}),
   activatePhase: (sessionId: string, itemId: string, phase: "orient" | "decide") =>
     post<NextResult>(`/clinical/shift/${sessionId}/phase`, { itemId, phase }),
   revealContext: (sessionId: string, itemId: string, answer: ClinicalAnswerPayload) =>
     post<NextResult>(`/clinical/shift/${sessionId}/context`, { itemId, answer }),
+  commitStep: (sessionId: string, itemId: string, stepIndex: number, answerIndex: number) =>
+    post<NextResult>(`/clinical/shift/${sessionId}/step`, { itemId, stepIndex, answerIndex }),
   answer: (sessionId: string, itemId: string, answer: ClinicalAnswerPayload) =>
-    post<{ grade: ClinicalGrade }>(`/clinical/shift/${sessionId}/answer`, { itemId, answer }),
+    post<{
+      grade: ClinicalGrade;
+      answerId: number;
+      tutorContext: ClinicalTutorContextRef;
+    }>(`/clinical/shift/${sessionId}/answer`, { itemId, answer }),
   report: (sessionId: string) => get<ShiftReport>(`/clinical/shift/${sessionId}/report`),
-  // re-export the shared waveform client (used by the pinned rhythm strip)
-  waveform: api.waveform,
 };

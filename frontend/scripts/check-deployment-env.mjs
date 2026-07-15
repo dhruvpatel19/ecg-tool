@@ -13,6 +13,16 @@ if (!isVercel) {
   process.exit(0);
 }
 
+const misplacedMailVariables = Object.keys(process.env)
+  .filter((name) => name.startsWith("AUTH_EMAIL_") || name.startsWith("AUTH_SMTP_"))
+  .sort();
+if (misplacedMailVariables.length > 0) {
+  console.error(
+    `[deployment-env] backend mail settings must not be copied into Vercel: ${misplacedMailVariables.join(", ")}`,
+  );
+  process.exit(1);
+}
+
 if (!backend) {
   console.error("[deployment-env] ECG_BACKEND_API_BASE is required on Vercel");
   process.exit(1);

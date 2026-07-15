@@ -14,7 +14,9 @@ Terraform does **not** upload an image, corpus archive, license-restricted data,
 - one private Artifact Registry Docker repository whose disposable unique build
   tags are cleanup-managed while every deployment is pinned to a content digest;
   cleanup keeps the active digest plus explicitly declared recovery digests;
-- empty Secret Manager containers for the auth-rate-limit HMAC key and origin shared secret, plus an optional LLM key container;
+- empty Secret Manager containers for the auth-rate-limit HMAC key and origin
+  shared secret, a dedicated SMTP-password container when SMTP is configured,
+  plus an optional LLM key container;
 - a dedicated VM service account and resource-scoped IAM;
 - a public `/readyz` dependency-aware uptime check and failure alert policy;
 - a project-filtered monthly Cloud Billing budget with current/forecast alerts
@@ -39,7 +41,14 @@ Use Terraform 1.6+ and Application Default Credentials for an infrastructure ope
 4. Apply the foundation. No application VM exists yet.
 5. Build and push the backend image outside Terraform. Record the immutable Artifact Registry reference returned by the registry (`...@sha256:<64 hex>`); a tag is rejected by the VM precondition. Before replacing an existing `backend_image`, add its digest to `artifact_recovery_image_digests` so cleanup continues to protect the rollback artifact.
 6. Upload the approved corpus archive outside Terraform. Record both its GCS object generation and local SHA-256. This must be the release corpus, never a raw credentialed MIMIC archive.
-7. Add secret **versions** outside Terraform. The containers are outputs; payloads must never appear in `.tf`, `.tfvars`, plan output, or Terraform state. At minimum populate the auth-rate-limit and origin-shared-secret containers. The production example also requires the LLM API-key version. Configure the same origin value securely in the Vercel server environment.
+7. Add secret **versions** outside Terraform. The containers are outputs;
+   payloads must never appear in `.tf`, `.tfvars`, plan output, instance
+   metadata, or Terraform state. At minimum populate the auth-rate-limit and
+   origin-shared-secret containers. SMTP mode requires an authenticated
+   provider username, monitored Reply-To, and provider-issued SMTP password
+   version; the production example also requires
+   the LLM API-key version. Configure the same origin value securely in the
+   Vercel server environment.
 8. Set the image digest, corpus generation/SHA, DNS health hostname, ACME email, and `provision_instance = true`; plan and apply again.
 
 The checked demo example uses one `e2-small` VM with 20 GiB standard boot and
@@ -59,10 +68,17 @@ Example out-of-band secret version commands (values are read interactively/stdin
 ```bash
 openssl rand -hex 32 | gcloud secrets versions add ecg-auth-rate-limit-secret --data-file=-
 openssl rand -hex 32 | gcloud secrets versions add ecg-origin-shared-secret --data-file=-
+gcloud secrets versions add ecg-auth-smtp-password --data-file=-
 gcloud secrets versions add ecg-llm-api-key --data-file=-
 ```
 
-If an LLM provider is enabled, create the optional container through Terraform and add its value the same way. Do not paste a key on a command line that will be retained in shell history.
+The SMTP password is added only after an operator selects a provider and
+approves its controlled sender-domain, monitored support mailbox, privacy,
+quota, and cost terms. Terraform carries
+only non-secret transport settings and the secret container ID. If an LLM
+provider is enabled, create its optional container through Terraform and add
+its value the same way. Do not paste any secret on a command line that will be
+retained in shell history.
 
 ## Trusted installer contract
 
@@ -82,7 +98,15 @@ for idempotently:
 - downloading the exact `gs://...#generation` corpus object and verifying its configured SHA-256 before atomic promotion;
 - authenticating Docker with the VM service account and pulling the exact `@sha256:` backend image;
 - reading secret payloads from Secret Manager and writing a root-owned, mode `0600` environment file;
-- setting `APP_ENV=production`, `ECG_REQUIRE_REAL_DATA=1`, the persistent `DATABASE_URL`, `ECG_CORPUS_ROOT`, `AUTH_RATE_LIMIT_SECRET`, and `ECG_ORIGIN_SHARED_SECRET`;
+- setting `APP_ENV=production`, `ECG_REQUIRE_REAL_DATA=1`, the persistent
+  `DATABASE_URL`, `ECG_CORPUS_ROOT`, `AUTH_RATE_LIMIT_SECRET`, and
+  `ECG_ORIGIN_SHARED_SECRET`;
+- writing complete provider-neutral SMTP settings while materializing the SMTP
+  password only from Secret Manager; an enabled VM requires authenticated
+  STARTTLS on port 587 plus a monitored Reply-To, and missing mail configuration
+  prevents VM installation and application readiness;
+- passing the fail-closed authenticated-retention acknowledgement/reference into
+  runtime only after product/legal approval (Terraform never selects the policy);
 - installing/restarting the backend and reverse-proxy systemd units, exposing only 80/443;
 - enforcing the reviewed Docker CPU, memory-reservation, hard-memory, and no-swap-growth ceilings;
 - installing an idempotent backup timer that writes uniquely named objects under the granted backup prefix.
@@ -119,6 +143,15 @@ before deleting older uniquely named releases. With the timer/host healthy, the
 scheduled RPO target is roughly 6h15 plus backup duration (including randomized
 delay); readiness becomes unhealthy after 14 hours without success, which is a
 separate outage tolerance rather than the RPO.
+
+Authenticated learner records are not time-purged by the application. Before a
+production instance can be planned and report ready, a product/legal owner must
+approve the institution's account retention/deletion policy and operators must
+set both `authenticated_retention_policy_acknowledged = true` and the matching
+non-secret `authenticated_retention_policy_reference`. Leave the defaults
+`false`/empty until that approval exists. This acknowledgement does not choose a
+duration; the policy must cover backup expiry, restore suppression, legal holds,
+and institutional deprovisioning.
 
 Set `allow_initial_disk_format = true` only for the first boot of the newly
 created blank disk. After a successful mount/initial backup, change it back to

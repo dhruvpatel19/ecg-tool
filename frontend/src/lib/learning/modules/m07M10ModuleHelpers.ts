@@ -177,8 +177,9 @@ export function handoff(
   concept: string,
   subskill: CrossModeHandoff["subskill"],
   supportLevel: CrossModeHandoff["supportLevel"],
+  destination?: CrossModeHandoff["destination"],
 ): CrossModeHandoff {
-  return { mode, label, concept, subskill, supportLevel };
+  return { mode, label, concept, subskill, supportLevel, destination };
 }
 
 export function buildScene(
@@ -338,4 +339,3 @@ export function compactInteraction(
 ): LearningInteraction {
   return { ...base(values), ...values } as LearningInteraction;
 }
-

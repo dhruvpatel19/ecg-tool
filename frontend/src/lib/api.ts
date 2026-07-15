@@ -4,6 +4,7 @@ import type {
   ClickGradeResult,
   ClickTask,
   ConceptGroup,
+  EcgCapability,
   LearnerProfile,
   MeResponse,
   RegionGradeResult,
@@ -12,6 +13,7 @@ import type {
   TutorMessageResponse,
   TutorResponse,
   TutorThread,
+  WaveformScope,
   WaveformResponse,
 } from "./types";
 
@@ -37,10 +39,14 @@ export type CurriculumModule = {
     reliableCaseCount: number;
     available: boolean;
     mastery: number;
+    assessedObjectiveCount: number;
+    objectiveCount: number;
   }>;
   reliableCaseCount: number;
   available: boolean;
   mastery: number;
+  assessedObjectiveCount: number;
+  objectiveCount: number;
 };
 
 export type TutorMessageBody = {
@@ -48,9 +54,42 @@ export type TutorMessageBody = {
   threadId?: string | null;
   mode: "tutorial" | "practice" | "freeform";
   lessonId?: string | null;
-  caseId?: string | null;
+  /** Opaque ECG capability. The wire key remains `caseId` for API compatibility. */
+  caseId?: EcgCapability | null;
+  scopeKey?: string | null;
   message: string;
   viewerState?: Record<string, unknown>;
+  clinicalContext?: ClinicalTutorContextRef | null;
+  clinicalShiftContext?: ClinicalShiftTutorContextRef | null;
+  adaptiveContext?: AdaptiveTutorContextRef | null;
+  rapidRoundContext?: RapidRoundTutorContextRef | null;
+};
+
+export type ClinicalTutorContextRef = {
+  contextId: string;
+  sessionId: string;
+  itemId: string;
+  answerId: number;
+  version: "clinical-post-feedback-v1";
+};
+
+export type ClinicalShiftTutorContextRef = {
+  contextId: string;
+  sessionId: string;
+  answerCount: number;
+  version: "clinical-shift-debrief-v1";
+};
+
+export type AdaptiveTutorContextRef = {
+  contextId: string;
+  version: "adaptive-plan-coach-v1";
+  expiresAt: string;
+};
+
+export type RapidRoundTutorContextRef = {
+  roundId: string;
+  answerCount: number;
+  version: "rapid-round-debrief-v1";
 };
 
 export type ClickGradeBody = {
@@ -58,6 +97,7 @@ export type ClickGradeBody = {
   timeSec: number;
   amplitudeMv: number;
   concept?: string | null;
+  guidedContext?: string | null;
 };
 
 export type RegionGradeBody = {
@@ -67,7 +107,25 @@ export type RegionGradeBody = {
   ampMinMv: number;
   ampMaxMv: number;
   concept?: string | null;
+  guidedContext?: string | null;
 };
+
+function waveformPath(scope: WaveformScope | undefined, ecgRef: EcgCapability): string {
+  const encodedRef = encodeURIComponent(ecgRef);
+  if (scope?.kind === "guided") {
+    return `/tutorials/${encodeURIComponent(scope.lessonId)}/waveform/${encodedRef}`;
+  }
+  if (scope?.kind === "training") {
+    return `/training/campaigns/${encodeURIComponent(scope.campaignId)}/waveform/${encodedRef}`;
+  }
+  if (scope?.kind === "rapid") {
+    return `/rapid/rounds/${encodeURIComponent(scope.roundId)}/waveform/${encodedRef}`;
+  }
+  if (scope?.kind === "clinical") {
+    return `/clinical/shift/${encodeURIComponent(scope.sessionId)}/waveform/${encodedRef}`;
+  }
+  return `/cases/${encodedRef}/waveform`;
+}
 
 export type PathwaySceneStatus = "not-started" | "viewed" | "attempted" | "needs-review" | "complete" | "skipped";
 
@@ -83,6 +141,87 @@ export type PathwayProgressItem = {
   createdAt?: string;
   updatedAt?: string;
 };
+
+export type LearningResumeDestination =
+  | { kind: "guided"; moduleId: string; sceneId: string | null }
+  | { kind: "training" }
+  | { kind: "rapid" }
+  | { kind: "clinical" };
+
+export type LearningResumeSession = {
+  mode: "guided" | "training" | "rapid" | "clinical";
+  phase: "deadline" | "feedback" | "in_progress";
+  completed: number;
+  total: number;
+  updatedAt: string;
+  destination: LearningResumeDestination;
+};
+
+export type LearningResumeSnapshot = {
+  version: "learning-resume-v1";
+  generatedAt: string;
+  primary: LearningResumeSession | null;
+  additional: LearningResumeSession[];
+};
+
+export type LearningActivityMode = "all" | "guided" | "training" | "rapid" | "clinical";
+
+export type LearningActivityItem = {
+  id: string;
+  mode: Exclude<LearningActivityMode, "all">;
+  kind: "guided_task" | "ecg_attempt";
+  occurredAt: string;
+  objectiveId: string | null;
+  subskill: string | null;
+  testedCompetencies: Array<{
+    objectiveId: string;
+    subskill: string;
+    evidence: "formative" | "independent";
+  }>;
+  score: number | null;
+  confidence: number | null;
+  assistance: "unassisted" | "assisted" | "unknown";
+  evidence: "formative" | "independent" | "legacy_unverified";
+  reviewRecommended: boolean;
+};
+
+export type LearningActivityPage = {
+  version: "learning-activity-v1";
+  items: LearningActivityItem[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type LearningTrainingStage =
+  | "not_set"
+  | "preclinical"
+  | "core_clerkship"
+  | "advanced_clerkship"
+  | "resident_review";
+
+export type LearningPrimaryGoal =
+  | "build_fundamentals"
+  | "exam_prep"
+  | "clinical_reading"
+  | "emergency_prioritization"
+  | "medication_safety";
+
+export type LearningRapidPace = "untimed" | "ward" | "emergency";
+export type LearningGuidanceLevel = "step_by_step" | "balanced" | "minimal";
+export type LearningSessionLength = 5 | 10 | 25 | 50;
+
+export type LearningPreferences = {
+  trainingStage: LearningTrainingStage;
+  primaryGoal: LearningPrimaryGoal;
+  defaultSessionLength: LearningSessionLength;
+  rapidPace: LearningRapidPace;
+  guidanceLevel: LearningGuidanceLevel;
+  reduceMotion: boolean;
+  largeControls: boolean;
+  updatedAt: string | null;
+};
+
+export type LearningPreferencesUpdate = Partial<Omit<LearningPreferences, "updatedAt">>;
 
 export type CompetencyState = "unseen" | "acquiring" | "developing" | "consolidating" | "durable";
 
@@ -151,11 +290,14 @@ export type AdaptivePriority = {
 
 export type AdaptivePlan = {
   learnerId: string;
+  coachContext: AdaptiveTutorContextRef;
   generatedAt: string;
   plannerKind: "verified_competency_scheduler";
   generativeTutorUsed: false;
   basis: {
+    independentCompetencyObservations: number;
     independentAttempts: number;
+    independentAttemptUnit: "competency_observation";
     dueCompetencies: number;
     overdueCompetencies: number;
     highConfidenceMisses: number;
@@ -175,6 +317,19 @@ export type AdaptivePlan = {
     receiptSubskill: string;
     evidenceKind: "independent_transfer";
   }>;
+  guidedRemediation: null | {
+    mode: "guided";
+    title: string;
+    purpose: string;
+    href: string;
+    moduleId: string;
+    sceneId: string;
+    concept: string;
+    evidenceKind: "formative_guided";
+    updatesIndependentMastery: false;
+    beforeStageOrder: number | null;
+    reason: string;
+  };
   integration: null | {
     primaryConcept: string;
     secondaryConcept: string;
@@ -182,6 +337,18 @@ export type AdaptivePlan = {
     receiptSubskill: "synthesize";
     prompt: string;
     href: string;
+    suggestedLength: number;
+  };
+  clinicalApplication: null | {
+    mode: "clinical";
+    title: string;
+    purpose: string;
+    href: string;
+    concept: string;
+    subskill: "apply_in_context";
+    evidenceKind: "formative_application";
+    afterStageOrder: number | null;
+    reason: string;
   };
   explanation: string;
 };
@@ -200,6 +367,7 @@ export type GuestProgressSummary = {
   clinicalSessions: number;
   trainingCampaigns: number;
   competencies: number;
+  learningPreferences: number;
   lastActivityAt: string | null;
 };
 
@@ -210,12 +378,122 @@ export type GuestClaimReceipt = {
   guestProgress: GuestProgressSummary;
 };
 
-type AuthResponse = {
+export type AuthenticatedAuthResponse = {
   user: import("./types").User;
   guestClaim?: GuestClaimReceipt | null;
 };
 
+export type EmailVerificationRequiredResponse = {
+  verificationRequired: true;
+  challengeId: string;
+  maskedEmail: string | null;
+  expiresAt: string;
+  guestClaimPendingVerification?: boolean;
+  deliveryFailed?: boolean;
+  retryAfterSeconds?: number | null;
+};
+
+export type UnverifiedEmailReplacementRequest = {
+  currentPassword: string;
+  newEmail: string;
+  /** Present only for a public, still-pending registration. */
+  challengeId?: string;
+};
+
+export type AccountResolutionResponse = {
+  accountResolutionRequired: true;
+  suggestedAction: "sign_in_or_reset_password" | "reset_password";
+  message?: string;
+};
+
+export type EmailVerificationConfirmationResponse =
+  | (AuthenticatedAuthResponse & { accountStatus: "verified" })
+  | AccountResolutionResponse;
+
+export type AuthAttemptResponse =
+  | AuthenticatedAuthResponse
+  | EmailVerificationRequiredResponse;
+
+export type EmailChangeRequiredResponse = {
+  emailChangeVerificationRequired: true;
+  challengeId: string;
+  maskedEmail: string | null;
+  expiresAt: string;
+  deliveryFailed?: boolean;
+  retryAfterSeconds?: number | null;
+};
+
+export type CurrentEmailFactorRequiredResponse = {
+  currentEmailFactorRequired: true;
+  challengeId: string;
+  maskedEmail: string | null;
+  expiresAt: string;
+  deliveryFailed?: boolean;
+  retryAfterSeconds?: number | null;
+};
+
+export type EmailChangeRequestResponse =
+  | EmailChangeRequiredResponse
+  | CurrentEmailFactorRequiredResponse;
+
+export type AuthResendResponse = {
+  ok: true;
+  message: string;
+  deliveryFailed?: boolean;
+  retryAfterSeconds?: number | null;
+};
+
+export type AuthApiErrorDetail = {
+  field?: string | null;
+  code?: string | null;
+  message?: string | null;
+};
+
+export type ProgressExport = {
+  schemaVersion: "ecg-student-progress-v2";
+  exportedAt: string;
+  assessmentPrivacy: {
+    pendingAndFutureAnswerContractsOmitted: boolean;
+    corpusIdentifiersPseudonymized?: boolean;
+    note: string;
+  };
+  account: {
+    userId: string;
+    username: string;
+    displayName: string;
+    createdAt: string;
+  };
+  recordCounts: Record<string, number>;
+  records: Record<string, Array<Record<string, unknown>>>;
+};
+
+export type AccountSession = {
+  sessionId: string;
+  createdAt: string;
+  expiresAt: string;
+  current: boolean;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "/api/backend";
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly field: string | null;
+  readonly retryAfterSeconds: number | null;
+  readonly detail: AuthApiErrorDetail | null;
+
+  constructor(response: Response, rawBody: string, detail: AuthApiErrorDetail | null) {
+    super(`${response.status} ${response.statusText}: ${rawBody}`);
+    this.name = "ApiError";
+    this.status = response.status;
+    this.code = detail?.code ?? null;
+    this.field = detail?.field ?? null;
+    const retryAfter = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
+    this.retryAfterSeconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null;
+    this.detail = detail;
+  }
+}
 
 /**
  * @deprecated Browser authentication is cookie-only. Kept temporarily so
@@ -240,7 +518,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`${response.status} ${response.statusText}: ${text}`);
+    let detail: AuthApiErrorDetail | null = null;
+    try {
+      const parsed = JSON.parse(text) as { detail?: string | AuthApiErrorDetail };
+      if (parsed.detail && typeof parsed.detail === "object") detail = parsed.detail;
+      else if (typeof parsed.detail === "string") detail = { message: parsed.detail };
+    } catch {
+      // Preserve the opaque response body in the Error message for older
+      // callers while structured auth clients use the safe fields above.
+    }
+    throw new ApiError(response, text, detail);
   }
   return response.json() as Promise<T>;
 }
@@ -259,15 +546,15 @@ export const api = {
     const qs = params.toString();
     return request<CaseSummary[]>(`/cases${qs ? `?${qs}` : ""}`);
   },
-  packet: (caseId: string, opts?: { blinded?: boolean }) =>
-    request<CasePacket>(`/cases/${caseId}/packet${opts?.blinded ? "?blinded=true" : ""}`),
-  waveform: (caseId: string, start = 0, end = 10, leads?: string[]) => {
+  packet: (ecgRef: EcgCapability, opts?: { blinded?: boolean }) =>
+    request<CasePacket>(`/cases/${encodeURIComponent(ecgRef)}/packet${opts?.blinded ? "?blinded=true" : ""}`),
+  waveform: (ecgRef: EcgCapability, start = 0, end = 10, leads?: string[], scope?: WaveformScope) => {
     const params = new URLSearchParams();
     params.set("start", String(start));
     params.set("end", String(end));
     params.set("maxPoints", "1600");
     if (leads?.length) params.set("leads", leads.join(","));
-    return request<WaveformResponse>(`/cases/${caseId}/waveform?${params.toString()}`);
+    return request<WaveformResponse>(`${waveformPath(scope, ecgRef)}?${params.toString()}`);
   },
   concepts: () =>
     request<{
@@ -303,6 +590,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  abandonRapidRound: (roundId: string) =>
+    request<RapidRoundPayload>(`/rapid/rounds/${encodeURIComponent(roundId)}/abandon`, {
+      method: "POST",
+    }),
   trainingPool: (conceptId: string, subskill: string) => {
     const params = new URLSearchParams({ conceptId, subskill });
     return request<{
@@ -312,6 +603,7 @@ export const api = {
       roleCounts: { target: number; mimic: number; negative: number };
       allowedLengths: number[];
       source: "audited_waveform_only";
+      independentReceiptsAvailable: boolean;
     }>(`/training/campaigns/pool?${params.toString()}`);
   },
   activeTrainingCampaign: () => request<TrainingCampaignPayload>("/training/campaigns/active"),
@@ -329,7 +621,7 @@ export const api = {
   abandonTrainingCampaign: (campaignId: string) =>
     request<TrainingCampaignPayload>(`/training/campaigns/${encodeURIComponent(campaignId)}/abandon`, { method: "POST" }),
   submitAttempt: (body: unknown) =>
-    request<{ attemptId: number; grade: Record<string, unknown>; tutor: TutorResponse; profile: LearnerProfile }>("/attempts", {
+    request<{ attemptId: number; grade: Record<string, unknown>; tutor: TutorResponse; profile: LearnerProfile; packet: CasePacket }>("/attempts", {
       method: "POST",
       body: JSON.stringify(body),
     }),
@@ -364,24 +656,38 @@ export const api = {
       body: JSON.stringify({ learnerId: "demo", ...body }),
     }),
   tutorThread: (threadId: string) => request<TutorThread>(`/tutor/thread/${encodeURIComponent(threadId)}`),
-  tutorThreads: (opts: { mode?: string; lessonId?: string | null; caseId?: string | null; limit?: number }) => {
+  tutorThreads: (opts: { mode?: string; lessonId?: string | null; ecgRef?: EcgCapability | null; scopeKey?: string | null; limit?: number }) => {
     const params = new URLSearchParams();
     if (opts.mode) params.set("mode", opts.mode);
     if (opts.lessonId) params.set("lessonId", opts.lessonId);
-    if (opts.caseId) params.set("caseId", opts.caseId);
+    if (opts.ecgRef) params.set("caseId", opts.ecgRef);
+    if (opts.scopeKey) params.set("scopeKey", opts.scopeKey);
     if (opts.limit) params.set("limit", String(opts.limit));
     return request<{ threads: Array<Omit<TutorThread, "messages">> }>(`/tutor/threads?${params.toString()}`);
   },
-  gradeClick: (caseId: string, body: ClickGradeBody) =>
-    request<ClickGradeResult>(`/grade/click/${encodeURIComponent(caseId)}`, {
+  gradeClick: (ecgRef: EcgCapability, body: ClickGradeBody) =>
+    request<ClickGradeResult>(`/grade/click/${encodeURIComponent(ecgRef)}`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  gradeRegion: (caseId: string, body: RegionGradeBody) =>
-    request<RegionGradeResult>(`/grade/region/${encodeURIComponent(caseId)}`, {
+  gradeRegion: (ecgRef: EcgCapability, body: RegionGradeBody) =>
+    request<RegionGradeResult>(`/grade/region/${encodeURIComponent(ecgRef)}`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  gradeGuidedMeasurement: (
+    ecgRef: EcgCapability,
+    body: {
+      measurementKey: string;
+      value: number;
+      tolerance: number;
+      derive?: "rr_from_heart_rate" | null;
+      guidedContext: string;
+    },
+  ) => request<{ correct: boolean; noTarget: boolean; feedback: string }>(
+    `/grade/measurement/${encodeURIComponent(ecgRef)}`,
+    { method: "POST", body: JSON.stringify(body) },
+  ),
   tutorials: () =>
     request<{
       frameworks: Array<{ id: string; title: string; steps: string[] }>;
@@ -408,31 +714,166 @@ export const api = {
     request<{ learnerId: string; registryVersion: string; objectives: CompetencyObjective[] }>(
       `/learners/${encodeURIComponent(learnerId)}/competencies`,
     ),
+  learningResume: () => request<LearningResumeSnapshot>("/learning/resume"),
+  learningActivity: (
+    mode: LearningActivityMode = "all",
+    limit = 20,
+    cursor?: string | null,
+  ) => {
+    const params = new URLSearchParams({ mode, limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    return request<LearningActivityPage>(`/learning/activity?${params.toString()}`);
+  },
+  learningPreferences: () => request<LearningPreferences>("/learning/preferences"),
+  updateLearningPreferences: (body: LearningPreferencesUpdate) =>
+    request<LearningPreferences>("/learning/preferences", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
   adaptivePlan: () => request<AdaptivePlan>("/adaptive/plan"),
-  tutorial: (lessonId: string, conceptId?: string, excludeCaseId?: string) =>
+  tutorial: (
+    lessonId: string,
+    conceptId?: string,
+    excludeCaseId?: string,
+    eligibility?: {
+      minimumTier?: "A" | "B";
+      requiredLeads?: string[];
+      requiredMeasurements?: string[];
+      requiredRois?: string[];
+      requiresPerBeatLandmarks?: boolean;
+    },
+  ) =>
     request<{
       lesson: TutorialLesson;
       frameworks: Array<{ id: string; title: string; steps: string[] }>;
       recommendedCase: CaseSummary;
+      recommendedPacket: CasePacket;
+      guidedContext: string;
+      guidedEligibility: {
+        eligible: boolean;
+        missingRequirementCount: number;
+        message: string;
+      };
       openingPrompt: string;
-      selection?: { requestedConceptUnavailable?: boolean; reason?: string; targetObjectives?: string[]; exemplarRejections?: Array<{ caseId: string; reasons: string[] }> };
+      assessmentPrivacy: {
+        opaqueEcgReference: true;
+        answerFieldsWithheldUntilCommit: true;
+        sourceRecordIdentityWithheld: true;
+      };
+      selection?: { requestedConceptUnavailable?: boolean; reason?: string; excludedBorderlineCount?: number };
     }>(`/tutorials/${lessonId}${(() => {
       const params = new URLSearchParams();
       if (conceptId) params.set("concept", conceptId);
       if (excludeCaseId) params.set("excludeCaseId", excludeCaseId);
+      if (eligibility?.minimumTier) params.set("minimumTier", eligibility.minimumTier);
+      if (eligibility?.requiredLeads?.length) params.set("requiredLeads", eligibility.requiredLeads.join(","));
+      if (eligibility?.requiredMeasurements?.length) params.set("requiredMeasurements", eligibility.requiredMeasurements.join(","));
+      if (eligibility?.requiredRois?.length) params.set("requiredRois", eligibility.requiredRois.join(","));
+      if (eligibility?.requiresPerBeatLandmarks) params.set("requiresPerBeatLandmarks", "true");
       const query = params.toString();
       return query ? `?${query}` : "";
     })()}`),
   guestProgress: () => request<GuestProgressSummary>("/auth/guest-progress"),
-  register: (body: { username: string; password: string; displayName?: string; claimGuestProgress?: boolean }) =>
-    request<AuthResponse>("/auth/register", { method: "POST", body: JSON.stringify(body) }),
-  login: (body: { username: string; password: string; claimGuestProgress?: boolean }) =>
-    request<AuthResponse>("/auth/login", { method: "POST", body: JSON.stringify(body) }),
+  claimLegacyProgress: () =>
+    request<{ ok: true; guestClaim: GuestClaimReceipt }>("/auth/guest-progress/claim", {
+      method: "POST",
+      body: "{}",
+    }),
+  deleteGuestProgress: () =>
+    request<{ ok: boolean; deletedRecords: number }>("/auth/guest-progress", { method: "DELETE" }),
+  register: (body: { password: string; email: string; displayName?: string; claimGuestProgress?: boolean }) =>
+    request<AuthAttemptResponse>("/auth/register", { method: "POST", body: JSON.stringify(body) }),
+  login: (body: { identifier: string; password: string; claimGuestProgress?: boolean }) =>
+    request<AuthAttemptResponse>("/auth/login", { method: "POST", body: JSON.stringify(body) }),
+  confirmEmailVerification: (body: { challengeId: string; token: string; password: string }) =>
+    request<EmailVerificationConfirmationResponse>("/auth/email/verify/confirm", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  resendEmailVerification: (body: { challengeId: string }) =>
+    request<AuthResendResponse>("/auth/email/verify/resend", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  replaceUnverifiedEmail: (body: UnverifiedEmailReplacementRequest) =>
+    request<EmailVerificationRequiredResponse>("/auth/email/unverified/replace", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  requestPasswordReset: (body: { email: string }) =>
+    request<{ ok: true; message: string }>("/auth/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  confirmPasswordReset: (body: {
+    challengeId: string;
+    token: string;
+    newPassword: string;
+    recoveryUsername?: string;
+    recoveryDisplayName?: string;
+  }) =>
+    request<{
+      ok: true;
+      identityRecovered?: boolean;
+      username?: string | null;
+      displayName?: string | null;
+    }>("/auth/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  requestEmailUpgrade: (body: { email: string; currentPassword: string }) =>
+    request<EmailVerificationRequiredResponse>("/auth/email/upgrade/request", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  requestEmailChange: (body: { email: string; currentPassword: string }) =>
+    request<EmailChangeRequestResponse>("/auth/email/change/request", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  confirmEmailChangeCurrentFactor: (body: { challengeId: string; code: string }) =>
+    request<EmailChangeRequiredResponse>("/auth/email/change/current-factor/confirm", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  resendEmailChangeCurrentFactor: (body: { challengeId: string }) =>
+    request<AuthResendResponse>("/auth/email/change/current-factor/resend", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  confirmEmailChange: (body: { challengeId: string; token: string }) =>
+    request<{ ok: true; user: import("./types").User }>("/auth/email/change/confirm", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  resendEmailChange: (body: { challengeId: string }) =>
+    request<AuthResendResponse>("/auth/email/change/resend", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   logoutAll: () => request<{ ok: boolean; revokedSessions: number }>("/auth/logout-all", { method: "POST" }),
+  logoutOthers: () =>
+    request<{ ok: boolean; revokedOtherSessions: number }>("/auth/logout-others", { method: "POST" }),
+  sessions: () => request<{ sessions: AccountSession[] }>("/auth/sessions"),
+  revokeSession: (sessionId: string) =>
+    request<{ ok: boolean; revokedSessionId: string }>(`/auth/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    }),
   changePassword: (body: { currentPassword: string; newPassword: string }) =>
     request<{ user: import("./types").User; revokedOtherSessions: boolean }>("/auth/change-password", {
       method: "POST",
+      body: JSON.stringify(body),
+    }),
+  authorizeExport: (body: { currentPassword: string }) =>
+    request<{ ok: boolean; expiresAt: string }>("/auth/export/authorize", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  exportProgress: () => request<ProgressExport>("/auth/export", { method: "POST" }),
+  deleteAccount: (body: { currentPassword: string; confirmation: string }) =>
+    request<{ ok: boolean }>("/auth/account", {
+      method: "DELETE",
       body: JSON.stringify(body),
     }),
   me: () => request<MeResponse>("/auth/me"),

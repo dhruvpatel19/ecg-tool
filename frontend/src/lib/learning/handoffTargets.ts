@@ -1,9 +1,65 @@
+import type { CrossModeHandoff } from "@/lib/learning/interactionTypes";
+
 export type HandoffTargetResolution = {
   requestedConcept: string;
   caseConcept: string;
   exact: boolean;
   rationale: string;
 };
+
+type GuidedHandoffRouteContext = {
+  moduleId: string;
+  sceneId: string;
+};
+
+/** Build an authored cross-mode launch whose destination is actually runnable. */
+export function guidedHandoffHref(
+  handoff: CrossModeHandoff,
+  context: GuidedHandoffRouteContext,
+): string {
+  const sourceObjective = handoff.concept.trim();
+  if (!sourceObjective) {
+    throw new Error(`Guided ${handoff.mode} handoff requires a source objective.`);
+  }
+  if (!context.moduleId.trim() || !context.sceneId.trim()) {
+    throw new Error("Guided handoff requires a module and scene context.");
+  }
+
+  if (handoff.mode !== "train" && !handoff.destination) {
+    throw new Error(`Guided ${handoff.mode} handoff requires an executable destination contract.`);
+  }
+  const destination = handoff.destination;
+  const focus = (destination?.focus ?? sourceObjective).trim();
+  const destinationSubskill = destination?.subskill ?? handoff.subskill;
+  if (!focus) throw new Error(`Guided ${handoff.mode} handoff requires a destination focus.`);
+
+  const params = new URLSearchParams({
+    focus,
+    sourceObjective,
+    subskill: destinationSubskill,
+    support: handoff.supportLevel,
+    origin: `${context.moduleId}:${context.sceneId}`,
+    returnTo: `/learn/${context.moduleId}?scene=${context.sceneId}`,
+  });
+  if (handoff.mode === "rapid") {
+    params.set("receiptConcept", (destination?.receiptConcept ?? focus).trim());
+    if (destination?.secondaryConcept) params.set("secondaryConcept", destination.secondaryConcept);
+    if (destination?.suggestedLength) params.set("suggestedLength", String(destination.suggestedLength));
+    if (destination?.pace) params.set("pace", destination.pace);
+  }
+  if (handoff.mode === "clinical") {
+    if (!destination?.lane) throw new Error("Guided Clinical handoff requires a compatible lane.");
+    params.set("lane", destination.lane);
+    if (destination.length) params.set("length", String(destination.length));
+  }
+
+  const pathname = handoff.mode === "train"
+    ? "/train"
+    : handoff.mode === "rapid"
+      ? "/rapid"
+      : "/practice";
+  return `${pathname}?${params.toString()}`;
+}
 
 type AliasRule = { pattern: RegExp; candidates: string[]; rationale: string };
 

@@ -1,0 +1,739 @@
+.page {
+  width: min(880px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 52px 0 96px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+.header h1,
+.signedOut h1 {
+  margin: 5px 0 8px;
+  font-family: var(--font-display, inherit);
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.04;
+  letter-spacing: -0.045em;
+}
+
+.header > div > p:last-child,
+.signedOut p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.header > svg {
+  width: 30px;
+  height: 30px;
+  margin-top: 7px;
+  color: var(--accent);
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--accent-strong);
+  font-size: 0.76rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.feedback:empty {
+  display: none;
+}
+
+.feedback {
+  margin-bottom: 16px;
+}
+
+.feedback p {
+  margin: 0;
+  padding: 11px 14px;
+  border: 1px solid;
+  border-radius: 10px;
+  font-size: 0.91rem;
+}
+
+.error {
+  border-color: color-mix(in srgb, var(--ecg) 30%, var(--line));
+  background: color-mix(in srgb, var(--ecg) 6%, white);
+  color: color-mix(in srgb, var(--ecg) 82%, var(--ink));
+}
+
+.success {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.section,
+.danger {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.85fr) minmax(320px, 1.15fr);
+  gap: 36px;
+  align-items: start;
+  margin-top: 14px;
+  padding: 26px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.sectionIntro {
+  display: flex;
+  gap: 13px;
+  align-items: flex-start;
+}
+
+.sectionIntro h2 {
+  margin: 1px 0 6px;
+  font-size: 1.02rem;
+  letter-spacing: -0.015em;
+}
+
+.sectionIntro p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.icon,
+.dangerIcon {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.icon svg,
+.dangerIcon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.form,
+.deleteForm,
+.exportForm {
+  display: grid;
+  gap: 8px;
+}
+
+.form label,
+.deleteForm label,
+.exportForm label {
+  margin-top: 5px;
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-weight: 680;
+}
+
+.form input,
+.deleteForm input,
+.exportForm input {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+}
+
+.form input:focus-visible,
+.deleteForm input:focus-visible,
+.exportForm input:focus-visible {
+  border-color: var(--accent);
+  outline: 3px solid color-mix(in srgb, var(--accent) 17%, transparent);
+  outline-offset: 1px;
+}
+
+.form input[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--ecg) 58%, var(--line));
+}
+
+.fieldError {
+  margin: -2px 0 2px;
+  color: color-mix(in srgb, var(--ecg) 82%, var(--ink));
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.hint {
+  margin: -3px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.emailSecurity {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+}
+
+.emailStatus,
+.twoFactorPanel {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent) 3%, white);
+}
+
+.emailStatus > span,
+.twoFactorPanel > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.emailStatus strong,
+.twoFactorPanel strong {
+  font-size: 0.88rem;
+}
+
+.emailStatus small,
+.twoFactorPanel small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.77rem;
+  line-height: 1.4;
+}
+
+.emailStatus > svg {
+  flex: 0 0 auto;
+  width: 19px;
+  height: 19px;
+  color: var(--accent);
+}
+
+.twoFactorPanel {
+  align-items: flex-start;
+  margin-top: 2px;
+  background: white;
+}
+
+.twoFactorPanel > form {
+  width: 100%;
+}
+
+.securityNote {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.linkProofPanel {
+  display: grid;
+  gap: 9px;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 4%, white);
+}
+
+.linkProofPanel > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.81rem;
+  line-height: 1.5;
+}
+
+.migrationSection {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+}
+
+.migrationPanel {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.migrationPanel > p,
+.migrationConfirm > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.migrationPanel > p strong {
+  color: var(--ink);
+}
+
+.migrationConfirm {
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--ecg) 28%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ecg) 4%, white);
+}
+
+.migrationOutcome {
+  margin: 14px 0 0;
+  padding: 11px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.88rem;
+}
+
+.emailSecurity > .error,
+.emailSecurity > .success {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 9px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.primaryButton,
+.secondaryButton,
+.textButton,
+.dangerButton,
+.confirmDeleteButton,
+.closeButton {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.primaryButton {
+  padding: 9px 16px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  text-decoration: none;
+}
+
+.secondaryButton {
+  padding: 9px 14px;
+  border: 1px solid var(--line-strong);
+  background: white;
+  color: var(--ink);
+}
+
+.textButton {
+  padding: 9px 7px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.primaryButton svg,
+.secondaryButton svg,
+.textButton svg,
+.confirmDeleteButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+.primaryButton:hover:not(:disabled) {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.secondaryButton:hover:not(:disabled),
+.textButton:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.primaryButton:focus-visible,
+.secondaryButton:focus-visible,
+.textButton:focus-visible,
+.dangerButton:focus-visible,
+.confirmDeleteButton:focus-visible,
+.closeButton:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  outline-offset: 2px;
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.textButton:disabled,
+.dangerButton:disabled,
+.confirmDeleteButton:disabled,
+.confirmLogoutButton:disabled,
+.closeButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.sessionPanel {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.sessionSummary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: .87rem;
+}
+
+.sessionSummary span {
+  color: var(--muted);
+  font-size: .78rem;
+}
+
+.sessionList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sessionRow {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent-soft));
+}
+
+.sessionRow > svg {
+  width: 17px;
+  height: 17px;
+  color: var(--accent-strong);
+}
+
+.sessionMeta {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.sessionMeta strong {
+  font-size: .86rem;
+}
+
+.sessionMeta small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: .72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.currentBadge {
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-size: .68rem;
+  font-weight: 760;
+}
+
+.sessionAction {
+  min-height: 44px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  background: white;
+  font: inherit;
+  font-size: .73rem;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.sessionAction:hover:not(:disabled),
+.sessionAction:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.sessionAction:focus-visible,
+.confirmLogoutButton:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  outline-offset: 2px;
+}
+
+.sessionAction:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.sessionLoading {
+  margin: 0;
+  color: var(--muted);
+  font-size: .82rem;
+}
+
+.sessionError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  color: color-mix(in srgb, var(--ecg) 82%, var(--ink));
+  background: color-mix(in srgb, var(--ecg) 6%, white);
+  font-size: .8rem;
+}
+
+.logoutConfirm {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--ecg) 30%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ecg) 4%, white);
+}
+
+.logoutConfirm > strong {
+  color: var(--ecg);
+  font-size: .88rem;
+}
+
+.logoutConfirm p {
+  margin: 0;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.4;
+}
+
+.logoutConfirm > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.confirmLogoutButton {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--ecg) 55%, var(--line));
+  border-radius: 8px;
+  color: var(--ecg);
+  background: white;
+  font: inherit;
+  font-size: .78rem;
+  font-weight: 740;
+  cursor: pointer;
+}
+
+.confirmLogoutButton svg,
+.sessionError svg {
+  width: 15px;
+  height: 15px;
+}
+
+.confirmLogoutButton:hover:not(:disabled) {
+  color: white;
+  background: var(--ecg);
+}
+
+.recoveryNote {
+  margin: 18px 4px 32px;
+  padding-left: 14px;
+  border-left: 3px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.recoveryNote strong {
+  color: var(--ink);
+}
+
+.recoveryNote p {
+  margin: 3px 0 0;
+}
+
+.recoveryNote a {
+  color: var(--accent-strong);
+  font-weight: 700;
+  text-underline-offset: 2px;
+}
+
+.danger {
+  border-color: color-mix(in srgb, var(--ecg) 22%, var(--line));
+  box-shadow: none;
+}
+
+.dangerIcon {
+  background: color-mix(in srgb, var(--ecg) 9%, white);
+  color: var(--ecg);
+}
+
+.dangerButton,
+.confirmDeleteButton {
+  width: fit-content;
+  padding: 9px 14px;
+  border: 1px solid color-mix(in srgb, var(--ecg) 55%, var(--line));
+  background: white;
+  color: var(--ecg);
+}
+
+.dangerButton:hover:not(:disabled),
+.confirmDeleteButton:hover:not(:disabled) {
+  background: var(--ecg);
+  color: white;
+}
+
+.deleteForm {
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--ecg) 30%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ecg) 4%, white);
+}
+
+.exportForm {
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 4%, white);
+}
+
+.exportForm > p {
+  margin: 0 0 3px;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.45;
+}
+
+.exportForm .exportError {
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: color-mix(in srgb, var(--ecg) 82%, var(--ink));
+  background: color-mix(in srgb, var(--ecg) 6%, white);
+}
+
+.exportHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--accent-strong);
+}
+
+.deleteHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ecg);
+}
+
+.closeButton {
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.closeButton svg {
+  width: 17px;
+  height: 17px;
+}
+
+.signedOut {
+  width: min(560px, calc(100% - 40px));
+  margin: 72px auto;
+  padding: 36px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.signedOut > svg {
+  width: 28px;
+  height: 28px;
+  color: var(--accent);
+}
+
+.signedOut .primaryButton {
+  margin-top: 22px;
+}
+
+@media (max-width: 720px) {
+  .page {
+    width: min(100% - 28px, 880px);
+    padding-top: 30px;
+  }
+
+  .section,
+  .danger {
+    grid-template-columns: 1fr;
+    gap: 20px;
+    padding: 20px;
+  }
+
+  .header > svg {
+    display: none;
+  }
+
+  .actions,
+  .primaryButton,
+  .secondaryButton,
+  .dangerButton,
+  .confirmDeleteButton,
+  .confirmLogoutButton {
+    width: 100%;
+  }
+
+  .textButton {
+    width: 100%;
+  }
+
+  .emailStatus,
+  .twoFactorPanel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .logoutConfirm > div {
+    flex-direction: column-reverse;
+  }
+}

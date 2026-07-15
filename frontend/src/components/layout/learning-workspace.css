@@ -1,0 +1,2316 @@
+/* ECG-first learning workspace -------------------------------------------------
+   This file is imported after globals.css so mode surfaces can adopt the shell
+   without duplicating layout rules or weakening their existing interaction CSS. */
+
+.learning-workspace-shell {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.learning-session-bar {
+  position: sticky;
+  top: 8px;
+  z-index: 34;
+  min-width: 0;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, #fff 94%, transparent);
+  box-shadow: 0 10px 28px rgba(16, 48, 38, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.learning-session-bar .rapid-timer,
+.learning-session-bar .rapid-untimed {
+  margin-left: auto;
+}
+
+.learning-tutor-trigger {
+  flex: 0 0 auto;
+}
+
+.learning-workspace-notices {
+  display: grid;
+  gap: 8px;
+}
+
+.learning-workspace-notices .rapid-abandon-confirmation,
+.learning-workspace-notices .train-abandon-confirmation,
+.learning-workspace-notices .clinical-abandon-confirmation {
+  margin: 0;
+  border-color: var(--warning);
+}
+
+.rapid-abandon-modal-layer,
+.train-abandon-modal-layer,
+.clinical-abandon-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+
+.rapid-abandon-backdrop,
+.train-abandon-backdrop,
+.clinical-abandon-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: rgba(9, 28, 22, 0.42);
+}
+
+.rapid-abandon-modal-layer .rapid-abandon-confirmation,
+.train-abandon-modal-layer .train-abandon-confirmation,
+.clinical-abandon-modal-layer .clinical-abandon-confirmation {
+  position: relative;
+  z-index: 1;
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 36px);
+  overflow-y: auto;
+  box-shadow: 0 24px 80px rgba(8, 35, 26, 0.3);
+}
+
+.learning-workspace-notices .rapid-abandon-confirmation h2,
+.learning-workspace-notices .train-abandon-confirmation h2,
+.learning-workspace-notices .clinical-abandon-confirmation h2 {
+  margin-top: 0;
+}
+
+.learning-workspace-notices .rapid-error {
+  margin: 0;
+}
+
+.mode-recovery-notice {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mode-recovery-notice > span {
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.mode-recovery-notice > .button {
+  flex: 0 0 auto;
+}
+
+.rapid-loading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.learning-workspace-body {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 12px;
+  align-items: start;
+}
+
+.learning-waveform-pane {
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.learning-response-rail {
+  position: sticky;
+  top: 64px;
+  width: 360px;
+  max-width: 100%;
+  max-height: calc(100dvh - 82px);
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.learning-response-rail > .panel {
+  width: 100%;
+  margin: 0;
+  box-shadow: 0 14px 36px rgba(16, 48, 38, 0.07);
+}
+
+.learning-disclosure-area {
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 10px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  font-size: 0.7rem;
+}
+
+.learning-disclosure-area .rapid-source,
+.learning-disclosure-area .rapid-silence {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+progress.rapid-clockbar {
+  flex: 1 1 180px;
+  width: auto;
+  min-width: 140px;
+  height: 5px;
+  margin: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: #dce7e2;
+}
+
+progress.rapid-clockbar::-webkit-progress-bar {
+  border-radius: 999px;
+  background: #dce7e2;
+}
+
+progress.rapid-clockbar::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #d4973b, #137d67);
+  transition: width 100ms linear;
+}
+
+progress.rapid-clockbar::-moz-progress-bar {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #d4973b, #137d67);
+}
+
+.learning-tutor-layer[hidden] {
+  display: none;
+}
+
+.learning-tutor-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+}
+
+.learning-tutor-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: rgba(9, 28, 22, 0.34);
+  cursor: default;
+}
+
+.learning-tutor-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(460px, calc(100vw - 28px));
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: -22px 0 70px rgba(8, 35, 26, 0.24);
+}
+
+.learning-tutor-drawer-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.learning-tutor-drawer-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.learning-tutor-drawer-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.learning-tutor-drawer .tutor-chat {
+  min-height: calc(100dvh - 84px);
+  border-left-width: 0;
+  box-shadow: none;
+}
+
+/* The drawer owns disclosure. Avoid a second collapse state that would leave an
+   empty drawer occupying the viewport. Other TutorChat instances retain it. */
+.learning-tutor-drawer .tutor-chat-header > .button {
+  display: none;
+}
+
+/* Rapid adopts the shell without changing its established control selectors. */
+.rapid-pace-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.rapid-pace {
+  border-color: var(--line);
+  text-align: left;
+  cursor: pointer;
+}
+
+.rapid-pace-unavailable {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rapid-pace-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rapid-pace-detail {
+  margin: 7px 0 0;
+}
+
+.rapid-length,
+.rapid-setup-note {
+  margin-top: 18px;
+}
+
+.rapid-length-field {
+  display: block;
+  max-width: 320px;
+  margin-top: 8px;
+}
+
+.rapid-length-copy {
+  margin: 8px 0 0;
+}
+
+.rapid-synthesis-gate {
+  margin-top: 10px;
+}
+
+.rapid-start,
+.rapid-result-list,
+.rapid-complete-actions {
+  margin-top: 16px;
+}
+
+.rapid-result-meta {
+  margin-left: 10px;
+}
+
+.learning-workspace-shell.rapid-runner {
+  gap: 10px;
+}
+
+.learning-workspace-shell .rapid-answer-heading,
+.learning-workspace-shell .rapid-feedback-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.learning-workspace-shell .rapid-answer-heading {
+  align-items: baseline;
+}
+
+.learning-workspace-shell .rapid-answer-heading h2,
+.learning-workspace-shell .rapid-feedback-heading h2 {
+  margin: 0;
+}
+
+.learning-workspace-shell .rapid-score {
+  font-size: 1.35rem;
+}
+
+.learning-workspace-shell .rapid-feedback-copy {
+  margin: 10px 0;
+  font-size: .78rem;
+  line-height: 1.45;
+}
+
+.learning-workspace-shell .rapid-feedback-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+}
+
+.learning-workspace-shell .rapid-feedback-grid .evidence-card {
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.learning-workspace-shell .rapid-feedback-grid h3 {
+  margin: 0 0 5px;
+  font-size: .72rem;
+}
+
+.learning-workspace-shell .rapid-feedback-grid .pill-row {
+  gap: 5px;
+}
+
+.learning-workspace-shell .rapid-feedback-grid .pill {
+  min-height: 26px;
+  padding: 3px 7px;
+  font-size: .65rem;
+}
+
+.learning-workspace-shell .rapid-next-focus {
+  display: grid;
+  gap: 3px;
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px solid #cfe0d9;
+  border-radius: 9px;
+  background: #f2f8f5;
+}
+
+.learning-workspace-shell .rapid-next-focus strong {
+  color: #245b49;
+  font-size: .71rem;
+}
+
+.learning-workspace-shell .rapid-next-focus p {
+  margin: 0;
+  color: #40544c;
+  font-size: .72rem;
+  line-height: 1.4;
+}
+
+.learning-workspace-shell .rapid-trace-receipt,
+.learning-workspace-shell .rapid-handoff-receipt {
+  font-size: .7rem;
+  line-height: 1.4;
+}
+
+.learning-workspace-shell .rapid-restored-trace,
+.learning-workspace-shell .rapid-recognition,
+.learning-workspace-shell .rapid-sweep,
+.learning-workspace-shell .rapid-teaching-points,
+.learning-workspace-shell .rapid-reference,
+.learning-workspace-shell .rapid-trace-receipt,
+.learning-workspace-shell .rapid-handoff-receipt,
+.learning-workspace-shell .rapid-next,
+.learning-workspace-shell .rapid-loading {
+  margin-top: 10px;
+}
+
+.learning-workspace-shell .rapid-recognition-options {
+  margin-top: 7px;
+}
+
+.learning-workspace-shell .rapid-answer-panel {
+  overflow-x: hidden;
+}
+
+.learning-workspace-shell .rapid-answer-stages {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.learning-workspace-shell .rapid-answer-stages button {
+  min-width: 0;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 6px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.learning-workspace-shell .rapid-answer-stages button > span {
+  grid-row: 1 / -1;
+  width: 23px;
+  height: 23px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--ink);
+  font-size: .68rem;
+  font-weight: 800;
+}
+
+.learning-workspace-shell .rapid-answer-stages button strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: .72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.learning-workspace-shell .rapid-answer-stages button small {
+  overflow: hidden;
+  font-size: .6rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.learning-workspace-shell .rapid-answer-stages button.active {
+  border-color: #8fbbaa;
+  background: #eff7f3;
+}
+
+.learning-workspace-shell .rapid-answer-stages button.active > span {
+  color: #fff;
+  background: var(--accent);
+}
+
+.learning-workspace-shell .rapid-dominant-select {
+  width: 100%;
+  min-height: 44px;
+  display: block;
+  margin-top: 7px;
+}
+
+.learning-workspace-shell .rapid-finding-combobox {
+  position: relative;
+}
+
+.learning-workspace-shell .rapid-finding-options {
+  width: 100%;
+  max-height: min(300px, 38vh);
+  position: absolute;
+  z-index: 12;
+  top: calc(44px + 8px);
+  left: 0;
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 5px;
+  overflow-y: auto;
+  border: 1px solid #9eb9ae;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 14px 32px rgba(29, 51, 43, .18);
+  list-style: none;
+}
+
+.learning-workspace-shell .rapid-finding-options [role="option"] {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 7px;
+  color: var(--ink);
+  font-size: .75rem;
+  font-weight: 700;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.learning-workspace-shell .rapid-finding-options [role="option"][data-active="true"],
+.learning-workspace-shell .rapid-finding-options [role="option"]:hover,
+.learning-workspace-shell .rapid-finding-options [role="option"][aria-selected="true"] {
+  color: #174c3c;
+  background: #e8f4ef;
+}
+
+.learning-workspace-shell .rapid-finding-options .rapid-finding-empty {
+  color: var(--muted);
+  font-weight: 600;
+  cursor: default;
+}
+
+.learning-workspace-shell .rapid-recognition > label {
+  display: block;
+  font-size: .76rem;
+  font-weight: 800;
+}
+
+.learning-workspace-shell .rapid-finding-hint {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: .7rem;
+  line-height: 1.4;
+}
+
+.learning-workspace-shell .rapid-selected-findings {
+  min-height: 48px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 9px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-strong);
+}
+
+.learning-workspace-shell .rapid-selected-findings > span {
+  color: #4f5f59;
+  font-size: .72rem;
+}
+
+.learning-workspace-shell .rapid-selected-findings button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #b8d4c9;
+  border-radius: 999px;
+  color: #245b49;
+  background: #edf7f2;
+  font-size: .69rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.learning-workspace-shell .rapid-stage-next {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.learning-workspace-shell .rapid-progressive-sweep {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.learning-workspace-shell .rapid-framework {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  overflow: visible;
+}
+
+.learning-workspace-shell .rapid-framework li {
+  min-width: 0;
+  display: block;
+  padding: 0;
+}
+
+.learning-workspace-shell .rapid-framework li > button {
+  width: 100%;
+  min-width: 0;
+  min-height: 43px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px;
+  align-items: center;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: inherit;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.learning-workspace-shell .rapid-framework li > button > span {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #e8efec;
+  color: #52675f;
+  font-size: .62rem;
+  font-weight: 800;
+}
+
+.learning-workspace-shell .rapid-framework li.complete button > span {
+  color: #fff;
+  background: var(--accent);
+}
+
+.learning-workspace-shell .rapid-framework li > button > small {
+  overflow: hidden;
+  font-size: .61rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.learning-workspace-shell .rapid-active-sweep-field {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-strong);
+}
+
+.learning-workspace-shell .rapid-active-sweep-field p {
+  margin: 0;
+  color: #4f5f59;
+  font-size: .72rem;
+  line-height: 1.35;
+}
+
+.learning-workspace-shell .rapid-active-sweep-field input {
+  width: 100%;
+  min-height: 44px;
+}
+
+.learning-workspace-shell .rapid-sweep-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.learning-workspace-shell .rapid-sweep-choices button {
+  min-width: 0;
+  min-height: 44px;
+  padding: 7px 8px;
+  border: 1px solid #cbd9d4;
+  border-radius: 8px;
+  color: #304c42;
+  background: #fff;
+  font: inherit;
+  font-size: .69rem;
+  font-weight: 720;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+}
+
+.learning-workspace-shell .rapid-sweep-choices button:hover,
+.learning-workspace-shell .rapid-sweep-choices button.selected {
+  border-color: #79a997;
+  color: #174c3c;
+  background: #eaf5f0;
+}
+
+.learning-workspace-shell .rapid-sweep-choices button.selected {
+  box-shadow: inset 0 0 0 1px #79a997;
+}
+
+.learning-workspace-shell .rapid-custom-entry-label {
+  margin-top: 2px;
+  color: #4f5f59;
+  font-size: .66rem;
+  font-weight: 700;
+}
+
+
+.learning-workspace-shell .rapid-step-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.learning-workspace-shell .rapid-step-actions .button {
+  min-width: 0;
+}
+
+.learning-workspace-shell .rapid-commit-review {
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.learning-workspace-shell .rapid-commit-review dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.learning-workspace-shell .rapid-commit-review dl > div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  font-size: .7rem;
+}
+
+.learning-workspace-shell .rapid-commit-review dt {
+  color: var(--muted);
+}
+
+.learning-workspace-shell .rapid-commit-review dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-weight: 750;
+}
+
+.learning-workspace-shell .rapid-quick-note {
+  margin-top: 10px;
+}
+
+.learning-workspace-shell .rapid-commit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.learning-workspace-shell .rapid-confidence {
+  min-width: 0;
+}
+
+.learning-workspace-shell .rapid-submit,
+.learning-workspace-shell .rapid-back-to-sweep {
+  width: 100%;
+}
+
+.learning-workspace-shell .rapid-loading {
+  min-height: 260px;
+}
+
+.learning-workspace-shell .rapid-loading-error {
+  min-height: 0;
+}
+
+/* Training uses the same ECG-first anatomy while keeping campaign planning and
+   provenance contracts visible without allowing metadata to crowd the trace. */
+.train-page-setup {
+  min-height: calc(100dvh - 48px);
+  align-content: start;
+}
+
+.train-setup-single.train-campaign-setup {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 16px;
+  padding: clamp(18px, 2vw, 28px);
+}
+
+.train-setup-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.train-setup-header h1 {
+  margin: 3px 0 5px;
+  font-size: clamp(1.85rem, 3vw, 3rem);
+  line-height: 1.05;
+}
+
+.train-setup-header h2 {
+  margin: 0 0 5px;
+  font-size: 1rem;
+}
+
+.train-setup-header p {
+  max-width: 780px;
+  margin: 0;
+}
+
+.train-setup-handoff,
+.train-active-handoff,
+.train-setup-note,
+.train-receipt-boundary {
+  margin: 0;
+}
+
+.train-setup-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+  gap: 14px;
+}
+
+.train-setup-competency,
+.train-campaign-controls {
+  min-width: 0;
+  align-content: start;
+  border: 1px solid #c8ded5;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.84);
+  box-shadow: 0 9px 24px rgba(35, 77, 63, 0.06);
+}
+
+.train-setup-competency {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+}
+
+.train-setup-competency h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 1rem;
+}
+
+.train-concept-search {
+  position: relative;
+  display: grid;
+  gap: 5px;
+}
+
+.train-concept-search > label {
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 750;
+}
+
+.train-concept-search-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 11px;
+  border: 1px solid #cfddd7;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.train-concept-search-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(65, 139, 116, 0.14);
+}
+
+.train-concept-search-input svg {
+  color: #547168;
+}
+
+.train-concept-search-input input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.train-concept-results {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  max-height: min(330px, 45dvh);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid #c8d9d2;
+  border-radius: 11px;
+  background: #fff;
+  box-shadow: 0 16px 38px rgba(19, 55, 44, 0.18);
+}
+
+.train-concept-results ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.train-concept-results button {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  color: var(--ink);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.train-concept-results button:hover,
+.train-concept-results button:focus-visible,
+.train-concept-results button.active {
+  background: #eaf5f1;
+}
+
+.train-concept-results button > span {
+  display: grid;
+  min-width: 0;
+}
+
+.train-concept-results strong,
+.train-concept-results small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.train-concept-results button > span strong {
+  white-space: nowrap;
+}
+
+.train-concept-results small {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.train-concept-results > .muted {
+  margin: 0;
+  padding: 8px;
+}
+
+.train-setup-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(210px, 0.75fr);
+  gap: 10px;
+}
+
+.train-adaptive-button {
+  width: fit-content;
+}
+
+.train-setup-single .train-mastery-meta {
+  margin-top: 2px;
+}
+
+progress.train-mastery-progress,
+progress.train-session-progress-native {
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: #dce8e3;
+}
+
+progress.train-mastery-progress {
+  width: 100%;
+  height: 7px;
+}
+
+progress.train-session-progress-native {
+  width: 100%;
+  min-width: 110px;
+  height: 6px;
+}
+
+progress.train-mastery-progress::-webkit-progress-bar,
+progress.train-session-progress-native::-webkit-progress-bar {
+  border-radius: inherit;
+  background: #dce8e3;
+}
+
+progress.train-mastery-progress::-webkit-progress-value,
+progress.train-session-progress-native::-webkit-progress-value {
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #6baf98);
+}
+
+progress.train-mastery-progress::-moz-progress-bar,
+progress.train-session-progress-native::-moz-progress-bar {
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #6baf98);
+}
+
+progress.train-mastery-progress.low::-webkit-progress-value {
+  background: linear-gradient(90deg, #b76318, #d99045);
+}
+
+progress.train-mastery-progress.medium::-webkit-progress-value {
+  background: linear-gradient(90deg, #315f8a, #5f91ba);
+}
+
+progress.train-mastery-progress.low::-moz-progress-bar {
+  background: linear-gradient(90deg, #b76318, #d99045);
+}
+
+progress.train-mastery-progress.medium::-moz-progress-bar {
+  background: linear-gradient(90deg, #315f8a, #5f91ba);
+}
+
+.train-setup-single .train-campaign-controls {
+  grid-template-columns: minmax(130px, 0.55fr) minmax(0, 1fr);
+  padding: 14px;
+}
+
+.train-setup-single .train-empty-reason,
+.train-setup-single .train-start-button {
+  grid-column: 1 / -1;
+}
+
+.train-page-active {
+  gap: 0;
+}
+
+.learning-workspace-shell.train-runner {
+  gap: 9px;
+}
+
+.train-session-bar {
+  flex-wrap: nowrap;
+}
+
+.train-session-summary {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(185px, auto) minmax(110px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.train-session-identity {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.train-session-identity .eyebrow,
+.train-session-identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.train-session-identity .eyebrow {
+  font-size: 0.62rem;
+}
+
+.train-session-identity strong {
+  color: var(--accent-strong);
+  font-size: 0.82rem;
+}
+
+.train-session-count {
+  color: var(--muted);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.train-session-bar > .button {
+  min-width: fit-content;
+}
+
+.train-active-handoff,
+.learning-workspace-notices .train-error {
+  padding: 8px 10px;
+  font-size: 0.72rem;
+}
+
+.train-active-workspace {
+  grid-template-columns: minmax(0, 1fr) 360px;
+}
+
+.train-viewer-pane,
+.train-viewer-pane .ecg-viewer {
+  min-width: 0;
+  width: 100%;
+}
+
+.train-response-rail {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  max-height: calc(100dvh - 112px);
+}
+
+.train-response-rail > .panel.pad {
+  padding: 13px;
+}
+
+.train-response-rail h2,
+.train-response-rail h3,
+.train-response-rail p {
+  overflow-wrap: anywhere;
+}
+
+.train-current-target {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.train-current-target .eyebrow,
+.train-current-target h2 {
+  margin: 0;
+}
+
+.train-current-concept {
+  display: block;
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 0.76rem;
+}
+
+.train-current-target > .muted {
+  flex: 0 0 auto;
+  max-width: 112px;
+  text-align: right;
+  font-size: 0.68rem;
+}
+
+.train-response-rail .train-mastery-progress,
+.train-task-prompt,
+.train-receipt-boundary,
+.train-viewer-task,
+.train-options,
+.train-subskill-task,
+.train-evidence-field,
+.train-confidence-field,
+.train-drill-actions,
+.train-hint-text,
+.train-teaching-points,
+.train-next-button,
+.train-confidence-warning {
+  margin-top: 10px;
+}
+
+.train-response-rail .train-option.button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.train-response-rail .train-subskill-task {
+  padding: 11px;
+  box-shadow: none;
+  background: #f8fbfa;
+}
+
+.train-subskill-task h3 {
+  margin: 3px 0 8px;
+  font-size: 0.88rem;
+}
+
+.train-subskill-options {
+  gap: 6px;
+}
+
+.train-subskill-options .button {
+  justify-content: flex-start;
+  min-height: 38px;
+  padding: 7px 9px;
+  text-align: left;
+  font-size: 0.73rem;
+}
+
+.train-subskill-matching {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+  border: 0;
+}
+
+.train-subskill-matching > legend {
+  padding: 0;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.train-subskill-matching > p {
+  margin: 0;
+  font-size: 0.68rem;
+}
+
+.train-subskill-matching-rows {
+  display: grid;
+  gap: 6px;
+}
+
+.train-subskill-matching-row {
+  min-width: 0;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.train-subskill-matching-row label {
+  display: grid;
+  gap: 2px;
+  line-height: 1.35;
+}
+
+.train-subskill-matching-row label > span {
+  color: var(--muted);
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.train-subskill-matching-row select,
+.train-subskill-fill-in input {
+  width: 100%;
+  min-width: 0;
+  min-height: 39px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+}
+
+.train-subskill-matching-row select:focus-visible,
+.train-subskill-fill-in input:focus-visible {
+  outline: 3px solid rgba(19, 125, 103, 0.2);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.train-subskill-fill-in {
+  gap: 6px;
+}
+
+.train-subskill-fill-in > span {
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.train-subskill-boundary,
+.train-tutor-lock-inline p {
+  margin-bottom: 0;
+}
+
+.train-tutor-lock-inline {
+  min-height: 0;
+}
+
+.train-tutor-lock-inline h2 {
+  margin: 0 0 4px;
+  font-size: 0.86rem;
+}
+
+.train-feedback-panel > p,
+.train-evidence p {
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.train-task-feedback {
+  margin-top: 9px;
+  padding: 9px;
+  display: grid;
+  gap: 5px;
+  border: 1px solid #cfe0d9;
+  border-radius: 9px;
+  background: #f8fbfa;
+  font-size: 0.72rem;
+}
+
+.train-task-feedback p,
+.train-task-feedback ul {
+  margin: 0;
+}
+
+.train-task-feedback ul {
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  list-style: none;
+}
+
+.train-task-feedback li {
+  padding-left: 8px;
+  display: grid;
+  gap: 2px;
+  border-left: 3px solid var(--ecg);
+}
+
+.train-task-feedback li.correct {
+  border-left-color: var(--accent);
+}
+
+.train-carry-forward {
+  display: grid;
+  gap: 3px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid #cfe0d9;
+  border-radius: 9px;
+  background: #f2f8f5;
+}
+
+.train-carry-forward strong {
+  color: #245b49;
+  font-size: .72rem;
+}
+
+.train-carry-forward p {
+  margin: 0;
+}
+
+.train-response-rail .train-evidence-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.train-response-rail .evidence-card {
+  padding: 10px;
+}
+
+.train-response-rail .train-next-button {
+  width: 100%;
+}
+
+.train-disclosure {
+  position: relative;
+  align-items: center;
+}
+
+.train-provenance-inline {
+  min-width: 0;
+  flex: 1 1 560px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+}
+
+.train-provenance-inline > span:not(.warning) {
+  white-space: nowrap;
+}
+
+.train-provenance-inline .train-real-data-note {
+  display: inline-flex;
+  align-items: center;
+}
+
+.train-provenance-inline .train-fixture-warning {
+  padding: 2px 5px;
+}
+
+.train-selection-reason {
+  min-width: 140px;
+  flex: 1 1 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.train-phase-disclosure {
+  flex: 0 0 auto;
+}
+
+.train-phase-disclosure summary {
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.train-phase-disclosure .train-selection-reason {
+  margin: 8px 0 0;
+  overflow: visible;
+  white-space: normal;
+}
+
+.train-phase-disclosure[open] {
+  flex-basis: 100%;
+}
+
+.train-phase-disclosure .train-session-recipe {
+  margin-top: 8px;
+}
+
+/* Clinical keeps one stable tracing while the server-owned first look, context,
+   decision, and feedback replace one another in the response rail. */
+.clinical-shell-active {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+  gap: 0;
+}
+
+.learning-workspace-shell.clinical-runner {
+  gap: 9px;
+}
+
+.clinical-session-bar {
+  flex-wrap: nowrap;
+}
+
+.clinical-session-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+}
+
+.clinical-session-meta > .muted {
+  white-space: nowrap;
+}
+
+.clinical-session-bar .clinical-clock {
+  min-width: 175px;
+  flex: 1 1 250px;
+  padding: 6px 9px;
+  font-size: 0.74rem;
+}
+
+.clinical-session-bar .clinical-clock.complete,
+.clinical-session-bar .clinical-clock.untimed {
+  flex-grow: 0;
+}
+
+progress.clinical-clockbar,
+progress.clinical-axis-progress {
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: #dfe8e4;
+}
+
+progress.clinical-clockbar {
+  width: auto;
+  min-width: 70px;
+  height: 7px;
+}
+
+progress.clinical-axis-progress {
+  width: 100%;
+  height: 7px;
+}
+
+progress.clinical-clockbar::-webkit-progress-bar,
+progress.clinical-axis-progress::-webkit-progress-bar {
+  border-radius: inherit;
+  background: #dfe8e4;
+}
+
+progress.clinical-clockbar::-webkit-progress-value,
+progress.clinical-axis-progress::-webkit-progress-value {
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+progress.clinical-clockbar::-moz-progress-bar,
+progress.clinical-axis-progress::-moz-progress-bar {
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.clinical-clock.decide progress.clinical-clockbar::-webkit-progress-value {
+  background: var(--ecg);
+}
+
+.clinical-clock.decide progress.clinical-clockbar::-moz-progress-bar {
+  background: var(--ecg);
+}
+
+.clinical-session-bar > .button {
+  min-width: fit-content;
+}
+
+.clinical-abandon-label-mobile {
+  display: none;
+}
+
+.learning-workspace-notices .clinical-abandon-confirmation {
+  margin: 0;
+  border-color: var(--warning);
+}
+
+.learning-workspace-notices .clinical-abandon-confirmation h2 {
+  margin-top: 0;
+}
+
+.learning-workspace-notices .clinical-runner-error {
+  margin: 0;
+}
+
+.clinical-active-workspace {
+  grid-template-columns: minmax(0, 1fr) 360px;
+}
+
+.clinical-viewer-pane {
+  position: sticky;
+  top: 64px;
+  width: 100%;
+  max-height: calc(100dvh - 112px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.clinical-viewer-pane,
+.clinical-viewer-pane .ecg-viewer,
+.clinical-viewer-pane .clinical-stacked {
+  min-width: 0;
+}
+
+.clinical-rhythm-detail {
+  margin-top: 7px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.clinical-rhythm-detail > summary {
+  padding: 8px 11px;
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.clinical-rhythm-detail[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.clinical-rhythm-detail .clinical-strip {
+  border: 0;
+  border-radius: 0 0 9px 9px;
+}
+
+.clinical-response-rail {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  max-height: calc(100dvh - 112px);
+}
+
+.clinical-response-rail > .panel.pad {
+  padding: 13px;
+}
+
+.clinical-response-rail .clinical-context-mask {
+  margin: 0;
+  padding: 10px 11px;
+  font-size: 0.74rem;
+  line-height: 1.42;
+}
+
+.clinical-response-rail .clinical-first-look {
+  display: grid;
+  gap: 10px;
+}
+
+.clinical-response-rail .clinical-first-look > p,
+.clinical-response-rail .clinical-stem p,
+.clinical-response-rail .clinical-feedback > p {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.clinical-response-rail .clinical-first-look-fields {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 7px;
+  margin: 2px 0;
+}
+
+.clinical-response-rail .clinical-first-look-fields > label {
+  grid-column: auto;
+}
+
+.clinical-response-rail .clinical-first-look-fields fieldset {
+  flex-wrap: wrap;
+}
+
+.clinical-response-rail .clinical-first-look-fields fieldset button {
+  flex: 1 1 72px;
+}
+
+.clinical-response-rail .clinical-first-look-submit,
+.clinical-response-rail .clinical-submit,
+.clinical-response-rail .clinical-next {
+  width: 100%;
+}
+
+.clinical-response-rail .clinical-stem {
+  outline-offset: -3px;
+}
+
+.clinical-response-rail .clinical-question,
+.clinical-response-rail .clinical-machine {
+  gap: 8px;
+}
+
+.clinical-response-rail .clinical-question > strong {
+  line-height: 1.35;
+}
+
+.clinical-response-rail .clinical-options {
+  gap: 6px;
+}
+
+.clinical-response-rail .clinical-matching {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  border: 0;
+}
+
+.clinical-response-rail .clinical-matching > legend {
+  padding: 0;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.clinical-response-rail .clinical-matching > p {
+  margin: 0;
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.clinical-response-rail .clinical-matching-rows {
+  display: grid;
+  gap: 7px;
+}
+
+.clinical-response-rail .clinical-matching-row {
+  min-width: 0;
+  padding: 9px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfcfb;
+}
+
+.clinical-response-rail .clinical-matching-row label {
+  display: grid;
+  gap: 3px;
+  line-height: 1.35;
+}
+
+.clinical-response-rail .clinical-matching-row label > span {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.clinical-response-rail .clinical-matching-row select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fff;
+}
+
+.clinical-response-rail .clinical-matching-row select:focus-visible {
+  outline: 3px solid rgba(19, 125, 103, 0.2);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+.clinical-response-rail .clinical-option,
+.clinical-response-rail .clinical-machine-line {
+  min-height: 40px;
+  padding: 8px 10px;
+  font-size: 0.76rem;
+}
+
+.clinical-response-rail .clinical-stepwise {
+  gap: 7px;
+}
+
+.clinical-response-rail .clinical-stepwise fieldset {
+  padding: 8px;
+}
+
+.clinical-response-rail .clinical-stepwise button {
+  min-height: 36px;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+}
+
+.clinical-response-rail .clinical-confidence {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.clinical-response-rail .clinical-confidence button {
+  flex: 1 1 70px;
+  min-height: 38px;
+  padding: 5px 9px;
+}
+
+.clinical-response-rail .clinical-feedback h2 {
+  flex-wrap: wrap;
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.clinical-response-rail .clinical-feedback .selection-note,
+.clinical-response-rail .clinical-feedback .warning {
+  font-size: 0.72rem;
+}
+
+.clinical-response-rail .clinical-matching-feedback {
+  display: grid;
+  gap: 7px;
+}
+
+.clinical-response-rail .clinical-matching-feedback h3 {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.clinical-response-rail .clinical-matching-feedback ul {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  list-style: none;
+}
+
+.clinical-response-rail .clinical-matching-feedback li {
+  padding: 8px;
+  display: grid;
+  gap: 3px;
+  border-left: 3px solid var(--ecg);
+  border-radius: 7px;
+  background: #fbfcfb;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.clinical-response-rail .clinical-matching-feedback li.correct {
+  border-left-color: var(--accent);
+}
+
+.clinical-response-rail .clinical-axis {
+  grid-template-columns: minmax(105px, 0.7fr) minmax(90px, 1fr);
+  gap: 7px;
+  font-size: 0.72rem;
+}
+
+.clinical-response-rail .clinical-next {
+  margin-top: 8px;
+}
+
+.clinical-disclosure .clinical-provenance {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: inherit;
+}
+
+.clinical-disclosure {
+  row-gap: 4px;
+}
+
+.clinical-disclosure .pill {
+  min-height: 24px;
+  padding-block: 2px;
+}
+
+/* Active learning routes use an icon rail to give the waveform the horizontal
+   budget. Keyboard focus expands the rail in place without shifting the task. */
+@media (min-width: 761px) {
+  .app-shell:has(.side-nav.learning-route-nav) {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+
+  .side-nav.learning-route-nav {
+    z-index: 74;
+    width: 76px;
+    padding-inline: 9px;
+    transition: width 160ms ease, box-shadow 160ms ease;
+  }
+
+  .side-nav.learning-route-nav:focus-within {
+    width: 258px;
+    box-shadow: 18px 0 46px rgba(5, 24, 18, 0.2);
+  }
+
+  .side-nav.learning-route-nav:not(:focus-within) .brand {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .side-nav.learning-route-nav:not(:focus-within) .brand-copy,
+  .side-nav.learning-route-nav:not(:focus-within) .nav-section-label,
+  .side-nav.learning-route-nav:not(:focus-within) .nav-long-label,
+  .side-nav.learning-route-nav:not(:focus-within) .nav-short-label,
+  .side-nav.learning-route-nav:not(:focus-within) .nav-index,
+  .side-nav.learning-route-nav:not(:focus-within) .nav-account-name,
+  .side-nav.learning-route-nav:not(:focus-within) .nav-disclaimer span {
+    display: none;
+  }
+
+  .side-nav.learning-route-nav:not(:focus-within) .nav-link {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .side-nav.learning-route-nav:not(:focus-within) .nav-link.active::after {
+    right: 6px;
+  }
+
+  .side-nav.learning-route-nav > .nav-account {
+    margin-top: auto;
+  }
+
+  .side-nav.learning-route-nav:not(:focus-within) .nav-account {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    gap: 5px;
+  }
+
+  .side-nav.learning-route-nav:not(:focus-within) .nav-account-action {
+    display: inline-grid;
+    place-items: center;
+  }
+
+  .side-nav.learning-route-nav:not(:focus-within) .nav-disclaimer {
+    justify-content: center;
+  }
+
+  .side-nav.learning-route-nav:focus-within .brand-copy,
+  .side-nav.learning-route-nav:focus-within .nav-account-name {
+    display: grid;
+  }
+
+  .side-nav.learning-route-nav:focus-within .nav-section-label {
+    display: block;
+  }
+
+  .side-nav.learning-route-nav:focus-within .nav-long-label,
+  .side-nav.learning-route-nav:focus-within .nav-disclaimer span {
+    display: inline;
+  }
+
+  .side-nav.learning-route-nav:focus-within .nav-index {
+    display: inline-block;
+  }
+
+  .side-nav.learning-route-nav:focus-within .nav-account {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+  }
+}
+
+@media (max-width: 840px) {
+  .learning-workspace-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .learning-response-rail {
+    position: static;
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    scrollbar-gutter: auto;
+  }
+
+  .learning-workspace-shell.rapid-emergency {
+    padding-bottom: 0;
+  }
+
+  .rapid-emergency .learning-response-rail .rapid-answer-panel {
+    position: static;
+    right: auto;
+    bottom: auto;
+    left: auto;
+    width: 100%;
+    max-width: 100%;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .learning-workspace-shell.rapid-runner .rapid-tracing .viewer-stage {
+    max-height: none;
+    overflow: hidden;
+    -webkit-overflow-scrolling: auto;
+  }
+
+  .learning-workspace-shell.rapid-runner .rapid-tracing .viewer-stage svg,
+  .learning-workspace-shell.rapid-runner .rapid-tracing .ecg-viewer .viewer-stage svg {
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    height: auto;
+  }
+
+  .train-setup-grid,
+  .train-setup-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .train-session-bar {
+    flex-wrap: wrap;
+  }
+
+  .train-session-summary {
+    flex-basis: 100%;
+  }
+
+  .train-response-rail {
+    display: grid;
+    gap: 9px;
+  }
+
+  .clinical-session-bar {
+    flex-wrap: wrap;
+  }
+
+  .clinical-session-meta {
+    flex: 1 1 100%;
+  }
+
+  .clinical-session-bar .clinical-clock {
+    flex: 1 1 100%;
+  }
+
+  .clinical-viewer-pane {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+    scrollbar-gutter: auto;
+  }
+
+  .clinical-response-rail {
+    display: grid;
+    gap: 9px;
+  }
+}
+
+@media (max-width: 760px) {
+  .learning-session-bar {
+    top: 70px;
+  }
+
+  .learning-disclosure-area {
+    align-items: flex-start;
+  }
+
+  progress.rapid-clockbar {
+    flex-basis: 100%;
+  }
+
+  .learning-workspace-shell .rapid-commit-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .learning-workspace-shell .rapid-confidence,
+  .learning-workspace-shell .rapid-submit {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .learning-tutor-drawer {
+    width: 100%;
+  }
+
+  .learning-tutor-drawer-body {
+    padding: 8px;
+  }
+
+  .mode-recovery-notice,
+  .rapid-loading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rapid-loading-error {
+    justify-content: flex-start;
+  }
+
+  .mode-recovery-notice > .button,
+  .rapid-loading > .button {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .learning-workspace-shell.rapid-runner[data-phase="feedback"] .viewer-toolbar {
+    gap: 6px;
+    padding: 8px 10px;
+  }
+
+  .learning-workspace-shell.rapid-runner[data-phase="feedback"] .viewer-toolbar-main .muted,
+  .learning-workspace-shell.rapid-runner[data-phase="feedback"] .viewer-toolbar-main .pill {
+    display: none;
+  }
+
+  .learning-workspace-shell.rapid-runner[data-phase="feedback"] .viewer-toolbar .actions {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+  }
+
+  .learning-workspace-shell.rapid-runner[data-phase="feedback"] .viewer-toolbar .icon-button {
+    flex: 0 0 44px;
+  }
+
+  .learning-workspace-shell.rapid-runner[data-phase="feedback"] .viewer-help {
+    padding: 6px 10px;
+    font-size: .72rem;
+  }
+
+  .train-setup-header {
+    display: grid;
+  }
+
+  .train-setup-header > .button {
+    width: fit-content;
+  }
+
+  .train-setup-single .train-campaign-controls,
+  .train-session-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .train-session-summary {
+    gap: 5px;
+  }
+
+  .train-session-count {
+    justify-self: start;
+  }
+
+  .train-session-bar > .button {
+    flex: 1 1 auto;
+  }
+
+  .train-provenance-inline,
+  .train-selection-reason {
+    flex-basis: 100%;
+  }
+
+  .train-provenance-inline > span {
+    white-space: normal;
+  }
+
+  .train-phase-disclosure {
+    flex-basis: 100%;
+  }
+
+  .clinical-session-meta {
+    flex-wrap: wrap;
+  }
+
+  .clinical-session-bar > .button {
+    flex: 1 1 auto;
+  }
+
+  .clinical-disclosure .clinical-provenance {
+    flex-basis: 100%;
+  }
+
+  /* A timed first look must not begin behind a full 528px paper. Keep the
+     calibrated ECG at its readable size inside its own scrollport, while the
+     timer, visible tracing window, and native response controls share the
+     initial mobile viewport. Untimed learning sets retain the normal document
+     flow because they carry no clock penalty. */
+  .learning-workspace-shell.clinical-runner-timed[data-phase="orient"] {
+    height: calc(100dvh - 132px - env(safe-area-inset-bottom, 0px));
+    min-height: 0;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    overflow: clip;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-session-bar {
+    position: relative;
+    top: auto;
+    align-content: center;
+    gap: 5px 7px;
+    padding: 5px 7px;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-session-meta {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-session-meta .pill.subtle {
+    display: none;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-session-bar .clinical-clock {
+    min-width: 0;
+    min-height: 40px;
+    flex: 1 1 170px;
+    gap: 7px;
+    padding: 5px 7px;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-clock-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] progress.clinical-clockbar {
+    min-width: 52px;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-abandon-button {
+    min-width: 48px;
+    min-height: 40px;
+    flex: 0 0 auto;
+    padding-inline: 9px;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-abandon-label {
+    display: none;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-abandon-label-mobile {
+    display: inline;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-active-workspace {
+    height: 100%;
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(176px, 1fr) auto;
+    align-items: stretch;
+    gap: 7px;
+    overflow: hidden;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-viewer-pane {
+    position: relative;
+    top: auto;
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-dock {
+    position: relative;
+    inset: auto;
+    z-index: 2;
+    width: 100%;
+    max-width: 100%;
+    max-height: none;
+    overflow: visible;
+    overscroll-behavior: auto;
+    scrollbar-gutter: auto;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-context-mask {
+    display: none;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look {
+    gap: 6px;
+    padding: 9px 10px;
+    border-top: 3px solid var(--accent);
+    box-shadow: 0 -8px 24px rgba(16, 48, 38, 0.09);
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look h2 {
+    margin: 0;
+    font-size: .93rem;
+    line-height: 1.25;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-guidance {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-fields {
+    gap: 5px;
+    margin: 0;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-fields > label {
+    font-size: .7rem;
+    line-height: 1.2;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-fields select,
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-fields fieldset button,
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-submit {
+    min-height: 44px;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-fields fieldset {
+    flex-wrap: nowrap;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-first-look-fields fieldset button {
+    min-width: 0;
+    padding-inline: 7px;
+    font-size: .72rem;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-disclosure {
+    min-height: 26px;
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding-block: 3px;
+    overflow: hidden;
+  }
+
+  .clinical-runner-timed[data-phase="orient"] .clinical-disclosure .clinical-provenance,
+  .clinical-runner-timed[data-phase="orient"] .clinical-disclosure .pill:last-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-nav.learning-route-nav {
+    transition: none;
+  }
+}

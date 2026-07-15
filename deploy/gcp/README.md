@@ -19,6 +19,8 @@ flowchart LR
     D --> W["Versioned local corpus + waveforms"]
     G["Private versioned corpus GCS"] -->|generation + SHA pinned| W
     S -->|online SQLite backup, 4/day| K["Private backup GCS"]
+    A -->|authenticated STARTTLS 587| M["Transactional email provider"]
+    M -->|verification, recovery, 2FA, notices| E["Student mailbox"]
 ```
 
 ## Security and durability boundaries
@@ -34,8 +36,10 @@ flowchart LR
   remain available to probes.
 - The VM service account can read the one configured corpus object, create and
   read objects only under the backup prefix, pull only from the app repository,
-  and read only the app's Secret Manager containers. It cannot delete or
-  overwrite backups.
+  and read only the app's Secret Manager containers. SMTP host, sender,
+  monitored Reply-To, public URL, port, and username are non-secret metadata;
+  an SMTP password is fetched only from its dedicated Secret Manager container.
+  The VM cannot delete or overwrite backups.
 - The host rejects IPv4 and IPv6 metadata-server traffic from container UID
   10001 before every backend start and reconciles those rules every minute.
   Root host operations retain metadata/gcloud access, while a compromised app
@@ -67,6 +71,11 @@ raw MIMIC data or another credentialed research source into it.
   requires fixed-window WAF rate limiting and spend controls. Confirm current
   eligibility and price on the [Vercel plan page](https://vercel.com/pricing)
   before approval.
+- A provider-approved transactional-email account, a sender domain the project
+  owns and can authenticate for a polished launch, and a monitored support
+  mailbox. The shared `ecg-tool.vercel.app` hostname is not an owned sender
+  domain. See `docs/AUTH_EMAIL_PROVIDER_DECISION.md` before any signup, domain
+  purchase, DNS change, secret version, or paid-plan activation.
 - An approved, complete corpus directory containing `manifest.json`,
   `corpus.db`, and `waveforms/`.
 
@@ -135,6 +144,24 @@ Add generated auth/origin secret versions. Values never enter Terraform state:
 bash ../scripts/add-secret-versions.sh \
   YOUR_PROJECT ecg-auth-rate-limit-secret ecg-origin-shared-secret
 ```
+
+Set the provider-neutral `auth_email_*`/`auth_smtp_*` Terraform values before
+the foundation apply, including a monitored `auth_email_reply_to`. SMTP
+authentication is mandatory for an enabled production VM, so Terraform creates
+the dedicated password container in `smtp` mode. Add the provider-issued SMTP password from
+stdin only after an operator has reviewed the provider, sender domain, quota,
+privacy terms, and possible cost:
+
+```bash
+gcloud secrets versions add ecg-auth-smtp-password \
+  --project YOUR_PROJECT --data-file=-
+# Paste the password, then send EOF. Do not put it in tfvars or shell history.
+```
+
+No provider account, sender domain, paid tier, or secret version is created by
+this repository. Until those external choices are complete, leave
+`provision_instance = false`; an enabled backend fails its Terraform/installer/
+application readiness gates if verified-account mail is unavailable.
 
 The production example intentionally enables the live grounded tutor. Add its
 API key from stdin after Terraform creates the optional secret container:
@@ -226,13 +253,33 @@ health_check_host         = "api.ecg.example.org"
 health_check_use_ssl      = true
 health_check_validate_ssl = true
 acme_email                = "ops@example.org"
+auth_email_delivery_mode  = "smtp"
+auth_email_from_address   = "TRACE <no-reply@example.org>"
+auth_email_reply_to       = "TRACE support <support@example.org>"
+auth_public_app_url       = "https://ecg.example.org"
+auth_smtp_host            = "smtp.example.org"
+auth_smtp_port            = 587
+auth_smtp_username        = "provider-account"
+auth_smtp_password_secret_id = "ecg-auth-smtp-password"
+auth_smtp_starttls        = true
+auth_smtp_timeout_seconds = 10
 llm_provider              = "openai-compatible"
 llm_required              = true
 llm_model                 = "YOUR_APPROVED_MODEL"
 llm_base_url              = "https://api.openai.com/v1"
 enable_llm_secret         = true
+authenticated_retention_policy_acknowledged = true
+authenticated_retention_policy_reference    = "POLICY-OR-DOCUMENTATION-URL"
 provision_instance        = true
 ```
+
+The two authenticated-retention inputs are an external governance gate. Keep
+them `false`/empty until product/legal owners approve a policy covering live
+records, backup expiry, restore suppression, legal holds, and institutional
+deprovisioning. The reference is a non-secret policy ID or documentation URL.
+Setting the boolean does not create a policy or configure a retention duration;
+production Terraform and backend readiness both fail closed unless the approved
+pair is supplied.
 
 Set `allow_initial_disk_format = true` only for the first boot of the new blank
 Terraform-created data disk. After that boot mounts the disk successfully,
@@ -246,13 +293,14 @@ it never clones a repository or downloads executable deployment code. The host
 installer then:
 
 1. formats only an unformatted attached disk and mounts it;
-2. fetches root-only secrets from Secret Manager;
+2. fetches root-only auth/origin, required SMTP-password, and tutor secrets from
+   Secret Manager;
 3. hydrates and validates the exact corpus artifact;
 4. pulls the digest-pinned backend image;
 5. installs Caddy, the single-worker service, and the backup timer; and
 6. creates the learner schema, completes the mandatory initial online backup,
-   and then requires fresh backup/corpus/database/live-tutor checks for durable
-   readiness.
+   and then requires fresh backup/corpus/database/auth-email/live-tutor checks
+   for durable readiness.
 
 Inspect first boot through serial/startup logs or IAP. A successful boot makes
 `https://HOST/readyz` return HTTP 200 with `"ok": true`.
@@ -275,6 +323,10 @@ Do not give arbitrary Preview branches the production backend URL or origin
 key: a preview could mutate real learner state. Either configure Preview with a
 separate staging backend/secret or leave the variables absent so the deployment
 gate intentionally fails.
+
+Do not add `AUTH_EMAIL_*` or `AUTH_SMTP_*` values to Vercel. Email is sent by the
+GCP backend, and moving credentials into Vercel would create a second unmanaged
+secret copy without improving delivery.
 
 ### Mandatory authentication edge throttles
 
@@ -360,6 +412,24 @@ gcloud secrets versions access latest --secret ecg-origin-shared-secret \
   | bash deploy/gcp/scripts/validate-deployment.sh https://api.ecg.example.org
 ```
 
+Before the provider-backed smoke, exercise all templates and the actual SMTP
+wire path locally without credentials or delivery cost:
+
+```bash
+python scripts/smoke_auth_email_local.py
+```
+
+On the VM, inspect configuration-only mail readiness without printing any
+address, host, URL, credential, provider response, or message content:
+
+```bash
+sudo docker exec ecg-backend python -m app.auth_mailer_cli
+```
+
+This command does not contact the provider. A release owner must still complete
+real verification/reset/email-change/2FA/security-notice delivery tests and
+confirm SPF, DKIM, DMARC, bounce/suppression, and quota behavior.
+
 Validate the production frontend's per-request nonce CSP, HSTS, clickjacking
 policy, and the Foundations same-origin embedding exception:
 
@@ -417,6 +487,8 @@ sudo systemctl start ecg-sqlite-backup.service
 sudo systemctl start ecg-metadata-firewall.service
 sudo iptables -C OUTPUT -d 169.254.169.254/32 -m owner --uid-owner 10001 -j REJECT
 sudo ip6tables -C OUTPUT -d fd20:ce::254/128 -m owner --uid-owner 10001 -j REJECT
+sudo iptables -C OUTPUT -d 169.254.169.254/32 -p udp --dport 53 -m owner --uid-owner 10001 -j ACCEPT
+sudo iptables -C OUTPUT -d 169.254.169.254/32 -p tcp --dport 53 -m owner --uid-owner 10001 -j ACCEPT
 ```
 
 If a transient registry/Secret Manager/GCS dependency outlasts the bounded

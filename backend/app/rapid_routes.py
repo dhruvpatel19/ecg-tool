@@ -2,21 +2,47 @@
 
 from __future__ import annotations
 
+import base64
 from collections import OrderedDict
 from datetime import UTC, datetime
 import hashlib
+import hmac
+import json
 from threading import RLock
 from typing import Any, Callable, Literal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl, urlencode
 
-from fastapi import APIRouter, Cookie, Header, HTTPException
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .adaptive import next_case
 from .auth import SESSION_COOKIE_NAME
+from .assessment_presentation import (
+    assessment_display_id,
+    public_assessment_record,
+    public_case_packet,
+    public_case_summary,
+    public_waveform,
+)
+from .config import get_settings
 from .data_sources import case_summary
+from .ecg_capability import issue_ecg_capability, matches_ecg_capability
 from .grading import grade_attempt, grade_click_answer
-from .objectives import objective_definition
+from .ontology import CONCEPT_BY_ID
+from .objectives import REGISTRY_VERSION, objective_definition
+from .assessment_contracts import (
+    RAPID_SYNTHESIS_RECEIPT_UNAVAILABLE_REASON,
+    RAPID_TESTED_OBJECTIVE_MANIFEST_VERSION,
+    bound_rapid_grade_to_manifest,
+    finalize_rapid_tested_objective_manifest,
+    rapid_synthesis_contract_available,
+    rapid_tested_objective_manifest,
+)
+from .assessment_ledger import AssessmentLedgerError
+from .rapid_assessment import (
+    RapidAssessmentStore,
+    RapidExposureConflictError,
+)
 from .schemas import AttemptRequest, StructuredInterpretation
 from .source_policy import (
     eligible_packet_objectives,
@@ -30,7 +56,7 @@ LearnerResolver = Callable[[str | None, str, str | None], str]
 PacketProvider = Callable[[dict[str, Any]], dict[str, Any]]
 PacketTransformer = Callable[[dict[str, Any]], dict[str, Any]]
 
-PACE_SECONDS: dict[str, int | None] = {"ward": 75, "emergency": 20, "untimed": None}
+PACE_SECONDS: dict[str, int | None] = {"ward": 120, "emergency": 20, "untimed": None}
 PACE_SCOPE = {"ward": "full_read", "emergency": "dominant_finding", "untimed": "full_read"}
 ALLOWED_SUBSKILLS = {
     "recognize", "localize", "measure", "discriminate", "explain_mechanism",
@@ -48,6 +74,7 @@ class RapidRoundStartBody(BaseModel):
     pace: Literal["ward", "emergency", "untimed"] = "ward"
     length: int = Field(default=5, ge=1, le=5000)
     focusConcept: str | None = Field(default=None, max_length=160)
+    secondaryConcept: str | None = Field(default=None, max_length=160)
     focusSubskill: str | None = Field(default=None, max_length=80)
     contextKey: str = Field(default="", max_length=1000)
     exclusions: list[str] = Field(default_factory=list, max_length=5000)
@@ -63,6 +90,148 @@ class RapidSubmitBody(BaseModel):
     freeTextAnswer: str = Field(default="", max_length=10_000)
     confidence: int = Field(default=3, ge=1, le=5)
     traceEvidence: dict[str, Any] | None = None
+
+
+_INTEGRATION_ROSTER_VERSION = "rapid-integration-roster-v1"
+_INTEGRATION_ROSTER_PARAM = "__integrationRoster"
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _b64decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _roster_signature(secret: str, encoded: str) -> str:
+    return _b64encode(
+        hmac.new(
+            secret.encode("utf-8"),
+            f"rapid-integration-roster:{encoded}".encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    )
+
+
+def _roster_case_digest(secret: str, case_id: str) -> str:
+    # Case ids are never embedded in the resumable round. The server can locate
+    # the frozen case by scanning the named concept family and matching this
+    # secret-keyed digest; a learner cannot reverse it against enumerable ids.
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"rapid-integration-case:{case_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _encode_integration_roster(
+    secret: str,
+    *,
+    learner_id: str,
+    primary_concept: str,
+    secondary_concept: str,
+    primary_case_id: str,
+    secondary_case_id: str,
+) -> str:
+    payload = {
+        "v": _INTEGRATION_ROSTER_VERSION,
+        "o": hmac.new(
+            secret.encode("utf-8"),
+            f"rapid-integration-owner:{learner_id}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()[:32],
+        "p": primary_concept,
+        "s": secondary_concept,
+        "ph": _roster_case_digest(secret, primary_case_id),
+        "sh": _roster_case_digest(secret, secondary_case_id),
+    }
+    encoded = _b64encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    return f"{encoded}.{_roster_signature(secret, encoded)}"
+
+
+def _query_pairs(context_key: str) -> list[tuple[str, str]]:
+    return parse_qsl(str(context_key or "").lstrip("?"), keep_blank_values=True)
+
+
+def _requested_secondary_concept(context_key: str) -> str | None:
+    values = [value.strip() for key, value in _query_pairs(context_key) if key == "secondaryConcept"]
+    if not values:
+        return None
+    if len(values) != 1 or values[0] not in CONCEPT_BY_ID:
+        raise ValueError("invalid_secondary_concept")
+    return values[0]
+
+
+def _with_integration_roster(context_key: str, token: str) -> str:
+    pairs = [
+        (key, value)
+        for key, value in _query_pairs(context_key)
+        if key != _INTEGRATION_ROSTER_PARAM
+    ]
+    pairs.append((_INTEGRATION_ROSTER_PARAM, token))
+    query = urlencode(pairs)
+    return f"?{query}" if str(context_key or "").startswith("?") else query
+
+
+def _public_context_key(context_key: str) -> str:
+    pairs = [
+        (key, value)
+        for key, value in _query_pairs(context_key)
+        if key != _INTEGRATION_ROSTER_PARAM
+    ]
+    query = urlencode(pairs)
+    if not query:
+        return ""
+    return f"?{query}" if str(context_key or "").startswith("?") else query
+
+
+def _decode_integration_roster(
+    context_key: str, *, secret: str, learner_id: str, focus_concept: str
+) -> dict[str, str] | None:
+    values = [value for key, value in _query_pairs(context_key) if key == _INTEGRATION_ROSTER_PARAM]
+    if not values:
+        return None
+    try:
+        if len(values) != 1:
+            raise ValueError("invalid_integration_roster")
+        encoded, supplied = values[0].split(".", 1)
+        if not hmac.compare_digest(_roster_signature(secret, encoded), supplied):
+            raise ValueError("invalid_integration_roster")
+        payload = json.loads(_b64decode(encoded))
+        expected_owner = hmac.new(
+            secret.encode("utf-8"),
+            f"rapid-integration-owner:{learner_id}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()[:32]
+        secondary = _requested_secondary_concept(context_key)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("v") != _INTEGRATION_ROSTER_VERSION
+            or payload.get("o") != expected_owner
+            or payload.get("p") != focus_concept
+            or payload.get("s") != secondary
+            or secondary == focus_concept
+            or not all(
+                isinstance(payload.get(key), str)
+                and len(payload[key]) == 64
+                and all(character in "0123456789abcdef" for character in payload[key])
+                for key in ("ph", "sh")
+            )
+        ):
+            raise ValueError("invalid_integration_roster")
+        return {
+            "primaryConcept": str(payload["p"]),
+            "secondaryConcept": str(payload["s"]),
+            "primaryDigest": str(payload["ph"]),
+            "secondaryDigest": str(payload["sh"]),
+        }
+    except ValueError:
+        raise
+    except (TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid_integration_roster") from exc
 
 
 def _receipt_concept(session: dict[str, Any]) -> str:
@@ -83,8 +252,8 @@ def _synthesis_contract(
     definition = objective_definition(receipt_concept)
     if not definition or "synthesize" not in definition.allowed_subskills:
         return receipt_concept, False, "The requested objective has no reviewed synthesis task contract."
-    if focus not in definition.case_concepts:
-        return receipt_concept, False, "The focused ECG family cannot prove the requested synthesis objective."
+    if not rapid_synthesis_contract_available(receipt_concept, focus):
+        return receipt_concept, False, RAPID_SYNTHESIS_RECEIPT_UNAVAILABLE_REASON
     if definition.evidence_ceiling != "eligible_real_case":
         return receipt_concept, False, "This synthesis objective is formative-only under the current source contract."
     source = packet_allows_learning_evidence(case, "rapid", focus, "synthesize")
@@ -98,6 +267,34 @@ def _synthesis_task_complete(answer: StructuredInterpretation) -> bool:
     return all(str(values.get(field) or "").strip() for field in _SYNTHESIS_FIELDS) \
         and len(answer.synthesis.strip()) >= 12 \
         and bool(answer.selectedConcepts)
+
+
+def _manifest_for_pending_case(
+    case: dict[str, Any],
+    session: dict[str, Any],
+    *,
+    focus_concept: str | None,
+) -> dict[str, Any]:
+    """Create the private assessment contract frozen with one pending ECG."""
+
+    focus_subskill = str(session.get("focusSubskill") or "") if focus_concept else ""
+    receipt_concept = _receipt_concept(session) if focus_concept else ""
+    synthesis_allowed = False
+    if focus_concept and focus_subskill == "synthesize":
+        _, synthesis_allowed, _ = _synthesis_contract(case, session)
+    assessment_scope = (
+        "dominant_finding"
+        if _target_only_source(case)
+        else str(session.get("assessmentScope") or "full_read")
+    )
+    return rapid_tested_objective_manifest(
+        case,
+        assessment_scope=assessment_scope,
+        focus_concept=focus_concept,
+        focus_subskill=focus_subskill or None,
+        receipt_concept=receipt_concept or None,
+        synthesis_allowed=synthesis_allowed,
+    )
 
 
 def _deadline_elapsed(session: dict[str, Any], now: datetime | None = None) -> bool:
@@ -311,10 +508,70 @@ def _focused_corpus_selection(
     return {"case": None, "reason": last_reason, "targetObjectives": []}
 
 
+def _frozen_integration_selection(
+    repo,
+    *,
+    concept: str,
+    subskill: str,
+    case_digest: str,
+    secret: str,
+    excluded: set[str],
+    require_trace_proof: bool,
+) -> dict[str, Any]:
+    """Resolve one opaque, preflighted integration slot without substitution."""
+
+    for candidate in repo.candidates(concept):
+        case_id = str(candidate.get("case_id") or "")
+        if not case_id or not hmac.compare_digest(
+            _roster_case_digest(secret, case_id), case_digest
+        ):
+            continue
+        if case_id in excluded:
+            return {
+                "case": None,
+                "reason": "The frozen integration ECG is no longer unique within this round.",
+                "targetObjectives": [],
+            }
+        case = repo.get_case(case_id)
+        exact = packet_allows_learning_evidence(case, "rapid", concept, subskill)
+        trace_ok = bool(
+            not require_trace_proof
+            or packet_allows_learning_evidence(
+                case, "rapid", "qrs_complex", "localize"
+            ).allowed
+        )
+        if not isinstance(case, dict) or not exact.allowed or not trace_ok:
+            return {
+                "case": None,
+                "reason": (
+                    exact.reason
+                    if not exact.allowed
+                    else "The frozen integration ECG no longer has server-grade trace proof."
+                ),
+                "targetObjectives": [],
+            }
+        return {
+            "case": case_summary(case),
+            "reason": (
+                "Served the frozen primary-concept ECG from this integration set."
+                if subskill == "synthesize"
+                else "Served the frozen secondary-concept ECG from this integration set."
+            ),
+            "targetObjectives": [concept],
+        }
+    return {
+        "case": None,
+        "reason": "A frozen integration ECG is no longer present in the audited corpus.",
+        "targetObjectives": [],
+    }
+
+
 PUBLIC_SERVED_TAIL = 25
 
 
-def _public_round(session: dict[str, Any]) -> dict[str, Any]:
+def _public_round(
+    session: dict[str, Any], *, case_reference: Callable[[str], str]
+) -> dict[str, Any]:
     """Bound learner-facing metadata without weakening durable uniqueness.
 
     The complete served ledger remains in server storage and drives selection.
@@ -323,9 +580,141 @@ def _public_round(session: dict[str, Any]) -> dict[str, Any]:
     """
     public = dict(session)
     served = [str(case_id) for case_id in (public.pop("served", []) or [])]
+    # Exclusions are selection-only server state. Echoing caller-supplied raw
+    # corpus identifiers would undo the opaque assessment boundary.
+    public.pop("exclusions", None)
+    # The tested-objective manifest is an answer key while the ECG is pending.
+    # It remains durable in the server session and is released only with the
+    # committed answer.
+    public.pop("pendingTestedObjectiveManifest", None)
+    public["contextKey"] = _public_context_key(str(public.get("contextKey") or ""))
+    for key in ("pendingCaseId", "feedbackCaseId"):
+        canonical_id = public.get(key)
+        public[key] = case_reference(str(canonical_id)) if canonical_id else None
     public["servedCount"] = len(served)
-    public["recentServed"] = served[-PUBLIC_SERVED_TAIL:]
+    public["recentServed"] = [
+        case_reference(canonical_id)
+        for canonical_id in served[-PUBLIC_SERVED_TAIL:]
+    ]
     return public
+
+
+def _grade_claimed_rapid_submission(
+    *,
+    case: dict[str, Any],
+    session: dict[str, Any],
+    body: RapidSubmitBody,
+    tested_manifest: dict[str, Any],
+    selected_concepts: list[str],
+    point: Any,
+    assessment_scope: str,
+    focus_objective: str | None,
+    target_only: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
+    """Run deterministic graders only after the exact lease is reserved."""
+
+    trace_grade: dict[str, Any] | None = None
+    if session["pace"] != "emergency" and isinstance(point, dict):
+        try:
+            trace_grade = grade_click_answer(
+                case,
+                str(point["lead"]),
+                float(point["timeSec"]),
+                float(point["amplitudeMv"]),
+                "qrs_complex",
+            )
+        except (KeyError, TypeError, ValueError):
+            trace_grade = {
+                "correct": False,
+                "noTarget": False,
+                "feedback": "Malformed trace proof.",
+            }
+
+    attempt = AttemptRequest(
+        learnerId=session["learnerId"],
+        caseId=body.caseId,
+        mode="rapid_practice",
+        assessmentScope=assessment_scope,
+        focusObjective=focus_objective,
+        structuredAnswer=body.structuredAnswer,
+        freeTextAnswer=body.freeTextAnswer,
+        confidence=body.confidence,
+        hintsUsed=0,
+    )
+    grade = {
+        **grade_attempt(case, attempt),
+        "masteryDelta": {},
+        "legacyObjectiveMasterySuppressed": True,
+    }
+    if target_only:
+        correct_focus = focus_objective in set(grade.get("correctObjectives") or [])
+        unassessed = [
+            concept
+            for concept in body.structuredAnswer.selectedConcepts
+            if concept != focus_objective
+        ]
+        grade.update(
+            {
+                "score": 1.0 if correct_focus else 0.0,
+                "correctObjectives": [focus_objective] if correct_focus else [],
+                "missedObjectives": [] if correct_focus else [focus_objective],
+                "overcalledObjectives": grade.get("overcalledObjectives", []),
+                "unassessedClaims": unassessed,
+                "feedback": (
+                    f"Focused expert-label check: {str(focus_objective).replace('_', ' ')} matched."
+                    if correct_focus
+                    else f"Focused expert-label check: review {str(focus_objective).replace('_', ' ')}."
+                )
+                + (
+                    " Other 12-lead claims cannot receive finding credit from this target-only source; non-A/B-supported selections still prevent a precision pass."
+                    if unassessed
+                    else ""
+                ),
+                "assessmentScope": "dominant_finding",
+                "labelCompleteness": "target_only",
+            }
+        )
+    manifest_recognition_targets = [
+        str(entry.get("objectiveId") or "")
+        for entry in tested_manifest.get("objectives") or []
+        if entry.get("subskill") == "recognize" and entry.get("lapseEligible")
+    ]
+    if manifest_recognition_targets:
+        verified_correct: list[str] = []
+        for tested_objective in manifest_recognition_targets:
+            scoped_grade = grade_attempt(
+                case,
+                attempt.model_copy(
+                    update={
+                        "focusObjective": tested_objective,
+                        "assessmentScope": "dominant_finding",
+                    }
+                ),
+            )
+            if tested_objective in set(scoped_grade.get("correctObjectives") or []):
+                verified_correct.append(tested_objective)
+        grade.update(
+            {
+                "correctObjectives": verified_correct,
+                "missedObjectives": [
+                    objective_id
+                    for objective_id in manifest_recognition_targets
+                    if objective_id not in verified_correct
+                ],
+            }
+        )
+    grade = bound_rapid_grade_to_manifest(grade, tested_manifest, selected_concepts)
+    result = {
+        "caseId": body.caseId,
+        "displayId": case.get("display_id") or body.caseId,
+        "score": float(grade["score"]),
+        "correctObjectives": grade.get("correctObjectives", []),
+        "missedObjectives": grade.get("missedObjectives", []),
+        "overcalledObjectives": grade.get("overcalledObjectives", []),
+        "misconceptions": grade.get("misconceptions", []),
+        "revealedDiagnosis": grade.get("revealedDiagnosis", ""),
+    }
+    return trace_grade, grade, result
 
 
 def build_rapid_router(
@@ -337,6 +726,9 @@ def build_rapid_router(
     resolve_learner: LearnerResolver,
 ) -> APIRouter:
     router = APIRouter(prefix="/rapid/rounds", tags=["rapid-rounds"])
+    assessments = RapidAssessmentStore(store)
+    integration_roster_secret = get_settings().adaptive_plan_context_secret
+    capability_secret = integration_roster_secret
     # A 5,000-case round must not query and hash-sort the 21k corpus before every
     # ECG. Cache the lightweight corpus index once, then one deterministic order
     # per active round. The small LRU bounds abandoned-round memory; an evicted or
@@ -354,7 +746,64 @@ def build_rapid_router(
         learner = resolve_learner(authorization, "demo", session_cookie)
         if not session or session.get("learnerId") != learner:
             raise HTTPException(status_code=404, detail="Rapid round not found")
+        try:
+            assessments.ensure_pending_lease(round_id=round_id, learner_id=learner)
+        except (AssessmentLedgerError, RapidExposureConflictError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_assessment_integrity_conflict",
+                    "message": "This Rapid item could not be verified against its assessment record.",
+                },
+            ) from exc
+        session = store.get_rapid_round(round_id) or session
         return session
+
+    def case_reference(session: dict[str, Any], canonical_id: str) -> str:
+        return issue_ecg_capability(
+            capability_secret,
+            str(session["learnerId"]),
+            "rapid",
+            str(session["roundId"]),
+            str(canonical_id),
+        )
+
+    def reference_matches(
+        session: dict[str, Any], reference: object, canonical_id: str
+    ) -> bool:
+        return matches_ecg_capability(
+            reference,
+            capability_secret,
+            str(session["learnerId"]),
+            "rapid",
+            str(session["roundId"]),
+            str(canonical_id),
+        )
+
+    def public_result(
+        session: dict[str, Any], result: dict[str, Any], ordinal: int
+    ) -> dict[str, Any]:
+        canonical_id = str(result.get("caseId") or "")
+        return public_assessment_record(
+            result,
+            case_reference=case_reference(session, canonical_id),
+            display_id=assessment_display_id("rapid", ordinal),
+        )
+
+    def public_answer(
+        session: dict[str, Any], answer: dict[str, Any], ordinal: int
+    ) -> dict[str, Any]:
+        canonical_id = str(answer.get("caseId") or "")
+        return public_assessment_record(
+            answer,
+            case_reference=case_reference(session, canonical_id),
+            display_id=assessment_display_id("rapid", ordinal),
+        )
+
+    def answer_ordinal(session: dict[str, Any], canonical_id: str) -> int:
+        if str(session.get("feedbackCaseId") or "") == canonical_id:
+            return max(1, int(session.get("position") or 0))
+        return int(session.get("position") or 0) + 1
 
     def payload(session: dict[str, Any] | None) -> dict[str, Any]:
         if not session:
@@ -367,10 +816,22 @@ def build_rapid_router(
         if pending_id:
             case = repo.get_case(pending_id)
             if case:
+                reference = case_reference(session, str(pending_id))
+                display_id = assessment_display_id(
+                    "rapid", int(session.get("position") or 0) + 1
+                )
                 current = {
                     "kind": "pending",
-                    "case": blind_summary(case_summary(case)),
-                    "packet": blind_packet(packet_provider(case)),
+                    "case": public_case_summary(
+                        blind_summary(case_summary(case)),
+                        case_reference=reference,
+                        display_id=display_id,
+                    ),
+                    "packet": public_case_packet(
+                        blind_packet(packet_provider(case)),
+                        case_reference=reference,
+                        display_id=display_id,
+                    ),
                     "startedAt": session.get("pendingStartedAt"),
                     "deadlineAt": session.get("pendingDeadlineAt"),
                 }
@@ -378,16 +839,36 @@ def build_rapid_router(
             answer = store.get_rapid_answer(session["roundId"], feedback_id)
             case = repo.get_case(feedback_id)
             if answer and case:
+                ordinal = max(1, int(session.get("position") or 0))
+                reference = case_reference(session, str(feedback_id))
+                display_id = assessment_display_id("rapid", ordinal)
                 current = {
                     "kind": "feedback",
-                    "case": blind_summary(case_summary(case)),
-                    "packet": packet_provider(case),
-                    "answer": answer,
+                    "case": public_case_summary(
+                        blind_summary(case_summary(case)),
+                        case_reference=reference,
+                        display_id=display_id,
+                    ),
+                    "packet": public_case_packet(
+                        packet_provider(case),
+                        case_reference=reference,
+                        display_id=display_id,
+                    ),
+                    "answer": public_answer(session, answer, ordinal),
                 }
+        result_start = max(0, result_count - len(answers))
         return {
-            "round": _public_round(session),
+            "round": _public_round(
+                session,
+                case_reference=lambda canonical_id: case_reference(
+                    session, canonical_id
+                ),
+            ),
             "current": current,
-            "results": [answer["result"] for answer in answers],
+            "results": [
+                public_result(session, answer["result"], result_start + index + 1)
+                for index, answer in enumerate(answers)
+            ],
             "resultCount": result_count,
             "resultsTruncated": result_count > len(answers),
         }
@@ -401,15 +882,151 @@ def build_rapid_router(
         if len(set(body.exclusions)) != len(body.exclusions) or any(len(item) > 160 for item in body.exclusions):
             raise HTTPException(status_code=422, detail="Rapid exclusions must be unique bounded case ids")
         learner = resolve_learner(authorization, body.learnerId, session_cookie)
-        session = store.create_rapid_round(
-            learner,
-            body.pace,
-            body.length,
-            PACE_SCOPE[body.pace],
-            PACE_SECONDS[body.pace],
+        live_exposures = assessments.live_exposure_ids(learner)
+        selection_exclusions = set(body.exclusions) | live_exposures
+        if any(key == _INTEGRATION_ROSTER_PARAM for key, _ in _query_pairs(body.contextKey)):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_integration_roster_client_owned",
+                    "message": "The integration roster is created only by the server.",
+                },
+            )
+        try:
+            requested_secondary = _requested_secondary_concept(body.contextKey)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_secondary_concept_invalid",
+                    "message": "Choose one supported secondary ECG concept.",
+                },
+            ) from exc
+        if body.secondaryConcept != requested_secondary:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_secondary_concept_mismatch",
+                    "message": "The secondary concept must match the validated launch link.",
+                },
+            )
+
+        context_key = body.contextKey
+        if requested_secondary:
+            primary = str(body.focusConcept or "")
+            if (
+                primary not in CONCEPT_BY_ID
+                or requested_secondary not in CONCEPT_BY_ID
+                or primary == requested_secondary
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "rapid_integration_concepts_invalid",
+                        "message": "Integration requires two different supported ECG concepts.",
+                    },
+                )
+            if body.focusSubskill != "synthesize" or PACE_SCOPE[body.pace] != "full_read":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "rapid_integration_scope_invalid",
+                        "message": "Cross-concept integration requires a ward or untimed complete-read synthesis set.",
+                    },
+                )
+            if body.length < 2:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "rapid_integration_length_too_short",
+                        "message": "Cross-concept integration needs at least two unique ECGs.",
+                    },
+                )
+
+            preflight_session = {
+                "learnerId": learner,
+                "focusConcept": primary,
+                "focusSubskill": "synthesize",
+                "assessmentScope": PACE_SCOPE[body.pace],
+                "contextKey": body.contextKey,
+            }
+            require_trace_proof = body.pace != "emergency"
+            primary_slot = _focused_corpus_selection(
+                repo,
+                store,
+                preflight_session,
+                selection_exclusions,
+                require_trace_proof=require_trace_proof,
+            )
+            if not primary_slot.get("case"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_integration_primary_unavailable",
+                        "message": primary_slot.get("reason")
+                        or "No eligible primary-concept ECG can be frozen for this set.",
+                    },
+                )
+            primary_case_id = str(primary_slot["case"]["caseId"])
+            # Cross-concept comparison is useful formative practice even while
+            # complete-read synthesis has no deterministic per-domain mastery
+            # contract. The focused selector above still enforces real-source,
+            # trace-proof, and exact-concept eligibility. At submission,
+            # ``_manifest_for_pending_case`` and the synthesis receipt boundary
+            # keep this work at accepted:false/evidenceLevel:none, so allowing
+            # the round to start cannot mint synthesis mastery.
+
+            secondary_session = {
+                **preflight_session,
+                "focusConcept": requested_secondary,
+                "focusSubskill": "recognize",
+            }
+            secondary_slot = _focused_corpus_selection(
+                repo,
+                store,
+                secondary_session,
+                selection_exclusions | {primary_case_id},
+                require_trace_proof=require_trace_proof,
+            )
+            if not secondary_slot.get("case"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_integration_secondary_unavailable",
+                        "message": secondary_slot.get("reason")
+                        or "No distinct eligible secondary-concept ECG can be frozen for this set.",
+                    },
+                )
+            secondary_case_id = str(secondary_slot["case"]["caseId"])
+            if secondary_case_id == primary_case_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_integration_unique_roster_unavailable",
+                        "message": "Two distinct eligible ECGs are required for this integration set.",
+                    },
+                )
+            context_key = _with_integration_roster(
+                body.contextKey,
+                _encode_integration_roster(
+                    integration_roster_secret,
+                    learner_id=learner,
+                    primary_concept=primary,
+                    secondary_concept=requested_secondary,
+                    primary_case_id=primary_case_id,
+                    secondary_case_id=secondary_case_id,
+                ),
+            )
+
+        session = assessments.create_round(
+            learner_id=learner,
+            pace=body.pace,
+            length=body.length,
+            assessment_scope=PACE_SCOPE[body.pace],
+            deadline_seconds=PACE_SECONDS[body.pace],
             focus_concept=body.focusConcept,
             focus_subskill=body.focusSubskill if body.focusSubskill in ALLOWED_SUBSKILLS else None,
-            context_key=body.contextKey,
+            context_key=context_key,
             exclusions=body.exclusions,
         )
         return payload(session)
@@ -420,7 +1037,22 @@ def build_rapid_router(
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
         learner = resolve_learner(authorization, "demo", session_cookie)
-        return payload(store.get_resumable_rapid_round(learner))
+        session = store.get_resumable_rapid_round(learner)
+        if session:
+            try:
+                assessments.ensure_pending_lease(
+                    round_id=str(session["roundId"]), learner_id=learner
+                )
+            except (AssessmentLedgerError, RapidExposureConflictError, RuntimeError) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_assessment_integrity_conflict",
+                        "message": "This Rapid item could not be verified against its assessment record.",
+                    },
+                ) from exc
+            session = store.get_rapid_round(str(session["roundId"])) or session
+        return payload(session)
 
     @router.get("/{round_id}")
     def get_round(
@@ -438,7 +1070,7 @@ def build_rapid_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        owned_round(round_id, authorization, session_cookie)
+        session = owned_round(round_id, authorization, session_cookie)
         bounded_offset = max(0, int(offset))
         bounded_limit = max(1, min(5000, int(limit)))
         answers = store.get_rapid_answers(
@@ -449,8 +1081,104 @@ def build_rapid_router(
             "offset": bounded_offset,
             "limit": bounded_limit,
             "total": store.rapid_answer_count(round_id),
-            "results": [answer["result"] for answer in answers],
+            "results": [
+                public_result(
+                    session, answer["result"], bounded_offset + index + 1
+                )
+                for index, answer in enumerate(answers)
+            ],
         }
+
+    @router.get("/{round_id}/waveform/{case_ref}")
+    def get_round_waveform(
+        round_id: str,
+        case_ref: str,
+        response: Response,
+        leads: str | None = Query(default=None, max_length=120),
+        start: float = Query(default=0, ge=0),
+        end: float | None = Query(default=None, ge=0),
+        maxPoints: int = Query(default=1200, ge=100, le=5000),
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        session = owned_round(round_id, authorization, session_cookie)
+        canonical_id = next(
+            (
+                str(candidate)
+                for candidate in (
+                    session.get("pendingCaseId"),
+                    session.get("feedbackCaseId"),
+                )
+                if candidate and reference_matches(session, case_ref, str(candidate))
+            ),
+            None,
+        )
+        if canonical_id is None:
+            raise HTTPException(status_code=404, detail="Rapid ECG not found")
+        lead_list = [lead.strip() for lead in leads.split(",")] if leads else None
+        if lead_list and (
+            len(lead_list) > 12
+            or any(not lead or len(lead) > 8 for lead in lead_list)
+        ):
+            raise HTTPException(status_code=422, detail="Invalid waveform lead selection")
+        waveform = repo.get_waveform_window(
+            canonical_id,
+            leads=lead_list,
+            start=start,
+            end=end,
+            max_points=maxPoints,
+        )
+        if not waveform:
+            raise HTTPException(status_code=404, detail="Rapid ECG not found")
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Authorization, Cookie"
+        return public_waveform(waveform, case_reference=case_ref)
+
+    @router.post("/{round_id}/abandon")
+    def abandon_round(
+        round_id: str,
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        session = owned_round(round_id, authorization, session_cookie)
+        if session.get("status") == "abandoned":
+            # Safe retry: the first request already closed the pending-case and
+            # timer boundary. Do not rewrite the transition timestamp.
+            return payload(session)
+        if session.get("status") != "active":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_round_not_active",
+                    "message": "Only an active Rapid round can be abandoned.",
+                },
+            )
+        try:
+            abandoned = assessments.abandon_round(
+                round_id=round_id, learner_id=str(session["learnerId"])
+            )
+        except (AssessmentLedgerError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_abandon_integrity_conflict",
+                    "message": "The pending ECG changed before it could be left safely.",
+                },
+            ) from exc
+        if not abandoned or abandoned.get("status") != "abandoned":
+            # A concurrent final submission may have completed the round after
+            # the ownership/read check. Never report a transition that did not
+            # win the atomic store boundary.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_round_transition_lost",
+                    "message": "The Rapid round changed before it could be abandoned.",
+                },
+            )
+        broad_orders.release(round_id)
+        return payload(abandoned)
 
     @router.post("/{round_id}/next")
     def next_round_case(
@@ -460,6 +1188,14 @@ def build_rapid_router(
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
         session = owned_round(round_id, authorization, session_cookie)
+        if session.get("status") == "abandoned":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_round_abandoned",
+                    "message": "This Rapid round was abandoned and cannot serve another ECG.",
+                },
+            )
         if body.activate:
             return payload(store.activate_rapid_pending(round_id))
         if session.get("feedbackCaseId"):
@@ -470,10 +1206,57 @@ def build_rapid_router(
         if session.get("pendingCaseId"):
             return payload(session)
 
-        exclusions = set(session.get("exclusions") or []) | set(session.get("served") or [])
+        exclusions = (
+            set(session.get("exclusions") or [])
+            | set(session.get("served") or [])
+            | assessments.live_exposure_ids(str(session["learnerId"]))
+        )
         focus = session.get("focusConcept") if session["position"] == 0 else None
         require_trace_proof = session["pace"] != "emergency"
-        if focus and session["position"] == 0:
+        try:
+            integration_roster = _decode_integration_roster(
+                str(session.get("contextKey") or ""),
+                secret=integration_roster_secret,
+                learner_id=str(session.get("learnerId") or ""),
+                focus_concept=str(session.get("focusConcept") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_integration_roster_invalid",
+                    "message": "This integration roster could not be verified; no substitute ECG was served.",
+                },
+            ) from exc
+
+        frozen_target: str | None = None
+        manifest_focus: str | None = str(focus) if focus else None
+        if integration_roster and session["position"] in {0, 1}:
+            primary_slot = session["position"] == 0
+            frozen_target = str(
+                integration_roster[
+                    "primaryConcept" if primary_slot else "secondaryConcept"
+                ]
+            )
+            selected = _frozen_integration_selection(
+                repo,
+                concept=frozen_target,
+                subskill="synthesize" if primary_slot else "recognize",
+                case_digest=str(
+                    integration_roster[
+                        "primaryDigest" if primary_slot else "secondaryDigest"
+                    ]
+                ),
+                secret=integration_roster_secret,
+                excluded=exclusions,
+                require_trace_proof=require_trace_proof,
+            )
+            # The secondary slot guarantees concept exposure but remains a
+            # broad complete read. It must not mint the primary synthesis
+            # receipt or pretend a Guided integration prompt was independently
+            # graded against two concepts at once.
+            manifest_focus = frozen_target if primary_slot else None
+        elif focus and session["position"] == 0:
             # Focused selection owns a different, exact-contract query. Defer
             # the 21k broad permutation until a later mixed slot actually needs
             # it (and never build it for a one-item focused round).
@@ -497,12 +1280,45 @@ def build_rapid_router(
         if not selected.get("case"):
             raise HTTPException(status_code=409, detail=selected.get("reason") or "No Rapid case is available")
         case_id = selected["case"]["caseId"]
-        if focus and focus not in selected.get("targetObjectives", []):
-            raise HTTPException(status_code=409, detail="Rapid selector could not honor the focused first case")
-        claimed = store.set_rapid_pending(round_id, case_id)
+        required_target = frozen_target or (str(focus) if focus else None)
+        if required_target and required_target not in selected.get("targetObjectives", []):
+            raise HTTPException(
+                status_code=409,
+                detail="Rapid selector could not honor the frozen focused concept slot",
+            )
+        selected_case = repo.get_case(case_id)
+        if not isinstance(selected_case, dict):
+            raise HTTPException(status_code=409, detail="Rapid selected case is no longer available")
+        tested_manifest = _manifest_for_pending_case(
+            selected_case,
+            session,
+            focus_concept=manifest_focus,
+        )
+        try:
+            claimed = assessments.freeze_pending(
+                round_id=round_id,
+                learner_id=str(session["learnerId"]),
+                case_id=case_id,
+                tested_objective_manifest=tested_manifest,
+            )
+        except RapidExposureConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_live_exposure_conflict",
+                    "message": "That ECG is already open in another assessment. Start the next item after leaving it there.",
+                },
+            ) from exc
+        except (AssessmentLedgerError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_pending_freeze_failed",
+                    "message": "The selected ECG could not be frozen safely for this round.",
+                },
+            ) from exc
         response = payload(claimed)
         response["selectionReason"] = selected.get("reason")
-        response["targetObjectives"] = selected.get("targetObjectives", [])
         return response
 
     @router.post("/{round_id}/submit")
@@ -513,149 +1329,293 @@ def build_rapid_router(
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
         session = owned_round(round_id, authorization, session_cookie)
-        prior = store.get_rapid_answer(round_id, body.caseId)
-        if prior:
-            response = payload(store.get_rapid_round(round_id))
-            response.update({"answer": prior, "receipts": prior["receipts"], "replay": True})
-            return response
-        if session.get("pendingCaseId") != body.caseId:
+        submission_received_at = datetime.now(UTC)
+        pending_id = str(session.get("pendingCaseId") or "")
+        feedback_id = str(session.get("feedbackCaseId") or "")
+        canonical_id = next(
+            (
+                candidate
+                for candidate in (pending_id, feedback_id)
+                if candidate and reference_matches(session, body.caseId, candidate)
+            ),
+            None,
+        )
+        if canonical_id is None:
             raise HTTPException(
                 status_code=409,
-                detail={"code": "rapid_case_not_pending", "pendingCaseId": session.get("pendingCaseId")},
+                detail={
+                    "code": "rapid_case_not_pending",
+                    "pendingCaseId": (
+                        case_reference(session, pending_id) if pending_id else None
+                    ),
+                },
             )
-        case = repo.get_case(body.caseId)
+        body = body.model_copy(update={"caseId": canonical_id})
+        prior = store.get_rapid_answer(round_id, canonical_id)
+        if prior:
+            if prior.get("integrityStatus") in {"legacy_incomplete", "finalizing"} or not prior.get("receipts"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_legacy_answer_quarantined",
+                        "message": (
+                            "This pre-atomic answer has an incomplete evidence ledger and cannot be "
+                            "replayed or repaired without risking duplicate mastery credit."
+                        ),
+                    },
+                )
+            response = payload(store.get_rapid_round(round_id))
+            response.update({
+                "answer": public_answer(
+                    session, prior, answer_ordinal(session, canonical_id)
+                ),
+                "receipts": prior["receipts"],
+                "replay": True,
+            })
+            return response
+        if pending_id != canonical_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_case_not_pending",
+                    "pendingCaseId": (
+                        case_reference(session, pending_id) if pending_id else None
+                    ),
+                },
+            )
+        case = repo.get_case(canonical_id)
         if not case:
             raise HTTPException(status_code=404, detail="Rapid case not found")
 
-        pre_submit_timed_out = _deadline_elapsed(session)
-        trace_grade: dict[str, Any] | None = None
+        frozen_manifest = session.get("pendingTestedObjectiveManifest") or {}
+        manifest_valid = bool(
+            isinstance(frozen_manifest, dict)
+            and frozen_manifest.get("version")
+            == RAPID_TESTED_OBJECTIVE_MANIFEST_VERSION
+            and str(frozen_manifest.get("caseId") or "") == body.caseId
+            and isinstance(frozen_manifest.get("objectives"), list)
+        )
+        if not manifest_valid:
+            # Existing deployments can contain a pending row created before the
+            # additive manifest migration. Rebuild it once from the immutable
+            # round/case contract, then freeze it before grading.
+            effective_focus = (
+                str(session.get("focusConcept") or "")
+                if int(session.get("position") or 0) == 0
+                else ""
+            )
+            rebuilt_manifest = _manifest_for_pending_case(
+                case,
+                session,
+                focus_concept=effective_focus or None,
+            )
+            session = (
+                store.ensure_rapid_pending_manifest(
+                    round_id, body.caseId, rebuilt_manifest
+                )
+                or session
+            )
+            frozen_manifest = session.get("pendingTestedObjectiveManifest") or {}
+            manifest_valid = bool(
+                isinstance(frozen_manifest, dict)
+                and frozen_manifest.get("version")
+                == RAPID_TESTED_OBJECTIVE_MANIFEST_VERSION
+                and str(frozen_manifest.get("caseId") or "") == body.caseId
+                and isinstance(frozen_manifest.get("objectives"), list)
+            )
+        if not manifest_valid:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_tested_manifest_missing",
+                    "message": "The server could not recover this item's assessment contract.",
+                },
+            )
+        selected_concepts = list(
+            dict.fromkeys(body.structuredAnswer.selectedConcepts)
+        )
+        tested_manifest = finalize_rapid_tested_objective_manifest(
+            frozen_manifest,
+            case,
+            selected_concepts,
+        )
+
+        pre_submit_timed_out = _deadline_elapsed(session, submission_received_at)
         trace = body.traceEvidence or {}
         point = trace.get("point") if trace.get("mode") == "point" else None
         if session["pace"] != "emergency":
-            if isinstance(point, dict):
-                try:
-                    trace_grade = grade_click_answer(
-                        case,
-                        str(point["lead"]),
-                        float(point["timeSec"]),
-                        float(point["amplitudeMv"]),
-                        "qrs_complex",
-                    )
-                except (KeyError, TypeError, ValueError):
-                    trace_grade = {
-                        "correct": False,
-                        "noTarget": False,
-                        "feedback": "Malformed trace proof.",
-                    }
-            if not pre_submit_timed_out and not bool(trace_grade and trace_grade.get("correct")):
+            if not pre_submit_timed_out and not isinstance(point, dict):
+                # Presence is a structural completion gate, not correctness
+                # feedback. A wrong but well-formed point is committed below so
+                # it cannot be refined through repeated pre-commit probes.
                 raise HTTPException(
                     status_code=422,
                     detail={
                         "code": "rapid_trace_proof_required",
-                        "message": "Ward and untimed submissions require a server-verified QRS localization proof.",
+                        "message": "Mark one QRS trace point before committing this read.",
                     },
                 )
+            # A wrong trace mark is assessment evidence, not a pre-commit
+            # validation error. Persist and reveal its correctness together with
+            # the interpretation grade below; otherwise repeated submit probes
+            # become an answer oracle before durable commitment.
+
+        if (
+            session["assessmentScope"] == "full_read"
+            and not pre_submit_timed_out
+            and not _synthesis_task_complete(body.structuredAnswer)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_systematic_sweep_required",
+                    "message": (
+                        "Complete all eight systematic sweep fields, select at least one supported finding "
+                        "(including normal when appropriate), and write an evidence-limited synthesis."
+                    ),
+                },
+            )
 
         target_only = _target_only_source(case)
         assessment_scope = "dominant_finding" if target_only else session["assessmentScope"]
-        focus_objective = str(session.get("focusConcept") or "") if target_only else None
+        focused_recognition_target = next(
+            (
+                str(entry.get("objectiveId") or "")
+                for entry in tested_manifest.get("objectives") or []
+                if entry.get("subskill") == "recognize"
+                and entry.get("role") == "required"
+            ),
+            "",
+        )
+        focus_objective = (
+            focused_recognition_target
+            if tested_manifest.get("taskKind") == "focused_handoff"
+            else str(session.get("focusConcept") or "")
+            if target_only
+            else None
+        )
         if target_only and not focus_objective:
             raise HTTPException(
                 status_code=409,
                 detail="A target-only rhythm source requires an explicit focused Rapid objective.",
             )
-        attempt = AttemptRequest(
-            learnerId=session["learnerId"],
-            caseId=body.caseId,
-            mode="rapid_practice",
-            assessmentScope=assessment_scope,
-            focusObjective=focus_objective,
-            structuredAnswer=body.structuredAnswer,
-            freeTextAnswer=body.freeTextAnswer,
-            confidence=body.confidence,
-            hintsUsed=0,
-        )
-        grade = {
-            **grade_attempt(case, attempt),
-            "masteryDelta": {},
-            "legacyObjectiveMasterySuppressed": True,
-        }
-        if target_only:
-            correct_focus = focus_objective in set(grade.get("correctObjectives") or [])
-            unassessed = [
-                concept for concept in body.structuredAnswer.selectedConcepts
-                if concept != focus_objective
-            ]
-            grade.update({
-                "score": 1.0 if correct_focus else 0.0,
-                "correctObjectives": [focus_objective] if correct_focus else [],
-                "missedObjectives": [] if correct_focus else [focus_objective],
-                "overcalledObjectives": [],
-                "unassessedClaims": unassessed,
-                "feedback": (
-                    f"Focused expert-label check: {focus_objective.replace('_', ' ')} matched."
-                    if correct_focus
-                    else f"Focused expert-label check: review {focus_objective.replace('_', ' ')}."
-                ) + (
-                    " Other 12-lead claims were not scored because this rhythm-stream source is not exhaustively morphology-labelled."
-                    if unassessed else ""
-                ),
-                "assessmentScope": "dominant_finding",
-                "labelCompleteness": "target_only",
-            })
-        result = {
-            "caseId": body.caseId,
-            "displayId": case.get("display_id") or body.caseId,
-            "score": float(grade["score"]),
-            "correctObjectives": grade.get("correctObjectives", []),
-            "missedObjectives": grade.get("missedObjectives", []),
-            "overcalledObjectives": grade.get("overcalledObjectives", []),
-            "misconceptions": grade.get("misconceptions", []),
-            "revealedDiagnosis": grade.get("revealedDiagnosis", ""),
-        }
-        recorded = store.record_rapid_answer(
-            round_id=round_id,
-            case_id=body.caseId,
-            response={
-                "structuredAnswer": body.structuredAnswer.model_dump(),
-                "freeTextAnswer": body.freeTextAnswer,
-                "confidence": body.confidence,
-                "traceEvidence": body.traceEvidence,
-            },
-            grade=grade,
-            # Per-case grading is deliberately provider-independent. Learners
-            # can invoke the grounded tutor after commitment; completed-round
-            # debriefing has its own bounded AI request.
-            tutor=None,
-            trace_grade=trace_grade,
-            confidence=body.confidence,
-            result=result,
-        )
-        if recorded["status"] == "not_pending":
-            prior = store.get_rapid_answer(round_id, body.caseId)
-            if prior:
-                response = payload(store.get_rapid_round(round_id))
-                response.update({"answer": prior, "receipts": prior["receipts"], "replay": True})
-                return response
-            raise HTTPException(status_code=409, detail="Rapid case is no longer pending")
-        if recorded["status"] == "missing":
-            raise HTTPException(status_code=404, detail="Rapid round not found")
-        if recorded["status"] == "replay":
-            answer = recorded["answer"]
-            response = payload(store.get_rapid_round(round_id))
-            response.update({"answer": answer, "receipts": answer["receipts"], "replay": True})
-            return response
-
-        answer = recorded["answer"]
-        timed_out = bool((answer.get("result") or {}).get("timedOut"))
-        supported = set(case.get("supported_objectives") or [])
-        morphology_key = retention_morphology_key(case)
-        selected_concepts = list(dict.fromkeys(body.structuredAnswer.selectedConcepts))
-        receipts: list[dict[str, Any]] = []
-        for concept in selected_concepts:
-            exact_policy = packet_allows_learning_evidence(
-                case, "rapid", concept, "recognize"
+        try:
+            reservation = assessments.claim_answer_submission(
+                round_id=round_id,
+                case_id=body.caseId,
+                learner_id=str(session["learnerId"]),
             )
+        except (AssessmentLedgerError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_submission_reservation_failed",
+                    "message": "This ECG changed before the answer could be reserved.",
+                },
+            ) from exc
+        if reservation["status"] == "replay":
+            prior = reservation["answer"]
+            if prior.get("integrityStatus") in {"legacy_incomplete", "finalizing"} or not prior.get("receipts"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_legacy_answer_quarantined",
+                        "message": "This earlier answer has an incomplete evidence record and cannot be replayed safely.",
+                    },
+                )
+            response = payload(store.get_rapid_round(round_id))
+            response.update({
+                "answer": public_answer(
+                    session, prior, answer_ordinal(session, canonical_id)
+                ),
+                "receipts": prior["receipts"],
+                "replay": True,
+            })
+            return response
+        if reservation["status"] == "missing":
+            raise HTTPException(status_code=404, detail="Rapid round not found")
+        if reservation["status"] == "not_pending":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_case_not_pending",
+                    "pendingCaseId": (
+                        case_reference(
+                            session, str(reservation.get("pendingCaseId"))
+                        )
+                        if reservation.get("pendingCaseId")
+                        else None
+                    ),
+                },
+            )
+
+        try:
+            trace_grade, grade, result = _grade_claimed_rapid_submission(
+                case=case,
+                session=session,
+                body=body,
+                tested_manifest=tested_manifest,
+                selected_concepts=selected_concepts,
+                point=point,
+                assessment_scope=assessment_scope,
+                focus_objective=focus_objective,
+                target_only=target_only,
+            )
+        except Exception:
+            assessments.release_answer_submission(
+                round_id=round_id,
+                learner_id=str(session["learnerId"]),
+                lease_id=str(reservation["leaseId"]),
+                submission_key=str(reservation["submissionKey"]),
+            )
+            raise
+        def release_reserved_submission() -> None:
+            assessments.release_answer_submission(
+                round_id=round_id,
+                learner_id=str(session["learnerId"]),
+                lease_id=str(reservation["leaseId"]),
+                submission_key=str(reservation["submissionKey"]),
+            )
+
+        def committed_evidence_policy(concept: str, subskill: str):
+            try:
+                return packet_allows_learning_evidence(
+                    case, "rapid", concept, subskill
+                )
+            except Exception:
+                release_reserved_submission()
+                raise
+
+        # Build a pure receipt/event plan first. The store applies the entire
+        # plan together with the answer, generic attempt, and round advance in
+        # one BEGIN IMMEDIATE transaction below.
+        timed_out = pre_submit_timed_out
+        supported = set(case.get("supported_objectives") or [])
+        try:
+            morphology_key = retention_morphology_key(case)
+        except Exception:
+            release_reserved_submission()
+            raise
+        durable_manifest = tested_manifest
+        required_recognition = {
+            str(entry.get("objectiveId") or "")
+            for entry in durable_manifest.get("objectives") or []
+            if entry.get("subskill") == "recognize"
+            and entry.get("lapseEligible")
+        }
+        accountable_recognition = required_recognition
+        graded_correct_recognition = set(grade.get("correctObjectives") or [])
+        recognition_precision_ok = not bool(grade.get("overcalledObjectives"))
+        receipts: list[dict[str, Any]] = []
+        receipt_events: dict[int, dict[str, Any]] = {}
+
+        def append_event_receipt(
+            event: dict[str, Any], receipt: dict[str, Any]
+        ) -> None:
+            receipt_events[len(receipts)] = event
+            receipts.append(receipt)
+        for concept in selected_concepts:
+            exact_policy = committed_evidence_policy(concept, "recognize")
             if concept not in supported or not exact_policy.allowed:
                 receipts.append({
                     "concept": concept,
@@ -665,16 +1625,28 @@ def build_rapid_router(
                     "reason": exact_policy.reason,
                 })
                 continue
-            if timed_out:
+            if concept not in accountable_recognition:
                 receipts.append({
                     "concept": concept,
                     "subskill": "recognize",
                     "accepted": False,
                     "evidenceLevel": "none",
-                    "reason": "The server deadline elapsed; a stored answer cannot earn positive evidence.",
+                    "reason": (
+                        "This focused handoff records only its exact server-owned competency target."
+                        if durable_manifest.get("taskKind") == "focused_handoff"
+                        else "This finding was not part of the frozen Rapid assessment contract."
+                    ),
                 })
                 continue
-            event = store.save_guided_learning_event(session["learnerId"], {
+            if (
+                concept not in graded_correct_recognition
+                or not recognition_precision_ok
+                or timed_out
+            ):
+                # Required targets that fail recall, precision, or timing are
+                # recorded exactly once by the frozen lapse loop below.
+                continue
+            event = {
                 "eventKey": f"rapid:{round_id}:{body.caseId}:recognize:{concept}",
                 "moduleId": "rapid",
                 "sceneId": f"{session['pace']}:{session['assessmentScope']}",
@@ -695,41 +1667,39 @@ def build_rapid_router(
                 "_retentionVerified": True,
                 "_retentionMorphologyKey": morphology_key,
                 "_serverVerifiedScoring": True,
-            })
-            receipts.append({
+            }
+            append_event_receipt(event, {
                 "concept": concept,
                 "subskill": "recognize",
                 "accepted": True,
-                "evidenceLevel": event["effectiveEvidenceLevel"],
+                "evidenceLevel": "independent_transfer",
             })
 
-        # A focused round defines one recognition construct in advance. If that
-        # supported finding is missed, record exactly one independent lapse. In
-        # an unscoped round we do not penalize every unselected co-label.
-        focus_concept = session.get("focusConcept")
-        missed = set(grade.get("missedObjectives") or [])
-        focus_policy = packet_allows_learning_evidence(
-            case, "rapid", str(focus_concept or ""), "recognize"
-        )
-        focus_failed = bool(
-            timed_out
-            or (
-                focus_concept in missed
-                and focus_concept not in selected_concepts
+        # Only the frozen, lapse-eligible recognition targets may create
+        # negative competency evidence. Incidental packet co-labels and the
+        # overcalled pathologies never become competency targets; an overcall
+        # can only cause the frozen target task itself to fail precision.
+        for tested_concept in sorted(required_recognition):
+            tested_policy = committed_evidence_policy(
+                tested_concept, "recognize"
             )
-        )
-        if (
-            focus_concept
-            and focus_concept in supported
-            and focus_failed
-            and focus_policy.allowed
-        ):
-            event = store.save_guided_learning_event(session["learnerId"], {
-                "eventKey": f"rapid:{round_id}:{body.caseId}:recognize-lapse:{focus_concept}",
+            tested_failed = bool(
+                timed_out
+                or tested_concept not in graded_correct_recognition
+                or not recognition_precision_ok
+            )
+            if (
+                not tested_failed
+                or tested_concept not in supported
+                or not tested_policy.allowed
+            ):
+                continue
+            event = {
+                "eventKey": f"rapid:{round_id}:{body.caseId}:recognize-lapse:{tested_concept}",
                 "moduleId": "rapid",
                 "sceneId": f"{session['pace']}:{session['assessmentScope']}",
-                "interactionId": f"{body.caseId}:missed-focus:{focus_concept}",
-                "concept": focus_concept,
+                "interactionId": f"{body.caseId}:missed-tested:{tested_concept}",
+                "concept": tested_concept,
                 "subskills": ["recognize"],
                 "score": 0.0,
                 "correct": False,
@@ -745,23 +1715,25 @@ def build_rapid_router(
                 "_retentionVerified": True,
                 "_retentionMorphologyKey": morphology_key,
                 "_serverVerifiedScoring": True,
-            })
-            receipts.append({
-                "concept": focus_concept,
+            }
+            append_event_receipt(event, {
+                "concept": tested_concept,
                 "subskill": "recognize",
                 "accepted": True,
                 "correct": False,
-                "evidenceLevel": event["effectiveEvidenceLevel"],
+                "evidenceLevel": "independent_transfer",
                 "reason": (
                     "The server deadline elapsed; the focused timed task records a lapse, never a success."
                     if timed_out
-                    else "The supported focus finding was missed on an eligible real ECG."
+                    else "The tested target was included with one or more non-A/B-supported selections, so recognition precision did not pass."
+                    if not recognition_precision_ok
+                    else "A frozen tested objective was missed on an eligible real ECG."
                 ),
             })
 
         if trace_grade and trace_grade.get("correct"):
-            trace_policy = packet_allows_learning_evidence(
-                case, "rapid", "qrs_complex", "localize"
+            trace_policy = committed_evidence_policy(
+                "qrs_complex", "localize"
             )
             if not trace_policy.allowed or timed_out:
                 receipts.append({
@@ -776,7 +1748,7 @@ def build_rapid_router(
                     ),
                 })
             else:
-                event = store.save_guided_learning_event(session["learnerId"], {
+                event = {
                     "eventKey": f"rapid:{round_id}:{body.caseId}:qrs-trace",
                     "moduleId": "rapid",
                     "sceneId": f"{session['pace']}:{session['assessmentScope']}",
@@ -797,94 +1769,147 @@ def build_rapid_router(
                     "_retentionVerified": True,
                     "_retentionMorphologyKey": morphology_key,
                     "_serverVerifiedScoring": True,
-                })
-                receipts.append({
+                }
+                append_event_receipt(event, {
                     "concept": "qrs_complex",
                     "subskill": "localize",
                     "accepted": True,
-                    "evidenceLevel": event["effectiveEvidenceLevel"],
-                })
-
-        if session.get("focusSubskill") == "synthesize":
-            receipt_concept, synthesis_allowed, synthesis_reason = _synthesis_contract(
-                case, session
-            )
-            task_complete = _synthesis_task_complete(body.structuredAnswer)
-            if not synthesis_allowed:
-                receipts.append({
-                    "concept": receipt_concept or str(session.get("focusConcept") or ""),
-                    "subskill": "synthesize",
-                    "accepted": False,
-                    "evidenceLevel": "none",
-                    "reason": synthesis_reason,
-                })
-            elif not task_complete and not timed_out:
-                receipts.append({
-                    "concept": receipt_concept,
-                    "subskill": "synthesize",
-                    "accepted": False,
-                    "evidenceLevel": "none",
-                    "reason": "Complete all eight sweep fields, select at least one finding, and write an evidence-limited synthesis before committing.",
-                })
-            else:
-                focus = str(session.get("focusConcept") or "")
-                explicit_overcalls = [
-                    concept for concept in body.structuredAnswer.selectedConcepts
-                    if concept not in supported
-                    and (case.get("concept_confidence", {}).get(concept) or {}).get("tier")
-                    in {"C", "D"}
-                ]
-                synthesis_correct = bool(
-                    not timed_out
-                    and task_complete
-                    and focus in set(grade.get("correctObjectives") or [])
-                    and not explicit_overcalls
-                    and float(grade.get("score", 0.0)) >= 0.75
-                )
-                event = store.save_guided_learning_event(session["learnerId"], {
-                    "eventKey": f"rapid:{round_id}:{body.caseId}:synthesize:{receipt_concept}",
-                    "moduleId": "rapid",
-                    "sceneId": f"{session['pace']}:full_read",
-                    "interactionId": f"{body.caseId}:structured-sweep:{receipt_concept}",
-                    "concept": receipt_concept,
-                    "subskills": ["synthesize"],
-                    "score": max(0.0, min(1.0, float(grade.get("score", 0.0)))),
-                    "correct": synthesis_correct,
-                    "attempts": 1,
-                    "assistance": "independent",
-                    "hintsUsed": 0,
-                    "confidence": body.confidence,
                     "evidenceLevel": "independent_transfer",
-                    "evidenceSource": "structured_sweep",
-                    "caseId": body.caseId,
-                    "caseProvenance": "real_eligible",
-                    "caseEligible": True,
-                    "misconceptions": (
-                        grade.get("misconceptions", [])
-                        if not synthesis_correct else []
-                    ),
-                    "_retentionVerified": True,
-                    "_retentionMorphologyKey": morphology_key,
-                    "_serverVerifiedScoring": True,
-                })
-                receipts.append({
-                    "concept": receipt_concept,
-                    "subskill": "synthesize",
-                    "accepted": True,
-                    "correct": synthesis_correct,
-                    "evidenceLevel": event["effectiveEvidenceLevel"],
-                    "reason": (
-                        "The complete structured sweep met the packet-grounded synthesis rubric."
-                        if synthesis_correct
-                        else "The complete independent sweep was recorded, but it missed the focus, overcalled an unsupported finding, scored below 75%, or exceeded the deadline."
-                    ),
                 })
 
-        answer = store.set_rapid_answer_receipts(round_id, body.caseId, receipts) or answer
+        tested_synthesis_target = next(
+            (
+                str(entry.get("objectiveId") or "")
+                for entry in durable_manifest.get("objectives") or []
+                if entry.get("subskill") == "synthesize"
+                and entry.get("lapseEligible")
+            ),
+            "",
+        )
+        focused_synthesis_attempt = bool(
+            durable_manifest.get("taskKind") == "focused_handoff"
+            and session.get("focusSubskill") == "synthesize"
+        )
+        if tested_synthesis_target or focused_synthesis_attempt:
+            # The complete read remains useful formative practice, but field
+            # presence is not deterministic per-domain synthesis grading. Keep
+            # this as a non-evidence boundary receipt and never append an event
+            # (positive or negative) from prose or sweep completion alone.
+            receipts.append({
+                "concept": (
+                    tested_synthesis_target
+                    or _receipt_concept(session)
+                    or str(session.get("focusConcept") or "")
+                ),
+                "subskill": "synthesize",
+                "accepted": False,
+                "evidenceLevel": "none",
+                "reason": RAPID_SYNTHESIS_RECEIPT_UNAVAILABLE_REASON,
+            })
+
+        receipts = [
+            {**receipt, "registryVersion": REGISTRY_VERSION}
+            for receipt in receipts
+        ]
+        recorded = assessments.finalize_answer(
+            round_id=round_id,
+            learner_id=str(session["learnerId"]),
+            lease_id=str(reservation["leaseId"]),
+            submission_key=str(reservation["submissionKey"]),
+            position=int(reservation["position"]),
+            case_id=body.caseId,
+            response={
+                "structuredAnswer": body.structuredAnswer.model_dump(),
+                "freeTextAnswer": body.freeTextAnswer,
+                "confidence": body.confidence,
+                "traceEvidence": body.traceEvidence,
+            },
+            grade=grade,
+            # Per-case grading is deliberately provider-independent. Learners
+            # can invoke the grounded tutor after commitment; completed-round
+            # debriefing has its own bounded AI request.
+            tutor=None,
+            trace_grade=trace_grade,
+            tested_objective_manifest=tested_manifest,
+            confidence=body.confidence,
+            result=result,
+            receipts=receipts,
+            receipt_events=receipt_events,
+            submitted_at=submission_received_at,
+            planned_timed_out=timed_out,
+        )
+        if recorded["status"] == "not_pending":
+            prior = store.get_rapid_answer(round_id, body.caseId)
+            if prior and prior.get("receipts") and prior.get("integrityStatus") not in {
+                "legacy_incomplete", "finalizing"
+            }:
+                response = payload(store.get_rapid_round(round_id))
+                response.update({
+                    "answer": public_answer(
+                        session, prior, answer_ordinal(session, canonical_id)
+                    ),
+                    "receipts": prior["receipts"],
+                    "replay": True,
+                })
+                return response
+            raise HTTPException(status_code=409, detail="Rapid case is no longer pending")
+        if recorded["status"] == "missing":
+            raise HTTPException(status_code=404, detail="Rapid round not found")
+        if recorded["status"] == "manifest_mismatch":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_tested_manifest_mismatch",
+                    "message": "The tested-objective contract changed before commitment.",
+                },
+            )
+        if recorded["status"] == "deadline_state_mismatch":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_deadline_state_changed",
+                    "message": "The server-owned deadline state changed before atomic commitment.",
+                },
+            )
+        if recorded["status"] == "position_mismatch":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_round_position_changed",
+                    "message": "The Rapid round advanced before this answer could be committed.",
+                },
+            )
+        if recorded["status"] == "legacy_incomplete":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_legacy_answer_quarantined",
+                    "message": (
+                        "This pre-atomic answer has an incomplete evidence ledger and cannot be "
+                        "replayed or repaired without risking duplicate mastery credit."
+                    ),
+                },
+            )
+        if recorded["status"] == "replay":
+            answer = recorded["answer"]
+            response = payload(store.get_rapid_round(round_id))
+            response.update({
+                "answer": public_answer(
+                    session, answer, answer_ordinal(session, canonical_id)
+                ),
+                "receipts": answer["receipts"],
+                "replay": True,
+            })
+            return response
+
+        answer = recorded["answer"]
+        durable_receipts = answer["receipts"]
         response = payload(store.get_rapid_round(round_id))
         response.update({
-            "answer": answer,
-            "receipts": receipts,
+            "answer": public_answer(
+                session, answer, int(session.get("position") or 0) + 1
+            ),
+            "receipts": durable_receipts,
             "replay": False,
             "profile": store.get_profile(session["learnerId"]),
         })

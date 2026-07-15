@@ -120,9 +120,8 @@ def curriculum_view(repo: Any, mastery: dict[str, float] | None = None) -> dict[
             objectives = _lesson_objectives(lesson)
             module_objectives.update(objectives)
             reliable = _availability(repo, objectives)
-            avg_mastery = (
-                round(sum(mastery.get(o, 0.25) for o in objectives) / len(objectives), 3) if objectives else 0.0
-            )
+            assessed_values = [mastery[objective] for objective in objectives if objective in mastery]
+            avg_mastery = round(sum(assessed_values) / len(assessed_values), 3) if assessed_values else 0.0
             lessons_out.append(
                 {
                     "id": lesson_id,
@@ -131,14 +130,13 @@ def curriculum_view(repo: Any, mastery: dict[str, float] | None = None) -> dict[
                     "reliableCaseCount": reliable,
                     "available": reliable >= 1,
                     "mastery": avg_mastery,
+                    "assessedObjectiveCount": len(assessed_values),
+                    "objectiveCount": len(objectives),
                 }
             )
         module_reliable = _availability(repo, sorted(module_objectives))
-        avg = (
-            round(sum(mastery.get(o, 0.25) for o in module_objectives) / len(module_objectives), 3)
-            if module_objectives
-            else 0.0
-        )
+        assessed_module_values = [mastery[objective] for objective in module_objectives if objective in mastery]
+        avg = round(sum(assessed_module_values) / len(assessed_module_values), 3) if assessed_module_values else 0.0
         modules_out.append(
             {
                 "id": module["id"],
@@ -150,6 +148,8 @@ def curriculum_view(repo: Any, mastery: dict[str, float] | None = None) -> dict[
                 "reliableCaseCount": module_reliable,
                 "available": module_reliable >= 1,
                 "mastery": avg,
+                "assessedObjectiveCount": len(assessed_module_values),
+                "objectiveCount": len(module_objectives),
             }
         )
     return {"modules": modules_out}

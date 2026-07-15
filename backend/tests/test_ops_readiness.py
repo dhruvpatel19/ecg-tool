@@ -35,6 +35,12 @@ class FakeLearningStore:
         finally:
             conn.close()
 
+    def learning_record_integrity(self) -> tuple[bool, str]:
+        return True, "ready"
+
+    def password_hash_iteration_audit(self) -> dict[str, int]:
+        return {"total": 0, "current": 0, "legacy": 0, "future": 0, "invalid": 0}
+
 
 class FakeClinicalStore:
     def __init__(self, verdict: tuple[bool, str] = (True, "ready")):
@@ -58,6 +64,16 @@ def configured(tmp_path: Path):
         require_real_data=True,
         sqlite_path=db_path,
         learner_backup_marker_path=Path(f"{db_path}.last-backup-success"),
+        auth_email_delivery_mode="smtp",
+        auth_smtp_host="smtp.example.edu",
+        auth_smtp_port=587,
+        auth_smtp_username="mailer",
+        auth_smtp_password="test-only-secret",
+        auth_smtp_starttls=True,
+        auth_smtp_timeout_seconds=10,
+        auth_email_from_address="ECG Learning <no-reply@example.edu>",
+        auth_email_reply_to="TRACE support <support@example.edu>",
+        auth_public_app_url="https://learn.example.edu",
     )
     repo = SimpleNamespace(
         root=corpus,
@@ -113,6 +129,7 @@ def test_readiness_requires_real_corpus_and_writable_database(tmp_path: Path):
     assert report["ok"] is True
     assert report["checks"]["corpus"]["state"] == "ready"
     assert report["checks"]["learnerDatabase"]["state"] == "ready"
+    assert report["checks"]["learningRecord"] == {"ok": True, "state": "ready"}
 
 
 def test_readiness_fails_closed_when_state_mount_is_low_on_space(
@@ -219,3 +236,100 @@ def test_optional_ai_tutor_is_reported_without_blocking_core_readiness(tmp_path:
     assert report["ok"] is True
     assert report["checks"]["aiTutor"]["ok"] is False
     assert report["checks"]["aiTutor"]["required"] is False
+
+
+def test_production_readiness_requires_external_authenticated_retention_policy(
+    tmp_path: Path,
+):
+    settings, repo, store = configured(tmp_path)
+    settings.app_env = "production"
+    settings.retention_cleanup_enabled = True
+    settings.authenticated_retention_policy_acknowledged = False
+    settings.authenticated_retention_policy_reference = None
+
+    report = readiness_report(settings, repo, store, CLINICAL)
+
+    assert report["ok"] is False
+    assert report["checks"]["authenticatedRetentionPolicy"] == {
+        "ok": False,
+        "state": "authenticated_retention_policy_unacknowledged",
+    }
+
+    settings.authenticated_retention_policy_acknowledged = True
+    report = readiness_report(settings, repo, store, CLINICAL)
+    assert report["checks"]["authenticatedRetentionPolicy"]["state"] == (
+        "authenticated_retention_policy_reference_missing"
+    )
+
+
+def test_documented_retention_policy_and_automation_satisfy_production_gate(
+    tmp_path: Path,
+):
+    settings, repo, store = configured(tmp_path)
+    settings.app_env = "production"
+    settings.retention_cleanup_enabled = True
+    settings.authenticated_retention_policy_acknowledged = True
+    settings.authenticated_retention_policy_reference = "policy:learner-records-v1"
+
+    report = readiness_report(settings, repo, store, CLINICAL)
+
+    assert report["ok"] is True
+    assert report["checks"]["authenticatedRetentionPolicy"] == {
+        "ok": True,
+        "state": "ready",
+    }
+    assert report["checks"]["retentionAutomation"] == {
+        "ok": True,
+        "state": "ready",
+    }
+    assert settings.authenticated_retention_policy_reference not in str(report)
+
+
+def test_production_readiness_rejects_disabled_retention_automation(tmp_path: Path):
+    settings, repo, store = configured(tmp_path)
+    settings.app_env = "production"
+    settings.retention_cleanup_enabled = False
+    settings.authenticated_retention_policy_acknowledged = True
+    settings.authenticated_retention_policy_reference = "policy:learner-records-v1"
+
+    report = readiness_report(settings, repo, store, CLINICAL)
+
+    assert report["ok"] is False
+    assert report["checks"]["retentionAutomation"] == {
+        "ok": False,
+        "state": "automatic_retention_cleanup_disabled",
+    }
+
+
+def test_production_readiness_requires_complete_smtp_auth_email_config(tmp_path: Path):
+    settings, repo, store = configured(tmp_path)
+    settings.app_env = "production"
+    settings.retention_cleanup_enabled = True
+    settings.authenticated_retention_policy_acknowledged = True
+    settings.authenticated_retention_policy_reference = "policy:learner-records-v1"
+    settings.auth_smtp_host = None
+
+    report = readiness_report(settings, repo, store, CLINICAL)
+
+    assert report["ok"] is False
+    assert report["checks"]["authenticationEmail"] == {
+        "ok": False,
+        "state": "authentication_email_configuration_invalid:AUTH_SMTP_HOST",
+    }
+
+
+def test_production_readiness_requires_monitored_auth_reply_to(tmp_path: Path):
+    settings, repo, store = configured(tmp_path)
+    settings.app_env = "production"
+    settings.retention_cleanup_enabled = True
+    settings.authenticated_retention_policy_acknowledged = True
+    settings.authenticated_retention_policy_reference = "policy:learner-records-v1"
+    settings.auth_email_reply_to = None
+
+    report = readiness_report(settings, repo, store, CLINICAL)
+
+    assert report["ok"] is False
+    assert report["checks"]["authenticationEmail"] == {
+        "ok": False,
+        "state": "authentication_email_configuration_invalid:AUTH_EMAIL_REPLY_TO_REQUIRED",
+    }

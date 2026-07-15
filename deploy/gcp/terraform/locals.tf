@@ -58,6 +58,9 @@ locals {
       auth_rate_limit = var.auth_rate_limit_secret_id
       origin_shared   = var.origin_shared_secret_id
     },
+    var.auth_email_delivery_mode == "smtp" ? {
+      auth_smtp_password = var.auth_smtp_password_secret_id
+    } : {},
     var.enable_llm_secret ? { llm_api_key = var.llm_api_key_secret_id } : {},
   )
 

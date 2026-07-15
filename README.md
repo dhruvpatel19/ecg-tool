@@ -9,8 +9,8 @@ TRACE is a four-mode ECG learning product for medical students entering clerkshi
 - Learner workflows fail closed unless a complete real-data corpus is installed. Synthetic waveforms exist only as explicit test/harness fixtures and cannot enter learner Training, Rapid, Clinical, independent evidence, or retention.
 - The active corpus has **22,497 unique recordings/windows**: 21,799 PTB-XL records plus 698 expert-labelled Leipzig rhythm windows. **21,855** are Tier A/B student-facing.
 - Training and Rapid can run up to **5,000 unique ECGs** in one server-owned session. They use the complete exact eligible pool, not a small checked-in case list.
-- Clinical has **103 unique real PTB ECGs and 103 distinct authored scenario signatures** across eight families and multiple question types. It is automated-screened formative content pending named clinician sign-off.
-- Accounts, opaque per-browser guest records, objective evidence, competency/retention state, tutor threads, and every mode session are persisted server-side.
+- Clinical has **103 unique real PTB ECGs and 103 distinct authored scenario signatures** across eight families. The live-bank audit reports 19 triage, 18 stepwise, 18 spot-error, 17 MCQ, 16 trace-click, 12 evidence-source matching, and 3 numeric fill-in interactions, split 35 clinic / 34 ward / 34 ED-non-arrest. It is automated-screened formative content pending named clinician sign-off.
+- Verified student accounts, objective evidence, competency/retention state, tutor threads, and every mode session are persisted server-side. Historical beta guest records are migration-only; new anonymous learning is disabled.
 - The LLM explains and asks questions; deterministic packet evidence, source policy, graders, session state machines, and the verified adaptive scheduler own truth, scoring, selection, and mastery.
 
 ## Architecture
@@ -33,7 +33,7 @@ data/ecg_corpus/
              Next.js frontend ─── Learn / Train / Rapid / Cases / Mastery coach
 ```
 
-The browser uses the same-origin `/api/backend` proxy. Session and guest tokens are HttpOnly cookies; LLM credentials remain server-side.
+The browser uses the same-origin `/api/backend` proxy. Session credentials and any pre-existing legacy migration cookie are HttpOnly; LLM and SMTP credentials remain server-side.
 
 ## Four modes
 
@@ -42,7 +42,7 @@ The browser uses the same-origin `/api/backend` proxy. Session and guest tokens 
 | Guided learning | `/learn` | Ten dependency-driven modules. The native interaction runtime supports vector/lead work, points/regions, calipers/numeric entry, march-out, ordering, matching, comparison, explanation, and staged clinical gates. |
 | Competency Training | `/train` | Select an exact concept × subskill and a 10/25/50/100/500/1,000/5,000 campaign. The server interleaves target, close mimic, other negative, and unannounced transfer ECGs without replacement and shows the exact pool/role depth before start. |
 | Rapid interpretation | `/rapid` | Run 5/10/25/50/100/500/1,000/5,000 mixed ECGs at 75-second ward, 20-second emergency first-look, or untimed pace. Ward/untimed reads require server-verified trace proof; deadlines and answers survive refresh/login. |
-| Clinical Decisions | `/practice` | Work clinic, ward, or ED-non-arrest cases in Learn or timed Shift. Commit an ECG-only first look before authored context is revealed, then answer MCQ, click, spot-error, old/new/insufficient-data, triage, or stepwise tasks. |
+| Clinical Decisions | `/practice` | Work clinic, ward, or ED-non-arrest cases in Learn or timed Shift. Commit an ECG-only first look before authored context is revealed, then answer MCQ, trace-click, numeric fill-in, evidence-source matching, spot-error, triage, or sequential stepwise tasks. Authentic old/new comparison remains unavailable until a validated paired-prior source is installed. |
 
 The `/review` mastery coach reads the same evidence ledger and prescribes a focused → mixed transfer → eligible Clinical sequence plus a cross-concept integration read.
 
@@ -91,12 +91,25 @@ ECG_CORPUS_ROOT=                 # complete corpus directory; auto-discovered wh
 ECG_REQUIRE_REAL_DATA=1          # production/learner default
 DATABASE_URL=sqlite:///./ecg_learning.db
 AUTH_RATE_LIMIT_SECRET=          # required in production
+ECG_RETENTION_CLEANUP_ENABLED=1  # required for production readiness
+ECG_GUEST_INACTIVITY_DAYS=30     # historical beta-record cleanup only
+ECG_UNVERIFIED_ACCOUNT_EXPIRY_DAYS=7
+AUTH_EMAIL_DELIVERY_MODE=memory  # production requires smtp
+AUTH_EMAIL_FROM_ADDRESS=TRACE <no-reply@example.edu>
+AUTH_EMAIL_REPLY_TO=             # monitored support mailbox; required in production
+AUTH_PUBLIC_APP_URL=http://localhost:3000
+AUTH_SMTP_HOST=                  # production transport uses authenticated STARTTLS
+AUTH_SMTP_PORT=587
+ECG_AUTHENTICATED_RETENTION_POLICY_ACKNOWLEDGED=0
+ECG_AUTHENTICATED_RETENTION_POLICY_REFERENCE=
 LLM_PROVIDER=mock                # mock | openai-compatible
 LLM_API_KEY=                     # server-side only
-LLM_MODEL=gpt-5.6-luna           # deployment-configurable
+LLM_MODEL=gpt-5.6-luna           # deployment-configurable OpenAI API model ID
 LLM_BASE_URL=
 ECG_BACKEND_API_BASE=http://127.0.0.1:8000
 ```
+
+`gpt-5.6-luna` is the exact published API identifier, not a display-name guess; see the [official model reference](https://developers.openai.com/api/docs/models/gpt-5.6-luna). The backend also supports an OpenAI-compatible base URL, so a deployment may select a different compatible model explicitly rather than relying on an implicit alias.
 
 ### Build PTB-XL offline
 
@@ -134,12 +147,14 @@ Open `http://localhost:3000`.
 
 ## Authentication and learner continuity
 
-- Passwords use PBKDF2; random session tokens are stored only as hashes.
+- Passwords use PBKDF2; random session tokens and purpose-bound verification/reset/OTP secrets are stored only as hashes.
 - Browser sessions are HttpOnly, SameSite=Lax, and Secure in production. Logout-all and password change are available under `/account`.
-- Login attempts and registration are rate limited. Registration buckets use HMAC-derived direct-peer/username keys and store no raw IP or username; supported Uvicorn commands disable proxy-header rewriting.
-- Every guest browser receives a separate opaque learner identity. Login/registration shows a transfer option only when that browser has claimable work, and the checkbox is off by default.
-- An explicit guest claim is one immediate transaction across evidence, Guided state, tutor history, and Training/Rapid/Clinical/Review sessions. It is idempotent, collision-safe, merge-monotonic, rotates the guest cookie, and leaves at most one resumable session per mode.
-- Current local account recovery is administrator-mediated; institutional SSO/email recovery is a deployment decision rather than a fake local workflow.
+- Student registration is email-first and creates no learning session until the emailed proof and a fresh password confirmation succeed. A private internal username remains only for schema compatibility; students sign in with email and password. Links never auto-submit, and their secret stays in the URL fragment rather than an HTTP request. Email-code two-step verification is retired from deployed environments to keep routine learning access simple.
+- Login, registration, password reauthentication, and reset requests are rate limited with privacy-preserving HMAC keys. Reset responses are enumeration-safe and SMTP work runs outside the public response path.
+- Password reset, verified email change, session listing/revocation, progress export, password rotation, and confirmed account deletion are implemented. Production SMTP requires authenticated STARTTLS, HTTPS links, and a monitored support Reply-To; no provider, domain purchase, DNS change, secret version, or paid plan is selected by the application.
+- New anonymous learning is rejected. A pre-existing beta cookie can only preview, attach once to a verified account, or discard its own positive record; the server never mints or refreshes a guest identity.
+- Expired sessions, grants, auth challenges, historical anonymous records, and empty never-verified registration shells are removed in bounded transactional passes. Cleanup runs on backend startup and when due through `/readyz`, with a cross-worker database lease and aggregate-only logs.
+- Authenticated learner records are never time-purged. Production readiness requires an explicit external account-retention policy acknowledgement and non-secret policy reference; backup expiry, legal holds, and institutional deprovisioning remain deployment decisions.
 
 ## Evidence and adaptive learning
 

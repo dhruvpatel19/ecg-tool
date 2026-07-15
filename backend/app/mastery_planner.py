@@ -12,10 +12,71 @@ from datetime import UTC, datetime
 from typing import Any, Iterable
 from urllib.parse import quote
 
+from .assessment_contracts import rapid_synthesis_contract_available
 from .objectives import OBJECTIVES, ObjectiveDefinition
 from .ontology import concept_label
 from .retention import DURABLE_DISTINCT_SUCCESSFUL_ECGS, competency_state
 from .subskill_tasks import training_independent_receipt_available
+
+
+_STUDY_PLAN_RETURN = quote("/profile?tab=plan", safe="")
+_TRAINING_STAGE_LENGTH = 25
+_RAPID_STAGE_LENGTH = 10
+_RAPID_PACES = {"untimed", "ward", "emergency"}
+
+
+# Each destination is an authored, routable scene in the production Guided
+# curriculum.  The planner never fabricates a lesson from corpus labels: it can
+# only offer one of these reviewed concept -> scene repairs, and the resulting
+# work remains formative regardless of completion or score.
+_GUIDED_REMEDIATION_DESTINATIONS: dict[str, tuple[str, str, str]] = {
+    "normal_ecg": ("leads-vectors", "M02.S1", "Why one beat looks different in twelve leads"),
+    "rate": ("rhythm-ectopy", "M03.S3", "Rate when rhythm is not tidy"),
+    "sinus_rhythm": ("rhythm-ectopy", "M03.S4", "Sinus is a source, not a speed"),
+    "axis_normal": ("leads-vectors", "M02.S10", "Axis quadrants from QRS polarity"),
+    "left_axis_deviation": ("leads-vectors", "M02.S10", "Axis quadrants from QRS polarity"),
+    "right_axis_deviation": ("leads-vectors", "M02.S10", "Axis quadrants from QRS polarity"),
+    "premature_atrial_complex": ("rhythm-ectopy", "M03.S7", "Find the early P wave in a PAC"),
+    "premature_ventricular_complex": ("rhythm-ectopy", "M03.S8", "PVC timing and altered activation"),
+    "bradycardia": ("av-brady", "m04-s9", "Separate the bradycardia tracing from perfusion"),
+    "av_block_first_degree": ("av-brady", "m04-s3", "Every P conducts, but slowly"),
+    "av_block_second_degree_mobitz_i": ("av-brady", "m04-s4", "Recognize grouped beating and progressive delay"),
+    "av_block_second_degree_mobitz_ii": ("av-brady", "m04-s5", "A dropped QRS without progressive delay"),
+    "av_block_third_degree": ("av-brady", "m04-s7", "Recognize two uncoupled clocks"),
+    "atrial_fibrillation": ("tachyarrhythmias", "m06-s5", "Build atrial-fibrillation evidence"),
+    "atrial_flutter": ("tachyarrhythmias", "m06-s4", "Find flutter hidden behind 2:1 conduction"),
+    "supraventricular_tachycardia": ("tachyarrhythmias", "m06-s2", "Separate sinus tachycardia from regular narrow SVT"),
+    "wide_complex_tachycardia": ("tachyarrhythmias", "m06-s7", "Reason safely through regular wide-complex tachycardia"),
+    "qrs_duration": ("ventricular-conduction", "m05-s0", "Keep QRS width separate from morphology"),
+    "right_bundle_branch_block": ("ventricular-conduction", "m05-s2", "Prove RBBB with paired-lead anchors"),
+    "incomplete_right_bundle_branch_block": ("ventricular-conduction", "m05-s2", "Use width and paired-lead RBBB anchors"),
+    "left_bundle_branch_block": ("ventricular-conduction", "m05-s3", "Prove LBBB with paired-lead anchors"),
+    "nonspecific_intraventricular_conduction_delay": ("ventricular-conduction", "m05-s4", "Separate right, left, and nonspecific delay"),
+    "left_anterior_fascicular_block": ("ventricular-conduction", "m05-s5", "Derive a fascicular axis shift"),
+    "left_posterior_fascicular_block": ("ventricular-conduction", "m05-s5", "Derive a fascicular axis shift"),
+    "wolff_parkinson_white": ("ventricular-conduction", "m05-s7", "Connect short PR, delta wave, and fused QRS"),
+    "paced_rhythm": ("ventricular-conduction", "m05-s8", "Link each pacing spike to its response"),
+    "atrial_enlargement": ("chambers-voltage", "m07-s1", "Use P-wave shape as atrial evidence"),
+    "left_ventricular_hypertrophy": ("chambers-voltage", "m07-s2", "Assemble the LVH evidence bundle"),
+    "right_ventricular_hypertrophy": ("chambers-voltage", "m07-s3", "Assemble right-ventricular evidence"),
+    "qt_interval": ("repolarization-safety", "m08-s3", "Measure QT instead of accepting a machine label"),
+    "qtc_prolongation": ("repolarization-safety", "m08-s4", "Understand rate correction as a model"),
+    "electrolyte_drug_pattern": ("repolarization-safety", "m08-s7", "Keep ion patterns separate from lab results"),
+    "nonspecific_st_t_change": ("repolarization-safety", "m08-s8", "Compare ST–T distributions, not slogans"),
+    "pericarditis_pattern": ("repolarization-safety", "m08-s8", "Compare nonischemic ST–T distributions"),
+    "r_wave_progression": ("leads-vectors", "M02.S12", "Rebuild R-wave progression and transition"),
+    "st_depression": ("ischemia-infarction", "m09-s5", "Rank ST depression without binary overcall"),
+    "st_elevation": ("ischemia-infarction", "m09-s1", "Use contiguous and reciprocal ST geography"),
+    "t_wave_inversion": ("ischemia-infarction", "m09-s5", "Rank T-wave inversion without binary overcall"),
+    "myocardial_ischemia": ("ischemia-infarction", "m09-s5", "Separate ischemia concern from close alternatives"),
+    "myocardial_infarction": ("ischemia-infarction", "m09-s6", "Use Q-wave criteria and territory"),
+    "anterior_mi": ("ischemia-infarction", "m09-s2", "Build precordial and lateral geography"),
+    "lateral_mi": ("ischemia-infarction", "m09-s2", "Build precordial and lateral geography"),
+    "septal_mi": ("ischemia-infarction", "m09-s2", "Build precordial and lateral geography"),
+    "inferior_mi": ("ischemia-infarction", "m09-s3", "Build inferior geography before extension"),
+    "posterior_mi": ("ischemia-infarction", "m09-s4", "Test a posterior mirror pattern"),
+    "pathologic_q_waves": ("ischemia-infarction", "m09-s6", "Use Q-wave criteria and territory"),
+}
 
 
 _ONBOARDING = (
@@ -33,6 +94,35 @@ _ONBOARDING = (
     "myocardial_infarction",
 )
 _ONBOARDING_RANK = {concept: index for index, concept in enumerate(_ONBOARDING)}
+_FOUNDATION_ONBOARDING = (
+    "normal_ecg",
+    "rate",
+    "sinus_rhythm",
+    "axis_normal",
+    "qrs_duration",
+    "qt_interval",
+)
+_GOAL_ONBOARDING: dict[str, tuple[str, ...]] = {
+    "build_fundamentals": _ONBOARDING,
+    "exam_prep": (
+        "normal_ecg", "rate", "sinus_rhythm", "axis_normal",
+        "atrial_fibrillation", "right_bundle_branch_block",
+        "left_bundle_branch_block", "myocardial_infarction", "qtc_prolongation",
+    ),
+    "clinical_reading": (
+        "normal_ecg", "rate", "sinus_rhythm", "atrial_fibrillation",
+        "qrs_duration", "myocardial_infarction", "qtc_prolongation",
+    ),
+    "emergency_prioritization": (
+        "wide_complex_tachycardia", "bradycardia", "st_elevation",
+        "myocardial_infarction", "atrial_fibrillation", "rate", "qtc_prolongation",
+    ),
+    "medication_safety": (
+        "qtc_prolongation", "qt_interval", "bradycardia",
+        "av_block_first_degree", "electrolyte_drug_pattern",
+        "atrial_fibrillation", "qrs_duration",
+    ),
+}
 _SUBSKILL_RANK = {
     "recognize": 0,
     "discriminate": 1,
@@ -59,13 +149,15 @@ def _receipt_mode(
     """Return the mode with an implemented independent receipt contract.
 
     Proxy objective-to-case mappings stay formative unless the task itself is
-    explicitly objective-level.  A structured Rapid sweep is such a task for
-    authored synthesis objectives; Training tasks currently close exact corpus
-    concepts only.  Clinical application remains formative pending named
-    clinician sign-off and therefore cannot enter this mastery queue.
+    explicitly objective-level. Rapid synthesis is also formative until every
+    sweep domain has deterministic grading; Training tasks currently close
+    exact corpus concepts only. Clinical application remains formative pending
+    named clinician sign-off and therefore cannot enter this mastery queue.
     """
     if subskill == "synthesize":
-        return "rapid" if case_concept in definition.case_concepts else None
+        return "rapid" if rapid_synthesis_contract_available(
+            definition.id, case_concept
+        ) else None
     if definition.id != case_concept:
         return None
     if subskill == "recognize":
@@ -113,7 +205,10 @@ def _priority(cell: dict[str, Any]) -> tuple[Any, ...]:
         -cell["highConfidenceWrong"],
         cell["independentMastery"] if cell["independentAttempts"] else 0.0,
         cell["distinctSuccessfulEcgs"],
-        _ONBOARDING_RANK.get(cell["caseConcept"], len(_ONBOARDING_RANK) + 1),
+        int(cell.get(
+            "preferenceRank",
+            _ONBOARDING_RANK.get(cell["caseConcept"], len(_ONBOARDING_RANK) + 1),
+        )),
         _SUBSKILL_RANK.get(cell["subskill"], 99),
         cell["objectiveId"],
     )
@@ -129,17 +224,122 @@ def _reason(cell: dict[str, Any]) -> str:
     if cell["highConfidenceWrong"]:
         return f"{label} · {skill} has {cell['highConfidenceWrong']} high-confidence miss(es), so calibration and close mimics take priority."
     if cell["independentAttempts"]:
+        checks = int(cell["independentAttempts"])
+        successful_ecgs = int(cell["distinctSuccessfulEcgs"])
+        estimate = round(cell["independentMastery"] * 100)
+        prefix = (
+            f"After {checks} independent check{'s' if checks != 1 else ''}, the current mastery "
+            f"estimate for {label} · {skill} is {estimate}%"
+        )
+        if successful_ecgs == 0:
+            return f"{prefix}; no successful ECG has been recorded yet."
         return (
-            f"{label} · {skill} is {round(cell['independentMastery'] * 100)}% on independent evidence across "
-            f"{cell['distinctSuccessfulEcgs']} successful distinct ECG(s)."
+            f"{prefix}, with success on {successful_ecgs} different "
+            f"ECG{'s' if successful_ecgs != 1 else ''}."
         )
     if cell["attempts"]:
-        return f"{label} · {skill} has formative evidence but still needs an independent transfer check."
-    return f"{label} · {skill} has not yet been observed; begin with an eligible real ECG."
+        return f"You have practiced {label} · {skill} with support but have not yet completed an unassisted check."
+    return f"{label} · {skill} has not yet been checked; begin with a real ECG."
+
+
+def _guided_remediation_reason(cell: dict[str, Any]) -> str | None:
+    """Return an evidence-backed conceptual-repair reason, never a prior.
+
+    Unseen work alone is not proof that a learner lacks understanding. Guided
+    remediation is prescribed only after an observed high-confidence miss,
+    repeated low independent performance, or repeated lapses.
+    """
+
+    if cell["highConfidenceWrong"] > 0:
+        return (
+            f"{cell['highConfidenceWrong']} high-confidence miss(es) suggest that the underlying "
+            "rule should be rebuilt before another unannounced check."
+        )
+    if cell["independentAttempts"] >= 2 and cell["independentMastery"] < 0.45:
+        return (
+            f"Unassisted performance is {round(cell['independentMastery'] * 100)}% after "
+            f"{cell['independentAttempts']} checks, which supports a short concept repair."
+        )
+    if cell["lapses"] >= 2:
+        return (
+            f"{cell['lapses']} retrieval lapses suggest that the concept model needs a brief rebuild "
+            "before another transfer check."
+        )
+    return None
+
+
+def _guided_remediation(
+    cell: dict[str, Any] | None, *, before_stage_order: int | None
+) -> dict[str, Any] | None:
+    if not cell:
+        return None
+    destination = _GUIDED_REMEDIATION_DESTINATIONS.get(cell["caseConcept"])
+    trigger = _guided_remediation_reason(cell)
+    if not destination or not trigger:
+        return None
+    module_id, scene_id, scene_title = destination
+    return {
+        "mode": "guided",
+        "title": f"Rebuild {cell['label']} before the next check",
+        "purpose": (
+            f"Work through the authored “{scene_title}” scene, then return for the unannounced ECG check. "
+            "This lesson is supportive practice and does not count as independent mastery evidence."
+        ),
+        "href": f"/learn/{quote(module_id)}?scene={quote(scene_id)}",
+        "moduleId": module_id,
+        "sceneId": scene_id,
+        "concept": cell["caseConcept"],
+        "evidenceKind": "formative_guided",
+        "updatesIndependentMastery": False,
+        "beforeStageOrder": before_stage_order,
+        "reason": trigger,
+    }
+
+
+def _preferred_session_contract(
+    preferences: dict[str, Any] | None,
+) -> tuple[int, int, str]:
+    """Map learner defaults onto lengths each mode can actually deliver."""
+
+    if not preferences:
+        return _TRAINING_STAGE_LENGTH, _RAPID_STAGE_LENGTH, "untimed"
+    requested = preferences.get("defaultSessionLength", _RAPID_STAGE_LENGTH)
+    if isinstance(requested, bool) or requested not in {5, 10, 25, 50}:
+        requested = _RAPID_STAGE_LENGTH
+    training_length = 10 if int(requested) == 5 else int(requested)
+    rapid_pace = str(preferences.get("rapidPace") or "untimed")
+    if rapid_pace not in _RAPID_PACES:
+        rapid_pace = "untimed"
+    return training_length, int(requested), rapid_pace
+
+
+def _preferred_onboarding_rank(
+    preferences: dict[str, Any] | None,
+) -> dict[str, int]:
+    """Use stated context only to break evidence-free priority ties.
+
+    Due work, confident misses, and observed performance still own the higher
+    priority lanes. A preference can decide which *unseen* skill establishes a
+    baseline first; it can never overwrite or invent competency evidence.
+    """
+
+    if not preferences:
+        return _ONBOARDING_RANK
+    goal = str(preferences.get("primaryGoal") or "build_fundamentals")
+    goal_order = _GOAL_ONBOARDING.get(goal, _ONBOARDING)
+    stage = str(preferences.get("trainingStage") or "not_set")
+    ordered = (
+        (*_FOUNDATION_ONBOARDING, *goal_order, *_ONBOARDING)
+        if stage == "preclinical"
+        else (*goal_order, *_ONBOARDING)
+    )
+    unique = tuple(dict.fromkeys(ordered))
+    return {concept: index for index, concept in enumerate(unique)}
 
 
 def _stage(
-    cell: dict[str, Any], *, order: int, stage_kind: str
+    cell: dict[str, Any], *, order: int, stage_kind: str,
+    training_length: int, rapid_length: int, rapid_pace: str,
 ) -> dict[str, Any]:
     concept = cell["caseConcept"]
     objective = cell["objectiveId"]
@@ -153,12 +353,16 @@ def _stage(
             "status": "current",
             "mode": "train",
             "title": f"Build {label} · {subskill.replace('_', ' ')}",
-            "purpose": "Complete the exact server-graded task, then clear it on an unannounced transfer ECG without a hint.",
+            "purpose": (
+                "Practice this specific skill, then check it again on an unannounced ECG without a hint. "
+                "Only the unassisted check counts toward independent mastery."
+            ),
             "href": (
                 f"/train?concept={quote(concept)}&receiptConcept={quote(objective)}"
-                f"&subskill={quote(subskill)}&returnTo=%2Freview"
+                f"&subskill={quote(subskill)}&suggestedLength={training_length}"
+                f"&returnTo={_STUDY_PLAN_RETURN}"
             ),
-            "suggestedLength": 25,
+            "suggestedLength": training_length,
             "receiptConcept": objective,
             "receiptSubskill": subskill,
             "evidenceKind": "independent_transfer",
@@ -174,15 +378,20 @@ def _stage(
             else f"Check {label} · independent recognition"
         ),
         "purpose": (
-            "Complete every sweep field, commit an evidence-limited synthesis, and avoid unsupported calls on a blinded real ECG."
+            "Complete every step of the systematic read, commit an evidence-limited synthesis, and avoid unsupported calls on an unannounced real ECG."
             if subskill == "synthesize"
-            else "Make an explicit finding selection on a blinded, source-contracted real ECG; the server records both successes and focused misses."
+            else "Choose the finding on an unannounced real ECG. Both correct checks and focused misses shape what you practice next."
         ),
         "href": (
             f"/rapid?focus={quote(concept)}&receiptConcept={quote(objective)}"
-            f"&subskill={quote(subskill)}&returnTo=%2Freview"
+            f"&subskill={quote(subskill)}&suggestedLength={rapid_length}"
+            f"&pace={quote('ward' if subskill == 'synthesize' and rapid_pace == 'emergency' else rapid_pace)}"
+            f"&returnTo={_STUDY_PLAN_RETURN}"
         ),
-        "suggestedLength": 10,
+        "suggestedLength": rapid_length,
+        "suggestedPace": (
+            "ward" if subskill == "synthesize" and rapid_pace == "emergency" else rapid_pace
+        ),
         "receiptConcept": objective,
         "receiptSubskill": subskill,
         "evidenceKind": "independent_transfer",
@@ -197,9 +406,11 @@ def build_mastery_plan(
     runtime_evidence: dict[str, str] | None = None,
     runtime_subskills: dict[str, set[str]] | None = None,
     clinical_concepts: set[str] | None = None,
+    preferences: dict[str, Any] | None = None,
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
     """Build a transparent, actionable plan without inventing mastery."""
+    preferred_onboarding = _preferred_onboarding_rank(preferences)
     observed = {
         (row["concept"], row["subskill"]): row
         for row in profile.get("subskillMastery", [])
@@ -246,6 +457,12 @@ def build_mastery_plan(
                 "distinctSuccessfulEcgs": int(actual.get("distinctSuccessfulEcgs", 0)),
                 "distinctModes": int(actual.get("distinctModes", 0)),
                 "lapses": int(actual.get("lapses", 0)),
+                "preferenceRank": preferred_onboarding.get(
+                    case_concept,
+                    len(preferred_onboarding) + _ONBOARDING_RANK.get(
+                        case_concept, len(_ONBOARDING_RANK) + 1
+                    ),
+                ),
             })
 
     # Alias objectives can map to the same runnable concept/subskill. Keep the
@@ -271,12 +488,17 @@ def build_mastery_plan(
             deduped[key] = cell
 
     ranked = sorted(deduped.values(), key=_priority)
+    # This is a competency-cell observation count, not a distinct ECG count:
+    # one complete Rapid read can emit evidence for several exact skills. Keep
+    # the legacy field as an additive compatibility alias, but state the unit
+    # explicitly so UI and plan-coach language cannot call it an ECG total.
     independent_count = sum(cell["independentAttempts"] for cell in ranked)
     due_count = sum(1 for cell in ranked if cell["isDue"])
     overdue_count = sum(1 for cell in ranked if cell["dueState"] == "overdue")
     high_confidence_misses = sum(cell["highConfidenceWrong"] for cell in ranked)
     baseline_needed = independent_count == 0
     primary = ranked[0] if ranked else None
+    training_length, rapid_length, rapid_pace = _preferred_session_contract(preferences)
 
     priorities = []
     used_concepts: set[str] = set()
@@ -304,7 +526,20 @@ def build_mastery_plan(
 
     stages: list[dict[str, Any]] = []
     if primary:
-        stages.append(_stage(primary, order=1, stage_kind=plan_stage))
+        stages.append(
+            _stage(
+                primary,
+                order=1,
+                stage_kind=plan_stage,
+                training_length=training_length,
+                rapid_length=rapid_length,
+                rapid_pace=rapid_pace,
+            )
+        )
+
+    guided_remediation = _guided_remediation(
+        primary, before_stage_order=stages[0]["order"] if stages else None
+    )
 
     secondary = next(
         (
@@ -340,6 +575,7 @@ def build_mastery_plan(
     )
     integration = None
     if integration_unlocked and primary and secondary and synthesis_target:
+        integration_pace = "ward" if rapid_pace == "emergency" else rapid_pace
         integration = {
             "primaryConcept": primary["caseConcept"],
             "secondaryConcept": secondary["caseConcept"],
@@ -352,8 +588,48 @@ def build_mastery_plan(
             ),
             "href": (
                 f"/rapid?focus={quote(primary['caseConcept'])}"
+                f"&secondaryConcept={quote(secondary['caseConcept'])}"
                 f"&receiptConcept={quote(synthesis_target['objectiveId'])}"
-                "&subskill=synthesize&returnTo=%2Freview"
+                f"&subskill=synthesize&suggestedLength={rapid_length}"
+                f"&pace={quote(integration_pace)}"
+                f"&returnTo={_STUDY_PLAN_RETURN}"
+            ),
+            "suggestedLength": rapid_length,
+            "suggestedPace": integration_pace,
+        }
+
+    # Clinical application is a useful *formative* transfer after the exact
+    # receipt task, but it must never be inserted into the independent mastery
+    # stages above.  Offer it separately only when the serving bank has an item
+    # that explicitly assesses apply_in_context for that exact case concept.
+    clinical_target = next(
+        (
+            cell
+            for cell in ranked
+            if cell["caseConcept"] in (clinical_concepts or set())
+        ),
+        None,
+    )
+    clinical_application = None
+    if clinical_target:
+        clinical_application = {
+            "mode": "clinical",
+            "title": f"Apply {clinical_target['label']} in a patient-care decision",
+            "purpose": (
+                "Use a different real ECG inside an authored patient scenario after the pattern check. "
+                "The result shapes later recommendations but remains formative."
+            ),
+            "href": (
+                f"/practice?focus={quote(clinical_target['caseConcept'])}"
+                f"&subskill=apply_in_context&returnTo={_STUDY_PLAN_RETURN}"
+            ),
+            "concept": clinical_target["caseConcept"],
+            "subskill": "apply_in_context",
+            "evidenceKind": "formative_application",
+            "afterStageOrder": stages[0]["order"] if stages else None,
+            "reason": (
+                f"{clinical_target['label']} is your highest-priority current skill that also has "
+                "a matching patient case."
             ),
         }
 
@@ -362,8 +638,17 @@ def build_mastery_plan(
         "generatedAt": now,
         "plannerKind": "verified_competency_scheduler",
         "generativeTutorUsed": False,
+        "preferenceContext": ({
+            "trainingStage": preferences.get("trainingStage", "not_set"),
+            "primaryGoal": preferences.get("primaryGoal", "build_fundamentals"),
+            "defaultSessionLength": rapid_length,
+            "rapidPace": rapid_pace,
+            "guidanceLevel": preferences.get("guidanceLevel", "balanced"),
+        } if preferences is not None else None),
         "basis": {
+            "independentCompetencyObservations": independent_count,
             "independentAttempts": independent_count,
+            "independentAttemptUnit": "competency_observation",
             "dueCompetencies": due_count,
             "overdueCompetencies": overdue_count,
             "highConfidenceMisses": high_confidence_misses,
@@ -375,18 +660,28 @@ def build_mastery_plan(
         "primary": ({**primary, "reason": _reason(primary)} if primary else None),
         "priorities": priorities,
         "stages": stages,
+        "guidedRemediation": guided_remediation,
         "integration": integration,
+        "clinicalApplication": clinical_application,
         "integrationReadiness": {
             "unlocked": integration_unlocked,
             "reason": (
-                "Unlocked after both concepts have repeated independent success and neither is due."
+                "Unlocked after repeated unassisted success on both concepts while neither is due for review."
                 if integration_unlocked
-                else "Complete baseline/consolidation evidence on two concepts before cross-concept integration unlocks."
+                else "Cross-concept synthesis remains formative until deterministic per-domain grading is available."
+                if synthesis_target is None
+                else "Complete unassisted checks on two concepts before cross-concept integration opens."
             ),
         },
         "explanation": (
-            "No independently assessable competency evidence exists yet, so the first step is the highest-priority exact receipt task."
+            "No independent ECG checks are available yet, so the first step establishes a focused starting point."
+            + (
+                " Your saved training stage and goal decide which unseen skill is checked first."
+                if preferences is not None else ""
+            )
             if baseline_needed
-            else "The queue is due-first, then high-confidence errors, low independent mastery, diversity gaps, and unseen competencies with an implemented independent receipt path."
+            else "The plan puts due skills first, followed by confident misses, lower independent performance, limited ECG variety, and skills not yet checked. Saved preferences only break ties between otherwise equal unseen skills."
+            if preferences is not None
+            else "The plan puts due skills first, followed by confident misses, lower independent performance, limited ECG variety, and skills not yet checked."
         ),
     }

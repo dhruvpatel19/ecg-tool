@@ -1,8 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
-import { collectConsoleErrors } from "./helpers";
+import { collectConsoleErrors, registerVerifiedE2ELearner } from "./helpers";
 
-const OWNER = "guest";
-const STATE_KEY = `foundations_state_v1:${OWNER}`;
+let owner = "";
 
 async function openStandaloneScene(page: Page, current: number) {
   // Seed state from a same-origin page that is not running the Foundations
@@ -13,16 +12,27 @@ async function openStandaloneScene(page: Page, current: number) {
     ({ key, scene }) => {
       localStorage.setItem(key, JSON.stringify({ completed: {}, current: scene, nv: {}, skipped: {}, testedOut: {} }));
     },
-    { key: STATE_KEY, scene: current },
+    { key: `foundations_state_v1:${owner}`, scene: current },
   );
-  await page.goto(`/foundations/index.html?owner=${OWNER}`);
+  await page.goto(`/foundations/index.html?owner=${owner}`);
   await page.getByRole("button", { name: "Resume" }).press("Enter");
 }
 
 test.describe("Foundations accessibility and tutor continuity", () => {
   test.beforeEach(async ({ page }) => {
+    const account = await registerVerifiedE2ELearner(page, {
+      prefix: "foundations_accessibility",
+      displayName: "Foundation Learner",
+    });
+    owner = account.user.userId;
+    await page.route(`**/api/backend/learners/${owner}/pathway-progress**`, (route) => {
+      const body = route.request().method() === "PUT"
+        ? route.request().postDataJSON() as { items?: unknown[] }
+        : null;
+      return route.fulfill({ json: { learnerId: owner, items: body?.items ?? [] } });
+    });
     await page.goto("/");
-    await page.evaluate((key) => localStorage.removeItem(key), STATE_KEY);
+    await page.evaluate((key) => localStorage.removeItem(key), `foundations_state_v1:${owner}`);
   });
 
   test("keyboard-only waveform completion records a guided schematic receipt and preserves tangent state", async ({ page }) => {
@@ -38,7 +48,7 @@ test.describe("Foundations accessibility and tutor continuity", () => {
     });
 
     await page.goto("/learn/foundations");
-    const lesson = page.frameLocator('iframe[title="Foundations — Reading an ECG"]');
+    const lesson = page.frameLocator('iframe[title="Foundations of the ECG Read"]');
 
     await expect(lesson.getByRole("heading", { name: "A gentle start" })).toBeVisible();
     await expect(lesson.getByText(/Real PTB-XL ECG \d+ · lead II/)).toBeVisible();
@@ -92,7 +102,7 @@ test.describe("Foundations accessibility and tutor continuity", () => {
     });
 
     await page.goto("/learn/foundations");
-    const lesson = page.frameLocator('iframe[title="Foundations — Reading an ECG"]');
+    const lesson = page.frameLocator('iframe[title="Foundations of the ECG Read"]');
 
     await expect(lesson.getByRole("heading", { name: "Foundations is temporarily unavailable" })).toBeVisible();
     await expect(lesson.getByText("No simulated ECG will replace missing real data.", { exact: false })).toBeVisible();
@@ -114,7 +124,7 @@ test.describe("Foundations accessibility and tutor continuity", () => {
     });
 
     await page.goto("/learn/foundations");
-    const lesson = page.frameLocator('iframe[title="Foundations — Reading an ECG"]');
+    const lesson = page.frameLocator('iframe[title="Foundations of the ECG Read"]');
     const input = lesson.getByPlaceholder("Ask about any concept…", { exact: false });
     await input.fill("What is an interval?");
     await input.press("Enter");

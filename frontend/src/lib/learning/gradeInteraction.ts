@@ -10,6 +10,10 @@ import type { ECGPoint } from "@/lib/coordinates";
 
 type GradeContext = {
   packetMeasurements?: Record<string, unknown>;
+  serverMeasurementGrade?: {
+    correct: boolean;
+    noTarget: boolean;
+  };
 };
 
 const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -181,6 +185,12 @@ export function gradeInteraction(
     if (notAssessable) {
       correct = true;
       score = 1;
+    } else if (expected === null && structured?.correct !== undefined) {
+      // Guided keeps packet measurements server-side. The region endpoint has
+      // already committed and graded these exact boundaries, so its bounded
+      // result is authoritative without exposing the target value.
+      correct = Boolean(structured.correct);
+      score = correct ? 1 : 0;
     } else if (expected === null || measuredValueMs === undefined) {
       correct = false;
       score = 0;
@@ -249,7 +259,11 @@ export function gradeInteraction(
   } else if (interaction.kind === "numeric_entry") {
     const value = typeof response === "number" ? response : Number(response);
     const expected = numericMeasurement(interaction, context);
-    if (Number.isFinite(value) && expected !== null) {
+    if (context.serverMeasurementGrade) {
+      notAssessable = context.serverMeasurementGrade.noTarget;
+      correct = notAssessable || context.serverMeasurementGrade.correct;
+      score = correct ? 1 : 0;
+    } else if (Number.isFinite(value) && expected !== null) {
       const difference = Math.abs(value - expected);
       correct = difference <= interaction.target.tolerance;
       score = Math.max(0, 1 - difference / Math.max(interaction.target.tolerance * 3, 1));

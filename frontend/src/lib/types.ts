@@ -1,5 +1,18 @@
 export type Tier = "A" | "B" | "C" | "D";
 
+/**
+ * Opaque, owner-scoped reference used to request an ECG. Assessment APIs must
+ * never place a corpus/source record identifier in this field.
+ */
+export type EcgCapability = string;
+
+export type WaveformScope =
+  | { kind: "catalog" }
+  | { kind: "guided"; lessonId: string }
+  | { kind: "training"; campaignId: string }
+  | { kind: "rapid"; roundId: string }
+  | { kind: "clinical"; sessionId: string };
+
 export type ConceptConfidence = {
   score: number;
   tier: Tier;
@@ -8,7 +21,9 @@ export type ConceptConfidence = {
 };
 
 export type CaseSummary = {
-  caseId: string;
+  /** Wire name retained for API compatibility; value is an opaque capability. */
+  caseId: EcgCapability;
+  /** Safe, mode-generated ordinal label. Never use as a request identifier. */
   displayId: string;
   source: string;
   teachingTier: Tier;
@@ -55,14 +70,17 @@ export type MedianBeats = {
 };
 
 export type CasePacket = {
-  case_id: string;
+  /** Echo of the opaque request capability, not the source record id. */
+  case_id: EcgCapability;
+  /** Safe presentation label only. */
   display_id: string;
   clinical_stem: string;
   source: string;
   /** True for the blinded practice packet (diagnosis-bearing fields are stripped before submission). */
   blinded?: boolean;
   waveform: {
-    path: string | null;
+    /** Catalog packets may include a path; assessment packets intentionally omit it. */
+    path?: string | null;
     sampling_frequency: number;
     duration_sec: number;
     leads: string[];
@@ -114,9 +132,9 @@ export type RapidRound = {
   contextKey: string;
   exclusions: string[];
   servedCount: number;
-  recentServed: string[];
-  pendingCaseId: string | null;
-  feedbackCaseId: string | null;
+  recentServed: EcgCapability[];
+  pendingCaseId: EcgCapability | null;
+  feedbackCaseId: EcgCapability | null;
   pendingStartedAt: string | null;
   pendingDeadlineAt: string | null;
   deadlineSeconds: number | null;
@@ -136,7 +154,7 @@ export type RapidEvidenceReceipt = {
 export type RapidRoundAnswer = {
   answerId: number;
   roundId: string;
-  caseId: string;
+  caseId: EcgCapability;
   response: Record<string, unknown> & { traceEvidence?: ViewerTaskEvidence | null };
   grade: Record<string, unknown>;
   tutor: TutorResponse | null;
@@ -178,8 +196,8 @@ export type TrainingCampaign = {
   poolCount: number;
   phaseCounts: Record<TrainingPhase, number>;
   position: number;
-  pendingCaseId: string | null;
-  feedbackCaseId: string | null;
+  pendingCaseId: EcgCapability | null;
+  feedbackCaseId: EcgCapability | null;
   status: "active" | "complete" | "abandoned";
   contextKey: string;
   createdAt: string;
@@ -189,10 +207,11 @@ export type TrainingCampaign = {
 
 export type TrainingCampaignSlot = {
   position: number;
-  phase: TrainingPhase;
-  caseId: string;
+  phase?: TrainingPhase;
+  caseId: EcgCapability;
   caseFocus?: string;
   targetPresent?: boolean;
+  selectionReason: string;
   status: "queued" | "pending" | "answered";
   servedAt: string | null;
   answeredAt: string | null;
@@ -202,7 +221,7 @@ export type TrainingCampaignAnswer = {
   answerId: number;
   campaignId: string;
   position: number;
-  caseId: string;
+  caseId: EcgCapability;
   response: {
     selectedAnswer: "present" | "absent";
     confidence: number;
@@ -210,6 +229,8 @@ export type TrainingCampaignAnswer = {
     evidenceNote: string;
     viewerTaskEvidence?: ViewerTaskEvidence | null;
     subskillTaskAnswer?: string;
+    subskillTaskMatches?: Record<string, string>;
+    subskillTaskValue?: number | null;
     expectedAnswer: "present" | "absent" | null;
   };
   grade: Record<string, unknown>;
@@ -221,9 +242,11 @@ export type TrainingCampaignAnswer = {
   };
   summary: {
     position: number;
-    caseId: string;
+    caseId: EcgCapability;
     phase: TrainingPhase;
     correct: boolean;
+    scored?: boolean;
+    outcomeKind?: "scored_task" | "unverified_rehearsal";
     classificationCorrect: boolean;
     focusGrounded: boolean;
     selectedResponse: "present" | "absent";
@@ -239,6 +262,8 @@ export type TrainingCampaignAnswer = {
 export type TrainingCampaignSummary = {
   attempted: number;
   correct: number;
+  classificationCorrect: number;
+  fullTaskCorrect: number;
   independentReceipts: number;
   byPhase: Record<TrainingPhase, { attempted: number; correct: number }>;
   recent: TrainingCampaignAnswer["summary"][];
@@ -251,14 +276,44 @@ export type TrainingCampaignPayload = {
     slot: TrainingCampaignSlot;
     case: CaseSummary;
     packet: CasePacket;
-    task?: null | {
-      kind: "single_choice" | "confidence_commit";
+    task?: null | ({
+      kind: "single_choice";
       subskill: string;
+      variant?: number;
       prompt: string;
       options: Array<{ id: string; label: string }>;
       required: boolean;
       gradingBoundary: string;
-    };
+    } | {
+      kind: "matching";
+      subskill: string;
+      variant?: number;
+      prompt: string;
+      choices: Array<{ id: string; label: string }>;
+      rows: Array<{ id: string; clause: string }>;
+      required: boolean;
+      gradingBoundary: string;
+    } | {
+      kind: "numeric_fill_in";
+      subskill: string;
+      variant?: number;
+      prompt: string;
+      responseLabel: string;
+      unit: "ms" | "bpm";
+      minValue: number;
+      maxValue: number;
+      step: number;
+      required: boolean;
+      gradingBoundary: string;
+    } | {
+      kind: "confidence_commit";
+      subskill: string;
+      variant?: number;
+      prompt: string;
+      options: [];
+      required: boolean;
+      gradingBoundary: string;
+    });
     answer?: TrainingCampaignAnswer;
   };
   summary: TrainingCampaignSummary | null;
@@ -279,7 +334,10 @@ export type GroundedRoi = {
 };
 
 export type WaveformResponse = {
-  caseId: string;
+  /** Training, Rapid, and catalog echo of the opaque request capability. */
+  caseId?: EcgCapability;
+  /** Clinical echo of the opaque request capability. */
+  ecgRef?: EcgCapability;
   samplingFrequency: number;
   durationSec: number;
   startSec: number;
@@ -341,7 +399,8 @@ export type TutorThread = {
   learnerId?: string;
   mode: TutorMode | string;
   lessonId: string | null;
-  caseId: string | null;
+  caseId: EcgCapability | null;
+  scopeKey?: string | null;
   title: string | null;
   createdAt?: string;
   updatedAt?: string;
@@ -423,7 +482,7 @@ export type LearnerProfile = {
     retentionUncertainty: string | null;
   }>;
   recentAttempts: Array<{
-    caseId: string;
+    caseId: EcgCapability;
     mode: string;
     score: number;
     confidence: number;
@@ -438,6 +497,9 @@ export type User = {
   userId: string;
   username: string;
   displayName?: string;
+  accountStatus?: "verified" | "email_verification_required" | "email_upgrade_required";
+  emailMasked?: string | null;
+  emailVerified?: boolean;
 };
 
 export type AuthState = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -125,6 +126,52 @@ def test_openai_payload_caps_output_and_uses_hashed_safety_identifier(monkeypatc
     assert body["safety_identifier"] == "ecg_0123456789abcdef"
     assert "_safetyIdentifier" not in json.dumps(body["messages"])
     assert captured["timeout"] == settings.llm_request_timeout_seconds
+
+
+def test_remote_tutor_payload_never_contains_raw_learner_identifier(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            return json.dumps(
+                {"choices": [{"message": {"content": '{"tutorMessage":"Grounded."}'}}]}
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setattr("app.llm.urllib.request.urlopen", fake_urlopen)
+    service = TutorService(
+        Settings(
+            llm_provider="openai-compatible",
+            llm_api_key="not-a-real-key",
+            llm_base_url="https://api.openai.com/v1",
+            auth_rate_limit_secret="s" * 32,
+        )
+    )
+    raw_learner_id = "u_private-learner-identifier"
+
+    service.converse(
+        "Help me inspect this tracing systematically.",
+        None,
+        {"learnerId": raw_learner_id, "weakObjectives": ["atrial_fibrillation"]},
+        [],
+        remote_reservation=lambda: {"allowed": True},
+    )
+
+    body = captured["body"]
+    serialized = json.dumps(body)
+    assert raw_learner_id not in serialized
+    assert "learnerId" not in serialized
+    assert re.fullmatch(r"ecg_[0-9a-f]{40}", body["safety_identifier"])
 
 
 def test_oversized_remote_prompt_is_rejected_before_network_use(monkeypatch) -> None:

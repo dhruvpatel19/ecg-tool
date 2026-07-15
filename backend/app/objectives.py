@@ -16,7 +16,7 @@ from .ingest.source_contract import KNOWN_SOURCES
 from .ontology import CONCEPTS, CONCEPT_BY_ID
 from .source_policy import packet_allows_learning_evidence
 
-REGISTRY_VERSION = "2026.07.12"
+REGISTRY_VERSION = "2026.07.14"
 
 SUBSKILLS = (
     "recognize",
@@ -50,10 +50,10 @@ GUIDED_OBJECTIVE_IDS = (
     "av_relationship", "axis", "brady_context", "bradycardia", "bradycardia_with_pulse",
     "bundle_activation", "chamber_chronic_context", "chamber_pattern_mixed",
     "chamber_voltage_projection", "chest_pain_ecg_transfer", "contiguous_reciprocal_st_pattern",
-    "ecg_comparison", "ectopy", "ectopy_timing", "electrolyte_drug_pattern", "escape_rhythm",
+    "ectopy", "ectopy_timing", "electrolyte_drug_pattern", "escape_rhythm",
     "frontal_lead_map", "inferior_right_sided_extension", "integrated_capstone",
     "integrated_chest_pain", "integrated_interpretation", "integrated_medication_qt",
-    "integrated_prior_comparison", "integrated_wide_qrs_device", "interpretation_framework_mapping",
+    "integrated_wide_qrs_device", "interpretation_framework_mapping",
     "irregular_narrow_tachycardia", "ischemia_claim_layers", "ischemia_mimic_discrimination",
     "ivcd_claim_strength", "lead_anatomy", "lead_placement", "lead_projection", "lead_territories",
     "left_anterior_fascicular_block", "left_bundle_branch_block", "left_ventricular_hypertrophy",
@@ -73,6 +73,50 @@ GUIDED_OBJECTIVE_IDS = (
     "tachycardia_with_pulse", "ventricular_conduction_mixed", "wide_complex_tachycardia",
     "wide_qrs_qt_confound", "wolff_parkinson_white",
 )
+
+# These objectives were emitted by earlier Guided curricula but are no longer
+# executable handoffs: both require a governed prior/current ECG pair, which the
+# installed corpus does not currently provide. Keep them in the registry so
+# previously stored learning records remain interpretable without advertising a
+# destination that cannot truthfully assess the requested skill.
+RETIRED_GUIDED_OBJECTIVE_IDS = frozenset({
+    "ecg_comparison",
+    "integrated_prior_comparison",
+})
+
+# Neutral waveform targets can produce valid trace-native evidence without
+# asserting a diagnosis. They are registered separately from pathology concepts
+# and Guided handoff objectives so stored evidence is never invisible.
+NEUTRAL_WAVEFORM_OBJECTIVES = frozenset({"qrs_complex"})
+
+# These trace-native foundations appeared in earlier Guided curricula and have
+# valid student evidence in existing learning records. They remain canonical
+# objectives even when the current module wording changes, so a registry update
+# can never silently orphan earned work.
+FOUNDATIONAL_OBJECTIVE_IDS = frozenset({
+    "ecg_grid_calibration",
+    "pr_interval",
+    "waveform_components",
+})
+
+_FOUNDATIONAL_SUBSKILLS: dict[str, tuple[str, ...]] = {
+    "ecg_grid_calibration": ("measure", "explain_mechanism", "calibrate_confidence"),
+    "pr_interval": ("localize", "measure", "explain_mechanism", "calibrate_confidence"),
+    "waveform_components": ("recognize", "localize", "discriminate", "explain_mechanism", "calibrate_confidence"),
+}
+
+# Explicit compatibility additions are preferable to silently remapping
+# historical evidence onto a different clinical skill. Each pair remains a
+# truthful task on an eligible waveform and is now part of the versioned
+# registry contract.
+_SUBSKILL_ADDITIONS: dict[str, frozenset[str]] = {
+    "ectopy": frozenset({"apply_in_context"}),
+    "ischemia_mimic_discrimination": frozenset({"localize"}),
+    "normal_ecg": frozenset({"localize"}),
+    "qrs_duration": frozenset({"localize"}),
+    "resuscitation_source_boundary": frozenset({"synthesize"}),
+    "tachyarrhythmia_mixed": frozenset({"localize", "measure"}),
+}
 
 
 @dataclass(frozen=True)
@@ -137,7 +181,10 @@ _FORMATIVE_ONLY = {
 # Canonical concepts for which the automated-screened Clinical bank contains an
 # explicit downstream decision objective.  Keep this intentionally small and in
 # lock-step with real_items.APPLICATION_OBJECTIVES_BY_SCENARIO: incidental ECG
-# findings and trace-only click/audit cases must not gain application cells.
+# findings and trace-only click/audit cases must not gain a *Clinical action
+# receipt*.  Training may expose a formative ``apply_in_context`` information-
+# boundary task for any mapped ECG objective, but it cannot issue independent
+# application evidence without a governed vignette and action policy.
 CLINICAL_APPLICATION_CONCEPTS = frozenset({
     "atrial_fibrillation",
     "av_block_third_degree",
@@ -375,6 +422,7 @@ def objective_runtime_availability(
 
 def _label(objective_id: str) -> str:
     overrides = {
+        "av_block_2_to_1": "2:1 AV block",
         "qtc_prolongation": "QTc prolongation",
         "qrs_duration": "QRS duration",
         "st_t_morphology": "ST–T morphology",
@@ -382,10 +430,49 @@ def _label(objective_id: str) -> str:
         "wide_qrs_qt_confound": "Wide-QRS QT confound",
         "ivcd_claim_strength": "IVCD claim strength",
     }
-    return overrides.get(objective_id, objective_id.replace("_", " ").title())
+    if objective_id in overrides:
+        return overrides[objective_id]
+    acronyms = {
+        "av": "AV",
+        "ecg": "ECG",
+        "ivcd": "IVCD",
+        "ii": "II",
+        "iii": "III",
+        "lvh": "LVH",
+        "mi": "MI",
+        "pac": "PAC",
+        "pr": "PR",
+        "qrs": "QRS",
+        "qtc": "QTc",
+        "rvh": "RVH",
+        "st": "ST",
+        "svt": "SVT",
+        "wpw": "WPW",
+    }
+    return " ".join(
+        acronyms.get(token, token.title()) for token in objective_id.split("_")
+    )
 
 
 def _case_mapping(objective_id: str) -> tuple[tuple[str, ...], str]:
+    if objective_id == "qrs_complex":
+        # Normal ECG is the inventory anchor only; localization itself is
+        # diagnosis-neutral and may be observed on any eligible tracing.
+        return ("normal_ecg",), "waveform_fundamentals"
+    if objective_id in {"ecg_grid_calibration", "waveform_components"}:
+        return ("normal_ecg",), "waveform_fundamentals"
+    if objective_id == "pr_interval":
+        return ("normal_ecg", "av_block_first_degree"), "av_conduction"
+    if objective_id == "preexcited_atrial_fibrillation":
+        # This remains formative until a reviewed rhythm stream contains both
+        # pre-excitation and AF evidence, but it belongs in the tachyarrhythmia
+        # curriculum rather than leaking an internal "unmapped" bucket.
+        return ("atrial_fibrillation", "wolff_parkinson_white"), "tachyarrhythmia"
+    if objective_id == "resuscitation_source_boundary":
+        # Source-selection reasoning integrates rhythm recognition with the
+        # limits of a resting 12-lead. It cannot earn resuscitation mastery
+        # without the governed stream described by its explicit ceiling.
+        return ("wide_complex_tachycardia", "bradycardia"), "integration"
     if objective_id in CONCEPT_BY_ID:
         concept = CONCEPT_BY_ID[objective_id]
         return (objective_id,), concept.group
@@ -396,6 +483,10 @@ def _case_mapping(objective_id: str) -> tuple[tuple[str, ...], str]:
 
 
 def _subskills(objective_id: str, domain: str) -> tuple[str, ...]:
+    if objective_id in _FOUNDATIONAL_SUBSKILLS:
+        return _FOUNDATIONAL_SUBSKILLS[objective_id]
+    if objective_id == "qrs_complex":
+        return ("localize",)
     selected = {"recognize", "discriminate", "explain_mechanism", "calibrate_confidence"}
     if re.search(r"lead|territor|locali|placement|wave|morphology|segment|artifact|progression", objective_id):
         selected.add("localize")
@@ -403,18 +494,34 @@ def _subskills(objective_id: str, domain: str) -> tuple[str, ...]:
         selected.add("localize")
     if re.search(r"rate|interval|boundar|qrs|qt|voltage|axis|pr_|bundle|conduction", objective_id):
         selected.add("measure")
+    # A canonical packet concept can support an exact, server-graded synthesis
+    # task in Training/Rapid. Application remains formative in Training; an
+    # independent application receipt still requires a reviewed Clinical item.
+    if objective_id in CONCEPT_BY_ID:
+        selected.update({"synthesize", "apply_in_context"})
+    # Curriculum objectives that explicitly name an integrative construct may
+    # expose that construct. Mode-specific assessment matrices still decide
+    # whether a particular case/task can issue independent evidence; a case
+    # alias alone is never sufficient.
     if re.search(r"mixed|integrated|synthesis|framework|audit|comparison|transfer|claim", objective_id):
         selected.add("synthesize")
     if re.search(r"context|clinical|chest_pain|medication|syncope|palpitations|with_pulse|resuscitation", objective_id):
         selected.add("apply_in_context")
     if objective_id in CLINICAL_APPLICATION_CONCEPTS:
         selected.add("apply_in_context")
+    selected.update(_SUBSKILL_ADDITIONS.get(objective_id, ()))
     # Stable ordering is part of the API contract.
     return tuple(item for item in SUBSKILLS if item in selected)
 
 
 def build_registry() -> dict[str, ObjectiveDefinition]:
-    objective_ids = set(GUIDED_OBJECTIVE_IDS) | {concept.id for concept in CONCEPTS}
+    objective_ids = (
+        set(GUIDED_OBJECTIVE_IDS)
+        | set(RETIRED_GUIDED_OBJECTIVE_IDS)
+        | {concept.id for concept in CONCEPTS}
+        | set(NEUTRAL_WAVEFORM_OBJECTIVES)
+        | set(FOUNDATIONAL_OBJECTIVE_IDS)
+    )
     result: dict[str, ObjectiveDefinition] = {}
     for objective_id in sorted(objective_ids):
         case_concepts, domain = _case_mapping(objective_id)

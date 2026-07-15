@@ -1,5 +1,7 @@
 # Mode 4 / Clinical Decisions — advanced learner and curriculum audit
 
+> **Historical audit snapshot.** This report records the build and date named below; it is retained as defect-discovery evidence, not current product status. See [the remediation ledger](../PRODUCT_REMEDIATION_LEDGER.md) for reconciled fixes, verification, and remaining gates.
+
 Date: 2026-07-12  
 Perspective: senior medical student, near-intern, and curriculum/assessment reviewer  
 Live target: `http://127.0.0.1:3110/practice`  
@@ -453,4 +455,3 @@ Guided pathway position remains browser-local, while authenticated competency is
 ## Release recommendation
 
 Keep Mode 4 available only as a clearly labeled internal/supervised prototype until P0.1–P0.5 are fixed. The provenance labels, fail-closed handoffs, calibrated ECG viewer, and ACLS data boundary should be retained. The next implementation pass should prioritize identity/ownership and exactly-once event integrity first, then truthful reporting and clinician governance, before scaling the corpus or adding AI. Scaling an invalid learner record or an unreviewed clinical bank would make the later adaptive system confidently wrong.
-

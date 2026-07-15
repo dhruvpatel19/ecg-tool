@@ -7,46 +7,64 @@ Built as a factory (``build_clinical_router``) that closes over the app's module
 
 from __future__ import annotations
 
+from collections import Counter
+import hmac
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Cookie, Header, HTTPException
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .auth import SESSION_COOKIE_NAME
 from .clinical import shift
+from .clinical import integrity as clinical_integrity
+from .clinical.item_reference import public_item_reference
 from .clinical.real_items import (
     CLINICAL_FAMILY_BY_SCENARIO,
     REAL_ECGS_BY_SCENARIO,
     normalized_scenario_signature,
 )
 from .clinical.schemas import ClinicalAnswer
+from .clinical.provenance import assert_learner_item_provenance
+from .config import get_settings
+from .ecg_capability import (
+    is_ecg_capability,
+    issue_ecg_capability,
+    matches_ecg_capability,
+)
 
 PacketProvider = Callable[[str], dict[str, Any] | None]
+WaveformProvider = Callable[..., dict[str, Any] | None]
 LearnerResolver = Callable[[str | None, str, str | None], str]
 
 
 class ShiftStartBody(BaseModel):
     learnerId: str = "demo"
-    lane: str = "ed"
-    tier: str = "shift"  # learn | shift
+    lane: Literal["clinic", "ward", "ed"] = "ed"
+    tier: Literal["learn", "shift"] = "shift"
     focus: str | None = Field(default=None, max_length=80)
     subskill: str | None = Field(default=None, max_length=80)
     length: int = Field(default=5, ge=1, le=50)
 
 
 class AnswerBody(BaseModel):
-    itemId: str
+    itemId: str = Field(min_length=4, max_length=160)
     answer: ClinicalAnswer = Field(default_factory=ClinicalAnswer)
 
 
 class FirstLookBody(BaseModel):
-    itemId: str
+    itemId: str = Field(min_length=4, max_length=160)
     answer: ClinicalAnswer
 
 
 class PhaseActivationBody(BaseModel):
-    itemId: str
+    itemId: str = Field(min_length=4, max_length=160)
     phase: Literal["orient", "decide"]
+
+
+class StepCommitBody(BaseModel):
+    itemId: str = Field(min_length=4, max_length=160)
+    stepIndex: int = Field(ge=0)
+    answerIndex: int = Field(ge=0)
 
 
 def build_clinical_router(
@@ -54,8 +72,177 @@ def build_clinical_router(
     item_store,
     packet_provider: PacketProvider,
     resolve_learner: LearnerResolver,
+    waveform_provider: WaveformProvider | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/clinical", tags=["clinical-decisions"])
+    capability_secret = get_settings().adaptive_plan_context_secret
+
+    def reference_maps(
+        session: dict[str, Any],
+    ) -> tuple[dict[str, str], set[str]]:
+        """Rebuild public references from durable owner-scoped canonical state.
+
+        Nothing here is decoded from a browser reference.  This also keeps
+        sessions written before capabilities existed resumable without a data
+        migration: legacy canonical ids remain server-side and receive a fresh
+        deterministic reference at the response boundary.
+        """
+
+        item_ids = {
+            str(value)
+            for value in (
+                *(session.get("served") or []),
+                session.get("pendingItemId"),
+                session.get("feedbackItemId"),
+            )
+            if value
+        }
+        canonical_ids = {
+            str(value) for value in (session.get("servedEcgs") or []) if value
+        }
+        answers = store.get_shift_answers(str(session["sessionId"]))
+        for answer in answers:
+            if answer.get("itemId"):
+                item_ids.add(str(answer["itemId"]))
+            if answer.get("ecgId"):
+                canonical_ids.add(str(answer["ecgId"]))
+
+        for item_id in tuple(item_ids):
+            item = item_store.get_item(item_id)
+            if item is None:
+                continue
+            item_ids.add(str(item.item_id))
+            item_ids.add(public_item_reference(str(item.item_id)))
+            canonical_ids.add(str(item.ecg_id))
+            if item.prior_ecg_id:
+                canonical_ids.add(str(item.prior_ecg_id))
+
+        references = {
+            canonical_id: issue_ecg_capability(
+                capability_secret,
+                str(session["learnerId"]),
+                "clinical",
+                str(session["sessionId"]),
+                canonical_id,
+            )
+            for canonical_id in canonical_ids
+        }
+        return references, item_ids
+
+    def public_payload(session: dict[str, Any], value: Any) -> Any:
+        """Remove canonical ECG/item identifiers from a Clinical response."""
+
+        ecg_references, item_ids = reference_maps(session)
+        ecg_key_names = {
+            "ecg_id": "ecg_ref",
+            "ecgId": "ecgRef",
+            "case_id": "ecg_ref",
+            "prior_ecg_id": "prior_ecg_ref",
+            "priorEcgId": "priorEcgRef",
+        }
+        display_keys = {"display_id", "displayId"}
+        position = int(session.get("position") or 0)
+        display_number = (
+            max(1, position)
+            if session.get("feedbackItemId") and not session.get("pendingItemId")
+            else max(1, position + 1)
+        )
+        display_label = f"Clinical ECG {display_number:04d}"
+        raw_path_keys = {
+            "path",
+            "sourcePath",
+            "source_path",
+            "recordPath",
+            "record_path",
+            "waveformPath",
+            "waveform_path",
+            "filePath",
+            "file_path",
+        }
+
+        def visit(child: Any) -> Any:
+            if isinstance(child, dict):
+                result: dict[str, Any] = {}
+                for raw_key, raw_value in child.items():
+                    key = str(raw_key)
+                    if key in raw_path_keys:
+                        # Corpus object paths are server implementation details,
+                        # never learner-facing locators.
+                        continue
+                    if key == "servedEcgs":
+                        result["servedEcgRefs"] = [
+                            ecg_references[str(candidate)]
+                            for candidate in (raw_value or [])
+                            if str(candidate) in ecg_references
+                        ]
+                        continue
+                    if key in display_keys:
+                        result[key] = display_label
+                        continue
+                    if key in ecg_key_names:
+                        public_key = ecg_key_names[key]
+                        if raw_value is None:
+                            result[public_key] = None
+                        else:
+                            reference = ecg_references.get(str(raw_value))
+                            if reference is not None:
+                                result[public_key] = reference
+                        continue
+                    if key == "caseId":
+                        text = str(raw_value or "")
+                        if text in ecg_references:
+                            result["ecgRef"] = ecg_references[text]
+                        elif raw_value is not None:
+                            result[key] = public_item_reference(text)
+                        continue
+                    if key in {
+                        "item_id",
+                        "itemId",
+                        "pendingItemId",
+                        "feedbackItemId",
+                    }:
+                        result[key] = (
+                            public_item_reference(str(raw_value))
+                            if raw_value is not None
+                            else None
+                        )
+                        continue
+                    result[key] = visit(raw_value)
+                return result
+            if isinstance(child, list):
+                return [visit(entry) for entry in child]
+            if isinstance(child, tuple):
+                return [visit(entry) for entry in child]
+            if isinstance(child, str):
+                if child in ecg_references:
+                    return ecg_references[child]
+                if child in item_ids:
+                    return public_item_reference(child)
+            return child
+
+        return visit(value)
+
+    def public_session(session: dict[str, Any]) -> dict[str, Any]:
+        return public_payload(session, session)
+
+    def submitted_item_id(session: dict[str, Any], supplied: str) -> str:
+        """Map only an owner session's opaque handle back to its durable key."""
+
+        candidates = list(session.get("served") or [])
+        candidates.extend(
+            value
+            for value in (session.get("pendingItemId"), session.get("feedbackItemId"))
+            if value
+        )
+        for candidate in dict.fromkeys(str(value) for value in candidates):
+            if hmac.compare_digest(public_item_reference(candidate), supplied):
+                return candidate
+        # Preserve the ordinary not-pending response without ever accepting a
+        # diagnosis-bearing internal id supplied by the browser.
+        return "invalid-clinical-item-reference"
+
+    def public_pending(value: Any) -> str | None:
+        return public_item_reference(str(value)) if value else None
 
     def owned_session(
         session_id: str, authorization: str | None, session_cookie: str | None
@@ -71,6 +258,20 @@ def build_clinical_router(
             raise HTTPException(status_code=404, detail="shift session not found")
         return session
 
+    def reject_abandoned(session: dict[str, Any], action: str) -> None:
+        if session.get("status") != "abandoned":
+            return
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "clinical_shift_abandoned",
+                "message": (
+                    f"This Clinical shift was abandoned and cannot {action}. "
+                    "Start a new shift from setup."
+                ),
+            },
+        )
+
     def tracing_source_summary(items: list[Any]) -> tuple[list[str], dict[str, int]]:
         """Report the sources that the serving bank actually resolves to.
 
@@ -82,14 +283,24 @@ def build_clinical_router(
 
         counts: dict[str, int] = {}
         for item in items:
-            packet = packet_provider(item.ecg_id)
+            # Status is an audit surface, so it must fail closed just like
+            # serving and grading if a stale fixture row enters the pool.
+            packet = assert_learner_item_provenance(item, packet_provider)
             source = str((packet or {}).get("source") or "").strip()
             if source:
                 counts[source] = counts.get(source, 0) + 1
         return sorted(counts), dict(sorted(counts.items()))
 
     @router.get("/bank/status")
-    def bank_status() -> dict[str, Any]:
+    def bank_status(
+        response: Response,
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        resolve_learner(authorization, "demo", session_cookie)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Authorization, Cookie"
         served = list(item_store.list_for_serving(status="harness_pass"))
         tracing_sources, tracing_source_counts = tracing_source_summary(served)
         family_by_ecg = {
@@ -97,9 +308,26 @@ def build_clinical_router(
             for scenario_id, ecg_ids in REAL_ECGS_BY_SCENARIO.items()
             for ecg_id in ecg_ids
         }
+        counts_by_situation = Counter(item.situation for item in served)
+        counts_by_question_type = Counter(item.question_type for item in served)
+        counts_by_setting = Counter(
+            item.chips.setting or "unspecified" for item in served
+        )
+        counts_by_situation_and_question_type: dict[str, dict[str, int]] = {}
+        for situation in sorted(counts_by_situation):
+            row = Counter(
+                item.question_type for item in served if item.situation == situation
+            )
+            counts_by_situation_and_question_type[situation] = dict(sorted(row.items()))
         return {
             "counts": item_store.count_by_status(),
+            "servingItemCount": len(served),
             "distinctRealEcgs": len({item.ecg_id for item in served}),
+            "countsBySituation": dict(sorted(counts_by_situation.items())),
+            "countsByQuestionType": dict(sorted(counts_by_question_type.items())),
+            "countsBySituationAndQuestionType": counts_by_situation_and_question_type,
+            "distinctAuthoredSettings": len(counts_by_setting),
+            "countsByAuthoredSetting": dict(sorted(counts_by_setting.items())),
             "distinctScenarioSignatures": len({
                 normalized_scenario_signature(item) for item in served
             }),
@@ -117,16 +345,26 @@ def build_clinical_router(
             "tracingLabel": "real de-identified ECG",
             "vignetteProvenance": "authored simulation",
             "learningEvidence": "formative_only",
+            "provenanceGate": "passed",
         }
 
     @router.get("/bank/coverage")
-    def bank_coverage() -> dict[str, Any]:
+    def bank_coverage(
+        response: Response,
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
         """Per-concept pool depth (items + distinct ECGs) — surfaces which pathologies can
         sustain adaptive repetition and which are too thin to drill on yet."""
+        resolve_learner(authorization, "demo", session_cookie)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Authorization, Cookie"
         served = list(item_store.list_for_serving(status="harness_pass"))
         tracing_sources, tracing_source_counts = tracing_source_summary(served)
         return {
             "coverage": item_store.coverage(status="harness_pass"),
+            "applicationCoverage": item_store.application_coverage(status="harness_pass"),
             "servingStatus": "harness_pass",
             "clinicianReviewed": False,
             "reviewStatus": "pending_named_clinician_signoff",
@@ -156,7 +394,9 @@ def build_clinical_router(
             body.subskill,
         )
         first = shift.next_shift_item(store, item_store, packet_provider, session["sessionId"])
-        return {"session": store.get_shift_session(session["sessionId"]), "next": first}
+        current = store.get_shift_session(session["sessionId"])
+        payload = {"session": current, "next": first}
+        return public_payload(current, payload) if current else payload
 
     @router.get("/shift/active")
     def shift_active(
@@ -165,7 +405,9 @@ def build_clinical_router(
     ) -> dict[str, Any]:
         learner = resolve_learner(authorization, "demo", session_cookie)
         session = store.get_resumable_shift_session(learner)
-        return shift.shift_lifecycle_payload(store, item_store, packet_provider, session)
+        result = shift.shift_lifecycle_payload(store, item_store, packet_provider, session)
+        current = result.get("session") or session
+        return public_payload(current, result) if current else result
 
     @router.get("/shift/{session_id}")
     def shift_get(
@@ -173,7 +415,124 @@ def build_clinical_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        return owned_session(session_id, authorization, session_cookie)
+        return public_session(owned_session(session_id, authorization, session_cookie))
+
+    @router.get("/shift/{session_id}/waveform/{ecg_ref}")
+    def shift_waveform(
+        session_id: str,
+        ecg_ref: str,
+        response: Response,
+        leads: str | None = Query(default=None, max_length=120),
+        start: float = Query(default=0, ge=0),
+        end: float | None = Query(default=None, ge=0),
+        maxPoints: int = Query(default=1200, ge=100, le=5000),
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        """Return only a waveform authorized by an owned Clinical capability."""
+
+        not_found = HTTPException(status_code=404, detail="clinical waveform not found")
+        try:
+            session = owned_session(session_id, authorization, session_cookie)
+        except HTTPException as error:
+            if error.status_code == 404:
+                raise not_found from None
+            raise
+        if waveform_provider is None or not is_ecg_capability(ecg_ref):
+            raise not_found
+
+        references, _ = reference_maps(session)
+        canonical_id: str | None = None
+        # Validate only against ECGs already authorized by durable state. The
+        # capability is not decoded, and a canonical id from the URL is never
+        # accepted as a fallback.
+        for candidate in references:
+            if matches_ecg_capability(
+                ecg_ref,
+                capability_secret,
+                str(session["learnerId"]),
+                "clinical",
+                str(session["sessionId"]),
+                candidate,
+            ):
+                canonical_id = candidate
+        if canonical_id is None:
+            raise not_found
+
+        lead_list = [lead.strip() for lead in leads.split(",")] if leads else None
+        if lead_list and (
+            len(lead_list) > 12
+            or any(not lead or len(lead) > 8 for lead in lead_list)
+        ):
+            raise HTTPException(
+                status_code=422, detail="Invalid waveform lead selection"
+            )
+        waveform = waveform_provider(
+            canonical_id,
+            leads=lead_list,
+            start=start,
+            end=end,
+            max_points=maxPoints,
+        )
+        if not waveform:
+            raise not_found
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Authorization, Cookie"
+        public_waveform = public_payload(session, waveform)
+        public_waveform["caseId"] = ecg_ref
+        public_waveform["ecgRef"] = ecg_ref
+        return public_waveform
+
+    @router.post("/shift/{session_id}/abandon")
+    def shift_abandon(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        session = owned_session(session_id, authorization, session_cookie)
+        if session.get("status") == "abandoned":
+            # Safe retry. The first transition already cleared the pending
+            # presentation; do not rewrite its durable transition timestamp.
+            result = shift.shift_lifecycle_payload(
+                store, item_store, packet_provider, session
+            )
+            current = result.get("session") or session
+            return public_payload(current, result)
+        if session.get("status") != "active":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_shift_not_active",
+                    "message": "Only an active Clinical shift can be abandoned.",
+                },
+            )
+        transition = clinical_integrity.abandon_session(
+            store,
+            session_id=session_id,
+            owner_id=str(session["learnerId"]),
+        )
+        abandoned = store.get_shift_session(session_id)
+        if (
+            not transition
+            or not transition.get("changed")
+            or not abandoned
+            or abandoned.get("status") != "abandoned"
+        ):
+            # A concurrent final answer can complete the shift after the owner
+            # check. Never claim abandonment if the conditional write did not win.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_shift_transition_lost",
+                    "message": "The Clinical shift changed before it could be abandoned.",
+                },
+            )
+        result = shift.shift_lifecycle_payload(
+            store, item_store, packet_provider, abandoned
+        )
+        current = result.get("session") or abandoned
+        return public_payload(current, result)
 
     @router.post("/shift/{session_id}/next")
     def shift_next(
@@ -181,11 +540,13 @@ def build_clinical_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        owned_session(session_id, authorization, session_cookie)
+        session = owned_session(session_id, authorization, session_cookie)
+        reject_abandoned(session, "serve another case")
         result = shift.next_shift_item(store, item_store, packet_provider, session_id)
         if result is None:
             raise HTTPException(status_code=404, detail="shift session not found")
-        return result
+        current = store.get_shift_session(session_id) or session
+        return public_payload(current, result)
 
     @router.post("/shift/{session_id}/answer")
     def shift_answer(
@@ -194,9 +555,11 @@ def build_clinical_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        owned_session(session_id, authorization, session_cookie)
+        session = owned_session(session_id, authorization, session_cookie)
+        reject_abandoned(session, "accept an answer")
+        item_id = submitted_item_id(session, body.itemId)
         result = shift.grade_and_record(
-            store, item_store, packet_provider, session_id, body.itemId, body.answer
+            store, item_store, packet_provider, session_id, item_id, body.answer
         )
         if result is None:
             raise HTTPException(status_code=404, detail="shift session or item not found")
@@ -206,7 +569,7 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_item_not_pending",
                     "message": "Only the current pending Clinical item can be answered.",
-                    "pendingItemId": result.get("pendingItemId"),
+                    "pendingItemId": public_pending(result.get("pendingItemId")),
                 },
             )
         if result.get("error") == "context_not_revealed":
@@ -217,7 +580,25 @@ def build_clinical_router(
                     "message": "Commit the ECG-only first look before submitting the clinical decision.",
                 },
             )
-        return result
+        if result.get("error") == "stepwise_incomplete":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_stepwise_incomplete",
+                    "message": "Commit each ECG interpretation step before the final clinical decision.",
+                    "nextStepIndex": result.get("nextStepIndex"),
+                },
+            )
+        if result.get("error") == "expired":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_item_expired",
+                    "message": "This saved case expired after extended inactivity. Continue to receive a fresh case.",
+                },
+            )
+        current = store.get_shift_session(session_id) or session
+        return public_payload(current, result)
 
     @router.post("/shift/{session_id}/phase")
     def shift_phase(
@@ -226,9 +607,11 @@ def build_clinical_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        owned_session(session_id, authorization, session_cookie)
+        session = owned_session(session_id, authorization, session_cookie)
+        reject_abandoned(session, "activate a timer")
+        item_id = submitted_item_id(session, body.itemId)
         result = shift.activate_shift_phase(
-            store, item_store, packet_provider, session_id, body.itemId, body.phase
+            store, item_store, packet_provider, session_id, item_id, body.phase
         )
         if result is None or result.get("error") == "missing":
             raise HTTPException(status_code=404, detail="shift session or item not found")
@@ -238,7 +621,7 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_item_not_pending",
                     "message": "Only the current pending Clinical item can activate a phase.",
-                    "pendingItemId": result.get("pendingItemId"),
+                    "pendingItemId": public_pending(result.get("pendingItemId")),
                 },
             )
         if result.get("error") in {"phase_not_ready", "invalid_phase"}:
@@ -249,7 +632,8 @@ def build_clinical_router(
                     "message": "That Clinical phase is not ready to activate.",
                 },
             )
-        return result
+        current = store.get_shift_session(session_id) or session
+        return public_payload(current, result)
 
     @router.post("/shift/{session_id}/context")
     def shift_context(
@@ -258,9 +642,11 @@ def build_clinical_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        owned_session(session_id, authorization, session_cookie)
+        session = owned_session(session_id, authorization, session_cookie)
+        reject_abandoned(session, "reveal clinical context")
+        item_id = submitted_item_id(session, body.itemId)
         result = shift.reveal_shift_context(
-            store, item_store, packet_provider, session_id, body.itemId, body.answer
+            store, item_store, packet_provider, session_id, item_id, body.answer
         )
         if result is None or result.get("error") == "missing":
             raise HTTPException(status_code=404, detail="shift session or item not found")
@@ -270,7 +656,7 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_item_not_pending",
                     "message": "Only the current pending Clinical item can reveal context.",
-                    "pendingItemId": result.get("pendingItemId"),
+                    "pendingItemId": public_pending(result.get("pendingItemId")),
                 },
             )
         if result.get("error") == "first_look_required":
@@ -289,7 +675,64 @@ def build_clinical_router(
                     "message": "The timed first-look clock starts only after the ECG viewer is ready.",
                 },
             )
-        return result
+        current = store.get_shift_session(session_id) or session
+        return public_payload(current, result)
+
+    @router.post("/shift/{session_id}/step")
+    def shift_step(
+        session_id: str,
+        body: StepCommitBody,
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        session = owned_session(session_id, authorization, session_cookie)
+        reject_abandoned(session, "commit a stepwise decision")
+        item_id = submitted_item_id(session, body.itemId)
+        result = shift.commit_shift_step(
+            store,
+            item_store,
+            packet_provider,
+            session_id,
+            item_id,
+            body.stepIndex,
+            body.answerIndex,
+        )
+        if result is None or result.get("error") == "missing":
+            raise HTTPException(status_code=404, detail="shift session or item not found")
+        error = result.get("error")
+        if error == "not_pending":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_item_not_pending",
+                    "message": "Only the current pending Clinical item can commit a step.",
+                },
+            )
+        if error == "context_not_revealed":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_context_not_revealed",
+                    "message": "Commit the ECG-only first look before the stepwise decision.",
+                },
+            )
+        if error in {"not_stepwise", "invalid_step", "step_locked", "step_out_of_order"}:
+            messages = {
+                "not_stepwise": "This Clinical item does not use staged decisions.",
+                "invalid_step": "That step or answer is not available.",
+                "step_locked": "A committed Clinical step cannot be changed.",
+                "step_out_of_order": "Commit the currently revealed step before continuing.",
+            }
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": f"clinical_{error}",
+                    "message": messages[error],
+                    "nextStepIndex": result.get("nextStepIndex"),
+                },
+            )
+        current = store.get_shift_session(session_id) or session
+        return public_payload(current, result)
 
     @router.get("/shift/{session_id}/report")
     def shift_report(
@@ -297,10 +740,10 @@ def build_clinical_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        owned_session(session_id, authorization, session_cookie)
-        report = shift.shift_report(store, session_id)
+        session = owned_session(session_id, authorization, session_cookie)
+        report = shift.shift_report(store, session_id, item_store, packet_provider)
         if report is None:
             raise HTTPException(status_code=404, detail="shift session not found")
-        return report
+        return public_payload(session, report)
 
     return router

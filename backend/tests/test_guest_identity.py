@@ -3,24 +3,24 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.guest_identity import GUEST_COOKIE_NAME, GuestIdentityMiddleware, current_guest_learner
+from app.guest_identity import (
+    GUEST_COOKIE_NAME,
+    GuestIdentityMiddleware,
+    current_claimable_guest_learner,
+    current_guest_learner,
+)
 
 
-def _guest_test_app() -> FastAPI:
+def _guest_test_app(app_env: str = "development") -> FastAPI:
     app = FastAPI()
-    app.add_middleware(GuestIdentityMiddleware, app_env="development")
-    notes: dict[str, str] = {}
+    app.add_middleware(GuestIdentityMiddleware, app_env=app_env)
 
     @app.get("/whoami")
     def whoami() -> dict[str, str | None]:
-        guest_id = current_guest_learner()
-        return {"guestId": guest_id, "note": notes.get(guest_id)}
-
-    @app.post("/note/{value}")
-    def save_note(value: str) -> dict[str, str]:
-        guest_id = current_guest_learner()
-        notes[guest_id] = value
-        return {"guestId": guest_id}
+        return {
+            "guestId": current_guest_learner(),
+            "claimableGuestId": current_claimable_guest_learner(),
+        }
 
     @app.get("/health")
     def health() -> dict[str, bool]:
@@ -37,40 +37,49 @@ def _guest_test_app() -> FastAPI:
     return app
 
 
-def test_guest_cookie_is_private_stable_httponly_and_time_bounded() -> None:
-    app = _guest_test_app()
-    with TestClient(app) as first, TestClient(app) as second:
-        first_identity = first.get("/whoami")
-        second_identity = second.get("/whoami")
-        first_id = first_identity.json()["guestId"]
-        second_id = second_identity.json()["guestId"]
-        assert first_id.startswith("g_") and second_id.startswith("g_")
-        assert first_id != second_id
-
-        set_cookie = first_identity.headers["set-cookie"].lower()
-        assert f"{GUEST_COOKIE_NAME}=" in set_cookie
-        assert "httponly" in set_cookie
-        assert "samesite=lax" in set_cookie
-        assert "max-age=2592000" in set_cookie
-
-        assert first.post("/note/first-private-draft").json()["guestId"] == first_id
-        assert first.get("/whoami").json() == {"guestId": first_id, "note": "first-private-draft"}
-        assert second.get("/whoami").json() == {"guestId": second_id, "note": None}
+def test_deployed_middleware_never_manufactures_guest_identity_or_cookie() -> None:
+    with TestClient(_guest_test_app()) as client:
+        response = client.get("/whoami")
+        assert response.status_code == 200
+        assert response.json() == {"guestId": None, "claimableGuestId": None}
+        assert response.headers.get("set-cookie") is None
+        assert client.cookies.get(GUEST_COOKIE_NAME) is None
 
 
-def test_invalid_guest_cookie_is_rotated_instead_of_selecting_an_owner() -> None:
-    app = _guest_test_app()
-    with TestClient(app) as client:
+def test_valid_preexisting_cookie_is_exposed_only_for_legacy_migration() -> None:
+    legacy_id = f"g_{'a' * 24}"
+    with TestClient(_guest_test_app()) as client:
+        client.cookies.set(GUEST_COOKIE_NAME, legacy_id)
+        response = client.get("/whoami")
+        assert response.json() == {
+            "guestId": legacy_id,
+            "claimableGuestId": legacy_id,
+        }
+        # Reading a migration identity never refreshes its lifetime.
+        assert response.headers.get("set-cookie") is None
+
+
+def test_invalid_guest_cookie_is_ignored_and_never_rotated() -> None:
+    with TestClient(_guest_test_app()) as client:
         client.cookies.set(GUEST_COOKIE_NAME, "g_known-or-malformed")
         response = client.get("/whoami")
         assert response.status_code == 200
-        assert response.json()["guestId"] != "g_known-or-malformed"
-        assert response.headers.get("set-cookie")
+        assert response.json() == {"guestId": None, "claimableGuestId": None}
+        assert response.headers.get("set-cookie") is None
+
+
+def test_exact_test_environment_retains_internal_demo_fixture_without_cookie() -> None:
+    with TestClient(_guest_test_app("test")) as client:
+        response = client.get("/whoami")
+        assert response.json() == {
+            "guestId": "demo",
+            "claimableGuestId": "demo",
+        }
+        assert response.headers.get("set-cookie") is None
 
 
 def test_public_probes_never_create_guest_cookies() -> None:
-    app = _guest_test_app()
-    with TestClient(app) as client:
+    with TestClient(_guest_test_app()) as client:
         for path in ("/health", "/livez", "/readyz"):
             response = client.get(path)
             assert response.status_code == 200

@@ -1,7 +1,56 @@
 import { expect, test } from "@playwright/test";
-import { collectConsoleErrors } from "./helpers";
+import { collectConsoleErrors, registerVerifiedE2ELearner } from "./helpers";
 
 test.describe("production guided interactions", () => {
+  test.beforeEach(async ({ page }) => {
+    await registerVerifiedE2ELearner(page, { prefix: "guided_production" });
+  });
+
+  test("announces a failed ECG load and retries the same guided checkpoint in place", async ({ page }) => {
+    let tutorialChecks = 0;
+    let allowRecovery = false;
+    await page.route("**/api/backend/tutorials/*", async (route) => {
+      tutorialChecks += 1;
+      if (!allowRecovery) {
+        await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "temporarily unavailable" }) });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto("/learn/leads-vectors?scene=M02.S1");
+    const recovery = page.getByRole("alert").filter({ hasText: /This ECG could not load/i });
+    await expect(recovery).toBeVisible({ timeout: 30_000 });
+    allowRecovery = true;
+    await recovery.getByRole("button", { name: "Retry ECG" }).click();
+
+    await expect(page.getByRole("img", { name: /12-lead ECG/i })).toBeVisible({ timeout: 30_000 });
+    await expect(recovery).toHaveCount(0);
+    expect(tutorialChecks).toBeGreaterThanOrEqual(2);
+  });
+
+  test("Guided lesson support changes progressive context without changing scoring", async ({ page }) => {
+    const saved = await page.request.put("/api/backend/learning/preferences", {
+      data: { guidanceLevel: "step_by_step" },
+    });
+    expect(saved.ok()).toBe(true);
+    await page.goto("/learn/leads-vectors?scene=M02.S1");
+    await expect(page.getByRole("heading", { name: "Why does one beat look different twelve times?" })).toBeVisible({ timeout: 30_000 });
+
+    const context = page.locator("details").filter({ hasText: "More context & clinical connection" });
+    await expect(context).toHaveAttribute("open", "");
+    await expect(page.locator(".production-mechanism > div")).toHaveCount(2);
+
+    const minimal = await page.request.put("/api/backend/learning/preferences", {
+      data: { guidanceLevel: "minimal" },
+    });
+    expect(minimal.ok()).toBe(true);
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Why does one beat look different twelve times?" })).toBeVisible({ timeout: 30_000 });
+    await expect(context).not.toHaveAttribute("open", "");
+    await expect(page.getByRole("button", { name: "Show first link" })).toBeVisible();
+  });
+
   test("vector evidence and a mechanism explanation complete the native Leads scene", async ({ page }) => {
     const errors = collectConsoleErrors(page);
     await page.goto("/learn/leads-vectors?scene=M02.S1");
@@ -19,7 +68,9 @@ test.describe("production guided interactions", () => {
     await page.getByLabel("Your explanation").fill("One evolving electrical event looks different because each lead is one of multiple directed views: toward its positive pole is upright and away is downward.");
     await page.getByRole("button", { name: "Check my evidence" }).click();
 
-    await expect(page.getByText("Scene complete · independent evidence recorded")).toBeVisible();
+    await expect(page.getByText("Scene complete · practice saved")).toBeVisible();
+    await expect(page.getByText(/Lesson practice saved.*fresh mixed ECG/i)).toBeVisible();
+    await expect(page.getByText("Scene complete · progress updated")).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "One event, multiple directed views" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Next scene" })).toBeEnabled();
     expect(errors).toEqual([]);
@@ -39,7 +90,7 @@ test.describe("production guided interactions", () => {
     await page.getByRole("button", { name: "aVF", exact: true }).click();
     await page.getByRole("button", { name: "Check my evidence" }).click();
     await expect(page.getByText("II, III, and aVF are neighboring inferior frontal views.")).toBeVisible();
-    await expect(page.getByText("Understanding shown; independent evidence still needed.")).toBeVisible();
+    await expect(page.getByText("Nice work with support.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Next scene" })).toBeDisabled();
     expect(errors).toEqual([]);
   });
@@ -48,9 +99,14 @@ test.describe("production guided interactions", () => {
     await page.goto("/learn/leads-vectors?scene=M02.S1");
     await expect(page.getByRole("heading", { name: "Point the activation vector down and left toward lead II, then predict the dominant sign in lead II and aVR." })).toBeVisible({ timeout: 30_000 });
 
+    const tutorTrigger = page.getByRole("button", { name: "Open tutor" });
+    await tutorTrigger.click();
+    await expect(page.getByRole("dialog", { name: /tutor/i })).toBeVisible();
     await page.getByLabel("Message the tutor").fill("Remind me how a lead decides whether this vector is positive or negative.");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect(page.getByText("Tutor assistance recorded for this action", { exact: false })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(tutorTrigger).toBeFocused();
+    await expect(page.getByText("Tutor help noted.", { exact: false })).toBeVisible();
 
     await page.getByRole("slider", { name: "Net vector angle" }).fill("60");
     await page.getByLabel("II dominant deflection").selectOption("positive");
@@ -60,9 +116,61 @@ test.describe("production guided interactions", () => {
     await page.getByLabel("Your explanation").fill("One electrical event projects positively toward lead II and negatively away from aVR.");
     await page.getByRole("button", { name: "Check my evidence" }).click();
 
-    await expect(page.getByText("Understanding shown; independent evidence still needed.")).toBeVisible();
+    await expect(page.getByText("Nice work with support.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Next scene" })).toBeDisabled();
-    await expect(page.getByText("Scene complete · independent evidence recorded")).toHaveCount(0);
+    await expect(page.getByText("Scene complete · progress updated")).toHaveCount(0);
+  });
+
+  test("a failed tutor request preserves the question and does not mark the action assisted", async ({ page }) => {
+    await page.route("**/api/backend/tutor/message", async (route) => {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "unavailable" }) });
+    });
+    await page.goto("/learn/leads-vectors?scene=M02.S1");
+    await expect(page.getByRole("heading", { name: "Point the activation vector down and left toward lead II, then predict the dominant sign in lead II and aVR." })).toBeVisible({ timeout: 30_000 });
+
+    await page.getByRole("button", { name: "Open tutor" }).click();
+    const question = "How should I decide whether this vector is positive?";
+    await page.getByLabel("Message the tutor").fill(question);
+    await page.getByRole("button", { name: "Send" }).click();
+
+    await expect(page.getByText(/Your question is still here/i)).toBeVisible();
+    await expect(page.getByLabel("Message the tutor")).toHaveValue(question);
+    await expect(page.getByText("Tutor help noted.", { exact: false })).toHaveCount(0);
+  });
+
+  test("staged clinical decisions reveal sequentially and lock committed answers", async ({ page }) => {
+    const errors = collectConsoleErrors(page);
+    await page.goto("/learn/leads-vectors?scene=M02.S13");
+
+    await expect(page.getByRole("heading", { name: "Compare a verified stable variant with a teaching example of electrode misplacement." })).toBeVisible({ timeout: 30_000 });
+    await page.getByLabel("Prior relationship, left case").fill("stable on prior");
+    await page.getByLabel("Prior relationship, right case").fill("changed after placement");
+    await page.getByLabel("Best category, left case").fill("plausible variation");
+    await page.getByLabel("Best category, right case").fill("possible placement problem");
+    await page.getByLabel("Next check, left case").fill("describe and retain context");
+    await page.getByLabel("Next check, right case").fill("verify electrode position");
+    await page.getByRole("button", { name: "Check my evidence" }).click();
+    await page.getByRole("button", { name: "Continue to the next action" }).click();
+
+    const firstChoice = page.getByRole("button", { name: "Possible right-arm/left-arm reversal; verify acquisition." });
+    const secondStage = page.getByRole("group", { name: "Stage 2 · Unusual progression is stable on a correctly acquired prior" });
+    await expect(firstChoice).toBeVisible();
+    await expect(secondStage).toHaveCount(0);
+    await firstChoice.click();
+    await expect(secondStage).toHaveCount(0);
+    await page.getByRole("button", { name: "Commit stage and reveal next" }).click();
+
+    await expect(firstChoice).toBeDisabled();
+    await expect(page.getByText("Decision committed. This stage is locked.", { exact: true })).toBeVisible();
+    await expect(secondStage).toBeVisible();
+    await expect(page.getByRole("button", { name: "Check my evidence" })).toBeDisabled();
+    const secondChoice = page.getByRole("button", { name: "Plausible stable variation; describe and retain context." });
+    await secondChoice.click();
+    await page.getByRole("button", { name: "Commit final stage" }).click();
+    await expect(secondChoice).toBeDisabled();
+    await expect(page.getByText("All staged decisions are committed. Check your evidence when ready.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Check my evidence" })).toBeEnabled();
+    expect(errors).toEqual([]);
   });
 
   test("QTc formula scene supplies explicit inputs and accepts both fixed calculations", async ({ page }) => {
@@ -84,10 +192,10 @@ test.describe("production guided interactions", () => {
     const errors = collectConsoleErrors(page);
     await page.goto("/learn/ischemia-infarction?scene=m09-s8");
 
-    await expect(page.getByText("Scene locked for this case")).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText("Not independently assessable")).toBeVisible();
+    await expect(page.getByText("About this ECG check")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Practice step")).toBeVisible();
     await expect(page.locator(".learning-compare input")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Acknowledge evidence limit & continue" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue without scoring" })).toBeVisible();
     expect(errors).toEqual([]);
   });
 });

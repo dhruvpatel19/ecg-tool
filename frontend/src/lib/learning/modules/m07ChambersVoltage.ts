@@ -590,7 +590,7 @@ export const M07_CHAMBERS_VOLTAGE_MODULE: ProductionModule = {
       caseContract: caseSpec({ selectorLessonId: "hypertrophy", requestedConcept: "left_ventricular_hypertrophy", minimumTier: "A", requiredEvidence: ["Calibrated voltage or raw amplitude", "Compatible LVH statement", "Approved criterion policy", "At least one corroborating field", "Variant or gain trap"], requiredLeads: ["V1", "V3", "V5", "V6", "aVL"], allowedUses: ["measurement", "scored_recognition", "transfer"], fallback: "lock_scene", forbiddenClaims: ["Anatomical LVH from voltage alone", "Unreviewed threshold", "Hypertension diagnosis or treatment"] }),
       interactions: s2Interactions, minimumScore: 0.88,
       connections: { recallFrom: "M7-S0 projection and M2 axis", changesNow: "A versioned voltage rule is embedded in an evidence bundle", reuseNext: "M7 strain and M9 LVH mimic", clinicalUse: "Distinguishes a screening pattern from anatomical certainty" },
-      handoffs: [handoff("train", "Train · LVH voltage with mimics", "left_ventricular_hypertrophy", "discriminate", "faded"), handoff("clinical", "Clinical · Pre-op abnormal voltage", "lvh_chronic_context", "apply_in_context", "guided")],
+      handoffs: [handoff("train", "Train · LVH voltage with mimics", "left_ventricular_hypertrophy", "discriminate", "faded"), handoff("clinical", "Clinical · LVH in ward context", "lvh_chronic_context", "apply_in_context", "guided", { focus: "left_ventricular_hypertrophy", subskill: "apply_in_context", lane: "ward", length: 5 })],
     }),
     buildScene({
       id: "m07-s3", partId: "m07-part-2", minutes: 8,
@@ -623,7 +623,7 @@ export const M07_CHAMBERS_VOLTAGE_MODULE: ProductionModule = {
       caseContract: caseSpec({ selectorLessonId: "lead-territories", requestedConcept: "poor_r_wave_progression", minimumTier: "A", requiredEvidence: ["V1–V6 R/S sequence", "Calibration and placement", "Conduction/chamber context", "Comparable prior when used", "Territorial evidence for infarction possibility"], requiredLeads: ["V1", "V2", "V3", "V4", "V5", "V6"], allowedUses: ["scored_recognition", "transfer"], fallback: "lock_scene", forbiddenClaims: ["Acute infarction from poor progression", "Temporal change from invalid prior"] }),
       interactions: s5Interactions, minimumScore: 0.86,
       connections: { recallFrom: "M2 placement, M5 conduction, and M7-S4 progression", changesNow: "Progression opens a rule-based differential rather than a diagnosis", reuseNext: "M9 Q waves and comparison validity", clinicalUse: "Prevents machine-read anterior-infarct overcall" },
-      handoffs: [handoff("train", "Train · Poor-progression differential", "poor_r_wave_progression", "discriminate", "faded"), handoff("clinical", "Clinical · Old or new", "ecg_comparison", "apply_in_context", "guided")],
+      handoffs: [handoff("train", "Train · Poor-progression differential", "poor_r_wave_progression", "discriminate", "faded")],
     }),
     buildScene({
       id: "m07-s6", partId: "m07-part-4", minutes: 7,
@@ -645,7 +645,7 @@ export const M07_CHAMBERS_VOLTAGE_MODULE: ProductionModule = {
       caseContract: caseSpec({ selectorLessonId: "hypertrophy", requestedConcept: "chamber_pattern_mixed", minimumTier: "A", requiredEvidence: ["Contract-valid atrial, LVH, RVH, mimic, and limited cases", "Calibration", "Two diagnostic regions", "Relevant measurement", "Confidence ceiling"], requiredLeads: ["I", "II", "aVF", "aVL", "V1", "V3", "V5", "V6"], allowedUses: ["measurement", "scored_recognition", "transfer"], fallback: "lock_scene", forbiddenClaims: ["Chamber diagnosis from one weak feature", "Infarction from poor progression", "Acute or treatment claim"] }),
       interactions: s7Interactions, minimumScore: 0.82,
       connections: { recallFrom: "All M7 evidence bundles", changesNow: "Targets are unannounced and evidence, synthesis, and confidence are graded separately", reuseNext: "M8 repolarization and M9 ischemia mimics", clinicalUse: "A concise evidence-limited chamber/progression read" },
-      handoffs: [handoff("train", "Train · Your weakest chamber contrast", "chamber_pattern_mixed", "discriminate", "independent"), handoff("rapid", "Rapid · Mixed whole-ECG reads", "chamber_pattern_mixed", "synthesize", "independent"), handoff("clinical", "Clinical · Pre-op or chronic-disease review", "chamber_chronic_context", "apply_in_context", "faded")],
+      handoffs: [handoff("train", "Train · Your weakest chamber contrast", "chamber_pattern_mixed", "discriminate", "independent"), handoff("rapid", "Rapid · LVH recognition", "chamber_pattern_mixed", "synthesize", "independent", { focus: "left_ventricular_hypertrophy", receiptConcept: "left_ventricular_hypertrophy", subskill: "recognize", pace: "untimed", suggestedLength: 5 }), handoff("clinical", "Clinical · LVH in ward context", "chamber_chronic_context", "apply_in_context", "faded", { focus: "left_ventricular_hypertrophy", subskill: "apply_in_context", lane: "ward", length: 5 })],
     }),
   ],
 };

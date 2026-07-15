@@ -20,6 +20,7 @@ from app.clinical.real_items import (
     APPLICATION_OBJECTIVES_BY_SCENARIO,
     AUTHORED_VARIANTS_BY_SCENARIO,
     CLINICAL_FAMILY_BY_SCENARIO,
+    MATCHING_ORDINALS_BY_SCENARIO,
     MINIMUM_CLINICAL_BANK_SIZE,
     REAL_ECGS_BY_SCENARIO,
     _OLD_NEUTRAL_CLONE_MARKERS,
@@ -33,6 +34,7 @@ from app.objectives import (
     OBJECTIVES,
 )
 from app.ontology import CONCEPT_BY_ID
+from app.subskill_tasks import training_independent_receipt_available
 
 client = TestClient(app)
 
@@ -46,7 +48,7 @@ def test_every_serving_item_resolves_to_an_allowed_real_packet() -> None:
         len(ids) for ids in REAL_ECGS_BY_SCENARIO.values()
     )
     question_types = {item.question_type for item in served}
-    assert {"click", "spoterror", "triage", "stepwise", "mcq"} <= question_types
+    assert {"click", "spoterror", "fillin", "matching", "triage", "stepwise", "mcq"} <= question_types
     for item in served:
         packet = assert_learner_item_provenance(item, clinical_packet)
         assert packet["source"] in LEARNER_CLINICAL_SOURCES
@@ -63,7 +65,7 @@ def test_interaction_mix_is_balanced_and_trace_native() -> None:
     served = list(clinical_item_store.list_for_serving(status="harness_pass"))
     counts = Counter(item.question_type for item in served)
     assert max(counts.values()) / len(served) <= 0.5
-    trace_native = sum(counts[kind] for kind in ("click", "spoterror", "stepwise"))
+    trace_native = sum(counts[kind] for kind in ("click", "spoterror", "fillin", "stepwise"))
     assert trace_native / len(served) >= 0.30
 
 
@@ -75,7 +77,7 @@ def test_hundred_case_bank_preserves_lane_and_interaction_diversity() -> None:
     assert set(lanes) == {"clinic", "ward", "ed"}
     assert min(lanes.values()) >= 30
     assert max(lanes.values()) - min(lanes.values()) <= 1
-    assert {"click", "spoterror", "triage", "stepwise", "mcq"} <= set(types)
+    assert {"click", "spoterror", "fillin", "matching", "triage", "stepwise", "mcq"} <= set(types)
     assert max(types.values()) / len(served) <= 0.25
 
 
@@ -117,21 +119,81 @@ def test_authored_bank_has_declared_clinical_family_breadth_and_all_items_repass
         assert report.passed, f"{item.item_id}: {report.failing_checks()}"
 
 
-def test_clinical_competency_registry_exposes_only_declared_canonical_cells() -> None:
+def test_matching_bank_uses_twelve_distinct_real_ecgs_with_varied_accessible_order() -> None:
+    served = list(clinical_item_store.list_for_serving(status="harness_pass"))
+    matching = [item for item in served if item.question_type == "matching"]
+
+    assert sum(len(ordinals) for ordinals in MATCHING_ORDINALS_BY_SCENARIO.values()) == 12
+    assert len(matching) == 12
+    assert Counter(item.situation for item in matching) == {"clinic": 4, "ward": 4, "ed": 4}
+    assert len({item.ecg_id for item in matching}) == 12
+    assert len({tuple(choice.id for choice in item.matching_task.choices) for item in matching}) >= 3
+    assert len({tuple(row.source_type for row in item.matching_task.rows) for item in matching}) >= 3
+    for item in matching:
+        assert item.application_objectives == []
+        assert {row.id for row in item.matching_task.rows} == {"clause-a", "clause-b", "clause-c"}
+        assert not item.options and not item.steps and not item.machine_read
+        assert item.roi_target is None and item.fill_in_task is None
+        packet = clinical_packet(item.ecg_id)
+        report = run_harness(item, packet, None)
+        assert report.passed, f"{item.item_id}: {report.failing_checks()}"
+
+
+def test_matching_harness_rejects_a_key_or_reference_not_bound_to_packet_manifest() -> None:
+    item = next(
+        item.model_copy(deep=True)
+        for item in clinical_item_store.list_for_serving(status="harness_pass")
+        if item.question_type == "matching"
+    )
+    packet = clinical_packet(item.ecg_id)
+    ecg_row = next(row for row in item.matching_task.rows if row.source_type == "ecg_support")
+    ecg_row.correct_choice_id = "context"
+    ecg_row.source_reference = "invented_objective"
+
+    report = run_harness(item, packet, None)
+    scoring = next(check for check in report.results if check.check == "scoring_schema")
+    assert scoring.passed is False
+    assert scoring.hard_stop is True
+    assert any("key that disagrees" in message for message in scoring.messages)
+    assert any("source_reference" in message for message in scoring.messages)
+
+
+def test_clinical_application_receipts_are_limited_to_declared_canonical_cells() -> None:
     declared_application = {
         objective
         for objectives in APPLICATION_OBJECTIVES_BY_SCENARIO.values()
         for objective in objectives
     }
     assert declared_application == set(CLINICAL_APPLICATION_CONCEPTS)
-    exposed_application = {
+
+    # Every canonical ECG concept may rehearse the information boundary in
+    # Training, but that resting-ECG exercise remains formative.  The registry
+    # must not confuse broad practice availability with independently assessed
+    # clinical application.
+    formative_training_application = {
         concept
         for concept in CONCEPT_BY_ID
         if "apply_in_context" in OBJECTIVES[concept].allowed_subskills
     }
-    assert exposed_application == set(CLINICAL_APPLICATION_CONCEPTS)
+    assert formative_training_application == set(CONCEPT_BY_ID)
+    assert all(
+        not training_independent_receipt_available(concept, "apply_in_context")
+        for concept in formative_training_application
+    )
 
     served = list(clinical_item_store.list_for_serving(status="harness_pass"))
+    served_application = {
+        objective
+        for item in served
+        for objective in item.application_objectives
+    }
+    assert served_application == declared_application
+    assert all(
+        set(item.application_objectives)
+        <= {claim.objective_id for claim in item.evidence_manifest.ecg_supports}
+        for item in served
+    )
+
     trace_localized = {
         item.roi_target.concept
         for item in served

@@ -2,8 +2,8 @@
 
 import { Brain, CornerDownLeft, MessageSquare, Quote, Send, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type TutorMessageBody } from "@/lib/api";
-import type { TutorMessageResponse, ViewerAction } from "@/lib/types";
+import { api, type AdaptiveTutorContextRef, type ClinicalShiftTutorContextRef, type ClinicalTutorContextRef, type TutorMessageBody } from "@/lib/api";
+import type { EcgCapability, TutorMessageResponse, ViewerAction } from "@/lib/types";
 
 type ChatTurn = {
   id: string;
@@ -15,14 +15,35 @@ type ChatTurn = {
   suggestedNextStep?: string;
   onLessonTopic?: boolean;
   guidanceMode?: "reserved" | "quota_fallback";
+  deliveryNotice?: string;
 };
+
+function tutorDeliveryNotice(raw: unknown) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  const remote = value.remoteCall && typeof value.remoteCall === "object"
+    ? value.remoteCall as { attempted?: unknown; status?: unknown }
+    : null;
+  if (value.schemaStatus === "fallback" || value.schemaError) {
+    return "Built-in grounded guidance replaced a tutor response that did not pass validation.";
+  }
+  if (value.provider === "grounded-fallback" && remote?.attempted && remote.status !== "success") {
+    return "Built-in grounded guidance was used because the live tutor was unavailable.";
+  }
+  return undefined;
+}
 
 type TutorChatProps = {
   mode: "tutorial" | "practice" | "freeform";
   /** Learner-facing role for this moment, such as Coach, Debrief, or Attending challenge. */
   roleLabel?: string;
-  caseId?: string | null;
+  /** Opaque ECG capability used only for request scoping; never rendered. */
+  ecgRef?: EcgCapability | null;
+  /** @deprecated Compatibility alias for legacy Guided modules. */
+  caseId?: EcgCapability | null;
   lessonId?: string | null;
+  /** Durable thread partition within a lesson/case, such as one Guided scene. */
+  threadScope?: string | null;
   /** Prompt to re-send when the learner drifts off-topic and clicks "Return to lesson". */
   lessonReturnPrompt?: string;
   /** Learner-facing label for the exact paused waypoint. */
@@ -35,6 +56,12 @@ type TutorChatProps = {
   openingPrompt?: string;
   /** Extra viewer context (e.g. selected point) merged into each request. */
   viewerState?: Record<string, unknown>;
+  /** Server-issued reference to a durably graded Clinical answer. */
+  clinicalContext?: ClinicalTutorContextRef | null;
+  /** Owner-bound reference to a completed, server-graded Clinical shift. */
+  clinicalShiftContext?: ClinicalShiftTutorContextRef | null;
+  /** Server-issued, owner-bound reference to the current deterministic mastery plan. */
+  adaptiveContext?: AdaptiveTutorContextRef | null;
   /** Called whenever a tutor reply carries viewer actions, so the page can drive the ECGViewer. */
   onViewerActions?: (actions: ViewerAction[]) => void;
   /** Records that learner-visible assistance was requested in the active assessment step. */
@@ -54,19 +81,25 @@ function nextTurnId() {
 export function TutorChat({
   mode,
   roleLabel,
+  ecgRef,
   caseId,
   lessonId,
+  threadScope,
   lessonReturnPrompt,
   lessonReturnLabel,
   waypointLabel,
   onReturnToLesson,
   openingPrompt,
   viewerState,
+  clinicalContext,
+  clinicalShiftContext,
+  adaptiveContext,
   onViewerActions,
   onAssistance,
   resetKey,
   collapsedByDefault = false,
 }: TutorChatProps) {
+  const requestEcgRef = ecgRef ?? caseId ?? null;
   const [threadId, setThreadId] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
@@ -92,11 +125,11 @@ export function TutorChat({
     setTyped("");
     setReturnedTutorTurnId(null);
     setCollapsed(collapsedByDefault);
-  }, [resetKey]);
+  }, [resetKey, collapsedByDefault]);
 
   useEffect(() => {
     let active = true;
-    const hasStableContext = Boolean(caseId || lessonId || mode === "freeform");
+    const hasStableContext = Boolean(requestEcgRef || lessonId || mode === "freeform");
     if (!hasStableContext) return () => { active = false; };
     // Context changes must never leave another ECG's conversation visible
     // while its own history is being loaded.
@@ -106,7 +139,7 @@ export function TutorChat({
     setTyped("");
     setReturnedTutorTurnId(null);
     setRestoring(true);
-    api.tutorThreads({ mode, lessonId, caseId, limit: 1 })
+    api.tutorThreads({ mode, lessonId, ecgRef: requestEcgRef, scopeKey: threadScope, limit: 1 })
       .then(async ({ threads }) => {
         if (!active || !threads[0]) return;
         const restored = await api.tutorThread(threads[0].threadId);
@@ -126,6 +159,7 @@ export function TutorChat({
             && (message.meta.remoteUsage.status === "reserved" || message.meta.remoteUsage.status === "quota_fallback")
             ? message.meta.remoteUsage.status
             : undefined,
+          deliveryNotice: tutorDeliveryNotice(message.meta),
         })));
         // Reapply only the most recent grounded tutor annotation. This
         // restores the visual teaching state without replaying stale actions
@@ -140,7 +174,7 @@ export function TutorChat({
       })
       .finally(() => { if (active) setRestoring(false); });
     return () => { active = false; };
-  }, [resetKey, mode, caseId, lessonId]);
+  }, [resetKey, mode, requestEcgRef, lessonId, threadScope]);
 
   const latestTutor = useMemo(() => {
     for (let i = turns.length - 1; i >= 0; i -= 1) {
@@ -149,30 +183,11 @@ export function TutorChat({
     return null;
   }, [turns]);
 
-  // Typewriter reveal of the most recent tutor message.
+  // Present one stable answer. Character-by-character updates add latency,
+  // repeatedly move the scroll container, and create a different experience
+  // for visual and screen-reader users.
   useEffect(() => {
-    if (!latestTutor) {
-      setTyped("");
-      return;
-    }
-    const full = latestTutor.content;
-    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-      setTyped(full);
-      return;
-    }
-    setTyped("");
-    let index = 0;
-    const step = Math.max(1, Math.round(full.length / 90));
-    const timer = setInterval(() => {
-      index += step;
-      if (index >= full.length) {
-        setTyped(full);
-        clearInterval(timer);
-      } else {
-        setTyped(full.slice(0, index));
-      }
-    }, 16);
-    return () => clearInterval(timer);
+    setTyped(latestTutor?.content ?? "");
   }, [latestTutor?.id, latestTutor?.content]);
 
   useEffect(() => {
@@ -184,7 +199,6 @@ export function TutorChat({
     async (message: string) => {
       const trimmed = message.trim();
       if (!trimmed || sending) return;
-      onAssistance?.();
       setSending(true);
       setError(null);
       const userTurn: ChatTurn = { id: nextTurnId(), role: "user", content: trimmed };
@@ -194,35 +208,46 @@ export function TutorChat({
         const body: TutorMessageBody = {
           mode,
           threadId: threadId ?? undefined,
-          caseId: caseId ?? undefined,
+          caseId: requestEcgRef ?? undefined,
           lessonId: lessonId ?? undefined,
+          scopeKey: threadScope ?? undefined,
           message: trimmed,
           viewerState,
+          clinicalContext: clinicalContext ?? undefined,
+          clinicalShiftContext: clinicalShiftContext ?? undefined,
+          adaptiveContext: adaptiveContext ?? undefined,
         };
         const response: TutorMessageResponse = await api.tutorMessage(body);
         setThreadId(response.threadId);
+        const tutorContent = response.tutorMessage || response.feedback || "(No tutor message returned.)";
         const tutorTurn: ChatTurn = {
           id: nextTurnId(),
           role: "tutor",
-          content: response.tutorMessage || response.feedback || "(No tutor message returned.)",
+          content: tutorContent,
           socraticQuestion: response.socraticQuestion,
           citedEvidence: response.citedEvidence ?? [],
           uncertaintyWarnings: response.uncertaintyWarnings ?? [],
           suggestedNextStep: response.suggestedNextStep,
           onLessonTopic: response.onLessonTopic,
           guidanceMode: response.remoteUsage?.status,
+          deliveryNotice: tutorDeliveryNotice(response),
         };
         setTurns((current) => [...current, tutorTurn]);
+        // Assistance changes the evidence boundary only after the learner has
+        // actually received a substantive tutor response. A failed request is
+        // still an independent attempt.
+        if ((response.tutorMessage || response.feedback || "").trim()) onAssistance?.();
         if (response.viewerActions?.length) {
           onViewerActions?.(response.viewerActions);
         }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "The tutor could not respond.");
+      } catch {
+        setInput(trimmed);
+        setError("The tutor could not respond. Your question is still here—try again when you are ready.");
       } finally {
         setSending(false);
       }
     },
-    [sending, mode, threadId, caseId, lessonId, viewerState, onViewerActions, onAssistance],
+    [sending, mode, threadId, requestEcgRef, lessonId, threadScope, viewerState, clinicalContext, clinicalShiftContext, adaptiveContext, onViewerActions, onAssistance],
   );
 
   function onSubmit(event: React.FormEvent) {
@@ -316,6 +341,7 @@ export function TutorChat({
                   {turn.guidanceMode === "quota_fallback" ? (
                     <p className="chat-next muted">Built-in grounded guidance is active; the live tutor budget has reached its current limit.</p>
                   ) : null}
+                  {turn.deliveryNotice ? <p className="chat-next muted">{turn.deliveryNotice}</p> : null}
                 </>
               ) : null}
             </div>
