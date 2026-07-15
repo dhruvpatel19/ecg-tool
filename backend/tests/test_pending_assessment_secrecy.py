@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 
 from fastapi.testclient import TestClient
@@ -90,7 +91,7 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
         # historical `demo` fixture, which may already own a committed attempt
         # from an earlier test and therefore qualifies for the product's
         # committed-owner debrief exception.
-        _register(outsider, "sec_outsider")
+        outsider_user = _register(outsider, "sec_outsider")
         started = owner.post(
             "/training/campaigns",
             json={
@@ -199,9 +200,10 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
         )
         assert generic_commit.status_code == 409
 
-        # Guided receives a server-selected non-pending case and signed grading
-        # context. That capability is owner- and case-bound.
-        guided = owner.get("/tutorials/orientation")
+        # A separate learner receives a server-selected non-pending Guided case
+        # and signed grading context. That capability is owner- and case-bound,
+        # while the Training learner's reassessment history remains isolated.
+        guided = outsider.get("/tutorials/orientation")
         assert guided.status_code == 200, guided.text
         guided_body = guided.json()
         guided_case = guided_body["recommendedCase"]["caseId"]
@@ -217,13 +219,13 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
                 "SELECT ecg_id FROM learner_events WHERE owner_id = ? "
                 "AND mode = 'guided' AND session_id = 'tutorial:orientation' "
                 "ORDER BY occurred_at DESC LIMIT 1",
-                (owner_user["userId"],),
+                (outsider_user["userId"],),
             ).fetchone()[0])
         guided_source = repo.get_case(guided_canonical)
         rois = ((guided_source or {}).get("ptbxl_plus") or {}).get("fiducials", {}).get("rois", [])
         if rois:
             target = rois[0]
-            immediate = owner.post(
+            immediate = outsider.post(
                 f"/grade/click/{guided_case}",
                 json={
                     "lead": target["lead"],
@@ -252,6 +254,26 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
                 "guidedContext": context,
             },
         ).status_code == 403
+        guided_commit = outsider.post(
+            "/learning-events/guided",
+            json={
+                "eventKey": f"pending-secrecy-guided:{uuid.uuid4().hex}",
+                "moduleId": "leads-vectors",
+                "sceneId": "pending-assessment-secrecy",
+                "interactionId": "normal-recognition",
+                "concept": "normal_ecg",
+                "subskills": ["recognize"],
+                "score": 1.0,
+                "correct": True,
+                "attempts": 1,
+                "assistance": "independent",
+                "caseId": guided_case,
+                "guidedContext": context,
+                "caseProvenance": "real_eligible",
+                "caseEligible": True,
+            },
+        )
+        assert guided_commit.status_code == 200, guided_commit.text
 
         committed = owner.post(
             f"/training/campaigns/{campaign_id}/submit",
@@ -280,6 +302,10 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
         # distinct roster, and its new pending item remains sealed.
         retired = owner.post(f"/training/campaigns/{campaign_id}/abandon")
         assert retired.status_code == 200, retired.text
+        other_retired = other.post(
+            f"/training/campaigns/{other_campaign_id}/abandon"
+        )
+        assert other_retired.status_code == 200, other_retired.text
         restarted = owner.post(
             "/training/campaigns",
             json={
@@ -288,6 +314,18 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
                 "length": 10,
             },
         )
+        if os.getenv("ECG_TEST_USE_CI_CORPUS") == "1":
+            # The committed CI fixture is the 103-real-PTB Clinical subset and
+            # intentionally lacks another same-role ECG for this exact 10-item
+            # roster. In that constrained corpus the safe contract is to fail
+            # closed. The full release corpus continues through the replacement
+            # assertions below.
+            assert restarted.status_code == 409, restarted.text
+            assert (
+                restarted.json()["detail"]["code"]
+                == "training_live_exposure_conflict"
+            )
+            return
         assert restarted.status_code == 200, restarted.text
         restarted_body = restarted.json()
         restarted_campaign_id = restarted_body["campaign"]["campaignId"]

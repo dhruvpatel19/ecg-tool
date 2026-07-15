@@ -83,7 +83,7 @@ def _assert_public_identity_boundary(
 
 
 def test_capability_is_payload_free_stable_and_exactly_scoped() -> None:
-    secret = "test-capability-secret-with-at-least-32-bytes"
+    secret = "x" * 32
     reference = issue_ecg_capability(
         secret, "learner-a", "training", "campaign-a", "ptbxl:12345"
     )

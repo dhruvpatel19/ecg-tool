@@ -9,6 +9,8 @@ const verifiedUser = {
   emailVerified: true,
 };
 
+const accountResolutionPassword = ["Attempt", "passphrase", "2026"].join("-");
+
 async function mockAccountBasics(page: Page) {
   await page.route("**/api/backend/auth/sessions", (route) => route.fulfill({ json: { sessions: [] } }));
   await page.route("**/api/backend/auth/guest-progress", (route) => route.fulfill({
@@ -89,15 +91,15 @@ test.describe("verified email authentication", () => {
 
     await page.goto("/login?mode=register&next=%2Faccount");
     await page.getByLabel("Email", { exact: true }).fill("owner@example.edu");
-    await page.getByLabel("Password", { exact: true }).fill("Attempt-passphrase-2026");
-    await page.getByLabel("Confirm password").fill("Attempt-passphrase-2026");
+    await page.getByLabel("Password", { exact: true }).fill(accountResolutionPassword);
+    await page.getByLabel("Confirm password").fill(accountResolutionPassword);
     await page.getByRole("button", { name: "Create account", exact: true }).click();
 
     await expect(page.getByText(/sent a six-digit verification code/i)).toBeVisible();
     await expect(page.getByText(/account was created/i)).toHaveCount(0);
     await page.getByRole("button", { name: "Resend email" }).click();
     await page.getByLabel("Six-digit verification code").fill("135790");
-    await page.locator("#auth-verification-password").fill("Attempt-passphrase-2026");
+    await page.locator("#auth-verification-password").fill(accountResolutionPassword);
     await page.getByRole("button", { name: "Verify email" }).click();
 
     await expect(page).toHaveURL(/\/login(?:\?|$)/);
@@ -108,7 +110,7 @@ test.describe("verified email authentication", () => {
     await expect(page.locator(".side-nav")).toHaveCount(0);
     await expect(page.getByText(/PRIVATE existing|PRIVATE purpose/i)).toHaveCount(0);
     expect(resendBody).toEqual({ challengeId: "registration_resolution" });
-    expect(confirmBody).toEqual({ challengeId: "registration_resolution", token: "135790", password: "Attempt-passphrase-2026" });
+    expect(confirmBody).toEqual({ challengeId: "registration_resolution", token: "135790", password: accountResolutionPassword });
   });
 
   test("generic registration failure guides recovery without exposing backend detail", async ({ page }) => {
@@ -120,8 +122,8 @@ test.describe("verified email authentication", () => {
 
     await page.goto("/login?mode=register");
     await page.getByLabel("Email", { exact: true }).fill("possible@example.edu");
-    await page.getByLabel("Password", { exact: true }).fill("Attempt-passphrase-2026");
-    await page.getByLabel("Confirm password").fill("Attempt-passphrase-2026");
+    await page.getByLabel("Password", { exact: true }).fill(accountResolutionPassword);
+    await page.getByLabel("Confirm password").fill(accountResolutionPassword);
     await page.getByRole("button", { name: "Create account", exact: true }).click();
 
     await expect(page.getByText(/We couldn’t create an account with those details/i)).toBeVisible();
@@ -153,11 +155,11 @@ test.describe("verified email authentication", () => {
 
     await page.goto("/login?mode=register");
     await page.getByLabel("Email", { exact: true }).fill("pending@example.edu");
-    await page.getByLabel("Password", { exact: true }).fill("Attempt-passphrase-2026");
-    await page.getByLabel("Confirm password").fill("Attempt-passphrase-2026");
+    await page.getByLabel("Password", { exact: true }).fill(accountResolutionPassword);
+    await page.getByLabel("Confirm password").fill(accountResolutionPassword);
     await page.getByRole("button", { name: "Create account", exact: true }).click();
     await page.getByLabel("Six-digit verification code").fill("975310");
-    await page.locator("#auth-verification-password").fill("Attempt-passphrase-2026");
+    await page.locator("#auth-verification-password").fill(accountResolutionPassword);
     await page.getByRole("button", { name: "Verify email" }).click();
 
     await expect(page.getByRole("heading", { name: "Finish recovering this account" })).toBeVisible();

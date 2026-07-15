@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 import re
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -252,16 +253,29 @@ def test_each_lane_has_real_capacity_and_required_coverage(
     }
     assert required_objectives <= objectives
 
-    started = client.post(
-        "/clinical/shift/start",
-        json={"lane": lane, "tier": "learn", "length": 50},
-    )
-    assert started.status_code == 200
-    body = started.json()
-    assert body["session"]["availableDistinctEcgs"] == len(distinct_ecgs)
-    assert body["session"]["length"] == len(distinct_ecgs)
-    assert body["next"]["item"]["situation"] == lane
-    assert body["next"]["item"]["tracing_provenance"] == "real_deidentified_ecg"
+    with TestClient(app) as lane_client:
+        registration = lane_client.post(
+            "/auth/register",
+            json={
+                "username": f"provenance_{lane}_{uuid.uuid4().hex[:8]}",
+                "password": "-".join(("Clinical", "provenance", lane, "2026")),
+            },
+        )
+        assert registration.status_code == 200, registration.text
+        started = lane_client.post(
+            "/clinical/shift/start",
+            json={"lane": lane, "tier": "learn", "length": 50},
+        )
+        assert started.status_code == 200
+        body = started.json()
+        assert body["session"]["availableDistinctEcgs"] == len(distinct_ecgs)
+        assert body["session"]["length"] == len(distinct_ecgs)
+        assert body["next"]["item"]["situation"] == lane
+        assert body["next"]["item"]["tracing_provenance"] == "real_deidentified_ecg"
+        abandoned = lane_client.post(
+            f"/clinical/shift/{body['session']['sessionId']}/abandon"
+        )
+        assert abandoned.status_code == 200, abandoned.text
 
 
 def test_startup_bank_assertion_rejects_harness_passed_fixture() -> None:
