@@ -1,5 +1,7 @@
 # Clerkship learner live report
 
+> **Historical audit snapshot.** This report records the build and date named below; it is retained as defect-discovery evidence, not current product status. See [the remediation ledger](../PRODUCT_REMEDIATION_LEDGER.md) for reconciled fixes, verification, and remaining gates.
+
 ## Persona and test conditions
 
 I tested as a time-pressured third-year medical student on clerkship with average ECG knowledge and a preference for learning through cases. The viewport was 1280 × 800, approximating a 13-inch laptop. I interacted with the running frontend at `http://localhost:3100` and the live backend at `http://localhost:8000` on July 10, 2026.

@@ -54,6 +54,9 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     env: {
       ECG_BACKEND_API_BASE: BACKEND_BASE,
+      // Never let an E2E dev server replace the production `.next` directory
+      // used by a concurrently running local demo (`next start`).
+      NEXT_DIST_DIR: `.next-e2e-${PORT}`,
     },
   },
 });

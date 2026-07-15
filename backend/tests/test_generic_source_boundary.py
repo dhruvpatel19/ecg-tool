@@ -216,7 +216,9 @@ def test_generic_practice_tutorial_and_legacy_review_exclude_target_only_and_mim
     )
     assert tutorial.status_code == 200
     assert tutorial.json()["selection"]["requestedConceptUnavailable"] is True
-    assert tutorial.json()["recommendedCase"]["caseId"] == "ptb-allowed"
+    assert tutorial.json()["recommendedCase"]["caseId"].startswith("ec_")
+    assert "ptb-allowed" not in tutorial.text
+    assert tutorial.json()["recommendedPacket"]["source"] == "audited_waveform"
 
     review = client.post(
         "/review/start",
@@ -226,7 +228,9 @@ def test_generic_practice_tutorial_and_legacy_review_exclude_target_only_and_mim
             "maxCases": 5,
         },
     )
-    assert review.status_code == 200
-    assert review.json()["case"] is None
-    assert review.json()["session"]["status"] == "exhausted"
-
+    assert review.status_code == 410
+    assert review.json()["detail"]["code"] == "legacy_review_deprecated"
+    assert review.json()["detail"]["replacement"] == {
+        "method": "GET",
+        "path": "/adaptive/plan",
+    }

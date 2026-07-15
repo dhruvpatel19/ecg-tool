@@ -22,6 +22,12 @@ const FOUNDATIONS_KEY_PREFIX = "foundations_state_v1:";
 const FOUNDATIONS_BEST_PREFIX = "found_best:";
 const PRODUCTION_KEY = "trace-production-curriculum-v1";
 
+export function validFoundationSceneIds(sceneIds: unknown, totalScenes = 13): string[] {
+  if (!Array.isArray(sceneIds)) return [];
+  const allowed = new Set(Array.from({ length: totalScenes }, (_, index) => `S${index}`));
+  return [...new Set(sceneIds.filter((value): value is string => typeof value === "string" && allowed.has(value)))];
+}
+
 export function readFoundationsProgress(totalScenes = 13, ownerKey = "guest"): ModuleProgress {
   const empty: ModuleProgress = { completedScenes: 0, totalScenes, done: false, started: false, bestAccuracy: 0 };
   if (typeof window === "undefined") return empty;
@@ -30,9 +36,17 @@ export function readFoundationsProgress(totalScenes = 13, ownerKey = "guest"): M
   try {
     const raw = window.localStorage.getItem(`${FOUNDATIONS_KEY_PREFIX}${ownerKey}`);
     if (raw) {
-      const s = JSON.parse(raw) as { completed?: Record<string, boolean>; current?: number };
-      completedScenes = s?.completed ? Object.keys(s.completed).length : 0;
-      started = completedScenes > 0 || (s?.current ?? 0) > 0;
+      const s = JSON.parse(raw) as { completed?: Record<string, boolean>; skipped?: Record<string, boolean>; current?: number };
+      const skipped = new Set(validFoundationSceneIds(
+        s?.skipped ? Object.entries(s.skipped).filter(([, value]) => value === true).map(([sceneId]) => sceneId) : [],
+        totalScenes,
+      ));
+      completedScenes = validFoundationSceneIds(
+        s?.completed ? Object.entries(s.completed).filter(([, complete]) => complete === true).map(([sceneId]) => sceneId) : [],
+        totalScenes,
+      ).filter((sceneId) => !skipped.has(sceneId)).length;
+      const currentScene = Number.isInteger(s?.current) ? Math.max(0, Math.min(totalScenes - 1, Number(s.current))) : 0;
+      started = completedScenes > 0 || currentScene > 0;
     }
   } catch {
     // corrupt/unavailable storage → treat as not started

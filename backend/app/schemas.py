@@ -193,7 +193,9 @@ class StructuredInterpretation(BaseModel):
     st_t: str = ""
     hypertrophy: str = ""
     synthesis: str = ""
-    selectedConcepts: list[str] = Field(default_factory=list)
+    # Eight is deliberately above the three frozen Rapid targets while still
+    # preventing a select-everything payload from gaming recognition recall.
+    selectedConcepts: list[str] = Field(default_factory=list, max_length=8)
 
 
 class AttemptRequest(BaseModel):
@@ -260,6 +262,9 @@ class GuidedLearningEventRequest(BaseModel):
         "structured_sweep",
     ] = "response"
     caseId: str | None = None
+    # Opaque, owner/lesson-bound context used to resolve a Guided ECG
+    # capability without accepting a corpus record id from the browser.
+    guidedContext: str | None = Field(default=None, max_length=240)
     caseProvenance: Literal["real_eligible", "real_reviewed", "authored_simulation", "contrast_only", "none"] = "none"
     caseEligible: bool = False
     misconceptions: list[str] = Field(default_factory=list)

@@ -204,6 +204,9 @@ class _AdaptiveStore:
     def recent_case_ids(self, learner_id: str) -> list[str]:
         return []
 
+    def protected_case_ids(self, learner_id: str, *, as_of=None) -> list[str]:
+        return []
+
     def retention_case_ids(self, learner_id: str, concept: str, subskill: str) -> list[str]:
         return []
 

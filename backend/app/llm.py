@@ -29,34 +29,101 @@ from .schemas import (
     TutorResponse,
     validate_tutor_response,
 )
+from .subskill_tasks import MECHANISM_EXPLANATIONS
 
 
 logger = logging.getLogger(__name__)
 
-# Concept cues for the deterministic mock to detect what the learner is asking about.
+# Precise concept cues for deterministic teaching. Specific constructs come
+# before shared measurements so a question about Mobitz II, QTc prolongation,
+# or an inferior infarction pattern keeps that construct as its primary topic.
+# Avoid bare territory/direction words and generic "rhythm"/"heart block"
+# aliases: those phrases occur in unrelated learner questions and previously
+# routed them to an unsupported diagnosis.
 _CONCEPT_CUES: dict[str, list[str]] = {
+    "atrial_fibrillation": ["atrial fibrillation", "afib", "a-fib"],
+    "atrial_flutter": ["atrial flutter", "flutter waves"],
+    "supraventricular_tachycardia": ["supraventricular tachycardia", "svt"],
+    "wide_complex_tachycardia": [
+        "wide complex tachycardia", "wide-complex tachycardia", "ventricular tachycardia", "wct", "vt",
+    ],
+    "bradycardia": ["bradycardia", "slow ventricular rate", "slow heart rate"],
+    "av_block_first_degree": [
+        "first degree av block", "first-degree av block", "first degree heart block",
+        "first-degree heart block", "1st degree av block",
+    ],
+    "av_block_second_degree_mobitz_i": [
+        "mobitz i", "mobitz 1", "wenckebach", "second degree av block type i",
+        "second-degree av block type i",
+    ],
+    "av_block_second_degree_mobitz_ii": [
+        "mobitz ii", "mobitz 2", "second degree av block type ii",
+        "second-degree av block type ii",
+    ],
+    "av_block_third_degree": [
+        "third degree av block", "third-degree av block", "complete heart block", "complete av block",
+    ],
+    "left_axis_deviation": ["left axis deviation", "leftward qrs axis"],
+    "right_axis_deviation": ["right axis deviation", "rightward qrs axis"],
+    "axis_normal": ["normal axis", "qrs axis", "frontal axis", "ecg axis", "axis"],
+    "incomplete_right_bundle_branch_block": [
+        "incomplete right bundle branch block", "incomplete rbbb", "irbbb",
+    ],
+    "right_bundle_branch_block": ["right bundle branch block", "rbbb", "right bundle block"],
+    "left_bundle_branch_block": ["left bundle branch block", "lbbb", "left bundle block"],
+    "nonspecific_intraventricular_conduction_delay": [
+        "nonspecific intraventricular conduction delay", "nonspecific ivcd", "nivcd",
+    ],
+    "left_anterior_fascicular_block": [
+        "left anterior fascicular block", "left anterior hemiblock", "lafb",
+    ],
+    "left_posterior_fascicular_block": [
+        "left posterior fascicular block", "left posterior hemiblock", "lpfb",
+    ],
+    "wolff_parkinson_white": [
+        "wolff parkinson white", "wolff-parkinson-white", "wpw", "pre-excitation", "preexcitation",
+    ],
+    "paced_rhythm": ["paced rhythm", "ventricular pacing", "atrial pacing", "pacemaker rhythm"],
+    "premature_ventricular_complex": [
+        "premature ventricular complex", "premature ventricular contraction", "pvc", "ventricular ectopy",
+    ],
+    "premature_atrial_complex": [
+        "premature atrial complex", "premature atrial contraction", "pac", "atrial ectopy",
+    ],
+    "qrs_duration": ["qrs duration", "qrs width", "wide qrs", "broad qrs", "wide complex"],
+    "r_wave_progression": [
+        "r wave progression", "r-wave progression", "precordial transition", "poor r wave progression",
+    ],
+    "left_ventricular_hypertrophy": ["left ventricular hypertrophy", "lvh"],
+    "right_ventricular_hypertrophy": ["right ventricular hypertrophy", "rvh"],
+    "atrial_enlargement": ["atrial enlargement", "left atrial enlargement", "right atrial enlargement"],
     "st_elevation": ["st elevation", "stemi", "elevated st"],
-    "st_depression": ["st depression"],
-    "t_wave_inversion": ["t wave inversion", "inverted t"],
-    "myocardial_infarction": ["mi", "infarct", "infarction"],
-    "anterior_mi": ["anterior"],
-    "inferior_mi": ["inferior"],
-    "qt_interval": ["qt", "qtc"],
-    "qtc_prolongation": ["long qt", "prolonged qt"],
+    "st_depression": ["st depression", "depressed st"],
+    "t_wave_inversion": ["t wave inversion", "t-wave inversion", "inverted t wave"],
+    "nonspecific_st_t_change": [
+        "nonspecific st t change", "nonspecific st-t change", "nonspecific repolarization change",
+    ],
+    "anterior_mi": ["anterior mi", "anterior infarct", "anterior myocardial infarction"],
+    "inferior_mi": ["inferior mi", "inferior infarct", "inferior myocardial infarction"],
+    "lateral_mi": ["lateral mi", "lateral infarct", "lateral myocardial infarction"],
+    "septal_mi": ["septal mi", "septal infarct", "septal myocardial infarction"],
+    "posterior_mi": ["posterior mi", "posterior infarct", "posterior myocardial infarction"],
+    "myocardial_infarction": ["myocardial infarction", "infarction", "infarct", "mi"],
+    "myocardial_ischemia": ["myocardial ischemia", "myocardial ischaemia", "ischemic st t", "ischemic st-t"],
+    "pathologic_q_waves": ["pathologic q wave", "pathologic q waves", "pathological q wave", "pathological q waves"],
+    "qtc_prolongation": [
+        "qtc prolongation", "prolonged qtc", "long qtc", "long qt syndrome", "prolonged qt",
+    ],
+    "qt_interval": ["qt interval", "uncorrected qt", "qt measurement", "qt"],
+    "electrolyte_drug_pattern": [
+        "electrolyte drug pattern", "electrolyte/drug pattern", "drug related ecg pattern",
+        "drug-related ecg pattern", "electrolyte ecg pattern",
+    ],
+    "pericarditis_pattern": ["pericarditis pattern", "pericarditis ecg", "ecg pattern of pericarditis"],
     "pr_ms": ["pr interval", "pr segment"],
-    "av_block_first_degree": ["av block", "first degree", "heart block"],
-    "axis_normal": ["axis"],
-    "left_axis_deviation": ["left axis"],
-    "right_axis_deviation": ["right axis"],
-    "right_bundle_branch_block": ["rbbb", "right bundle"],
-    "left_bundle_branch_block": ["lbbb", "left bundle"],
-    "wide_complex_tachycardia": ["wide complex tachycardia", "wide-complex tachycardia", "ventricular tachycardia", " wct", " vt"],
-    "qrs_duration": ["qrs", "wide complex", "bundle"],
-    "left_ventricular_hypertrophy": ["lvh", "hypertrophy", "voltage"],
-    "atrial_fibrillation": ["afib", "atrial fibrillation", "irregular"],
-    "sinus_rhythm": ["sinus", "rhythm", "p wave", "p activity", "atrial activity"],
-    "rate": ["rate", "bradycardia", "tachycardia", "heart rate"],
-    "normal_ecg": ["normal"],
+    "sinus_rhythm": ["sinus rhythm", "sinus-node rhythm", "sinus node rhythm", "sinus"],
+    "rate": ["heart rate", "ventricular rate", "rate"],
+    "normal_ecg": ["normal ecg", "normal ekg", "normal tracing"],
 }
 
 _MEASUREMENT_LABELS = {
@@ -165,7 +232,19 @@ def _curated_process_teaching(text: str) -> tuple[str, list[str]] | None:
     return None
 
 
+# Training already owns a reviewed, bounded electrical-mechanism registry for
+# every canonical ECG concept. Reuse it here so the adaptive plan coach and
+# keyless/remote-failure tutor cannot silently lose teaching support as the
+# learner moves beyond the original small demo set. Richer reviewed explanations
+# below intentionally override selected mechanisms; all remain general teaching,
+# never a finding or management recommendation for the displayed patient.
 _GENERAL_TEACHING: dict[str, str] = {
+    **MECHANISM_EXPLANATIONS,
+    "pr_ms": (
+        "The PR interval runs from P-wave onset to QRS onset and includes atrial activation plus conduction through "
+        "the AV node and His–Purkinje system. Interpret its measured duration together with the beat-to-beat "
+        "P-to-QRS relationship rather than using it alone to name a block pattern."
+    ),
     "rate": (
         "Estimate rate early in the systematic sequence because it narrows rhythm possibilities and affects interval "
         "interpretation; then assess regularity and the atrial-to-ventricular relationship."
@@ -211,6 +290,12 @@ _GENERAL_TEACHING: dict[str, str] = {
         "biomarkers, and context. Start by describing contiguous and reciprocal lead findings rather than jumping from one feature to a label."
     ),
 }
+
+
+def curated_general_teaching(concept: str | None) -> str | None:
+    """Return one reviewed general teaching statement for a canonical concept."""
+
+    return _GENERAL_TEACHING.get(str(concept or ""))
 
 
 # Contiguous-lead territories (ordered by preference among the leads we parse: II, V2, V5).
@@ -375,18 +460,89 @@ class MockProvider:
         asked = _detect_concepts(learner_message)
         duration = float((case.get("waveform") or {}).get("duration_sec", 10))
         viewer_state = context.get("viewerState") or {}
+        server_context = context.get("serverOwnedContext") or {}
 
-        if viewer_state.get("activity") == "adaptive_mastery_plan":
-            primary = viewer_state.get("primary") if isinstance(viewer_state.get("primary"), dict) else None
-            stages = viewer_state.get("prescribedStages") if isinstance(viewer_state.get("prescribedStages"), list) else []
-            explanation = str(viewer_state.get("explanation") or "The verified scheduler has not supplied an explanation.")
+        if (
+            server_context.get("phase") == "post_feedback"
+            and any(
+                cue in learner_message.casefold()
+                for cue in ("why", "my answer", "my decision", "alternative", "safe", "rationale")
+            )
+        ):
+            stored_feedback = server_context.get("storedFeedback") or {}
+            rubric = server_context.get("reviewedRubric") or {}
+            feedback = str(stored_feedback.get("feedback") or "Your stored response has been graded.")
+            rationale = str(rubric.get("actionRationale") or "")
+            message = feedback
+            if rationale:
+                message = f"{feedback} {rationale}"
+            cited = [
+                *[str(value) for value in (stored_feedback.get("teachingPoints") or [])],
+                *[str(value) for value in (rubric.get("acceptableRange") or [])],
+            ]
+            return json.dumps({
+                "tutorMessage": message,
+                "feedback": "This debrief uses the durable server grade and reviewed Clinical rubric, not browser-supplied scoring.",
+                "viewerActions": [],
+                "objectiveUpdates": [],
+                "misconceptions": [],
+                "uncertaintyWarnings": [
+                    "This authored vignette is formative and pending named clinician sign-off."
+                ],
+                "suggestedNextStep": "Name the ECG evidence, the supplied context, and the missing information separately.",
+                "socraticQuestion": "Which case fact changed the safest next action, and which fact remained unavailable?",
+                "citedEvidence": [value for value in cited if value][:6],
+                "onLessonTopic": True,
+            })
+
+        if server_context.get("kind") == "adaptive_mastery_plan":
+            primary = server_context.get("primary") if isinstance(server_context.get("primary"), dict) else None
+            stages = server_context.get("prescribedStages") if isinstance(server_context.get("prescribedStages"), list) else []
+            clinical_application = (
+                server_context.get("clinicalApplication")
+                if isinstance(server_context.get("clinicalApplication"), dict)
+                else None
+            )
+            explanation = str(server_context.get("explanation") or "The verified scheduler has not supplied an explanation.")
+            primary_guidance = str(server_context.get("primaryGuidance") or "").strip()
+            lowered_message = learner_message.casefold()
+            asks_for_guidance = any(
+                cue in lowered_message
+                for cue in (
+                    "what should i look",
+                    "what to look",
+                    "look for",
+                    "how do i",
+                    "how should i",
+                    "how can i",
+                    "recognize",
+                    "distinguish",
+                    "discriminator",
+                )
+            )
             if primary:
                 target = f"{primary.get('label') or primary.get('concept')} · {str(primary.get('subskill') or '').replace('_', ' ')}"
                 reason = str(primary.get("reason") or explanation)
                 first_stage = stages[0] if stages and isinstance(stages[0], dict) else {}
-                if any(cue in learner_message.lower() for cue in ("why", "first", "priority", "priorit")):
+                if clinical_application and any(
+                    cue in lowered_message
+                    for cue in ("clinical", "patient", "case", "apply")
+                ):
+                    message = (
+                        f"{clinical_application.get('title')} is the listed patient-context transfer because "
+                        f"{str(clinical_application.get('reason') or '')[:1].lower() + str(clinical_application.get('reason') or '')[1:]} "
+                        "It remains formative and cannot replace the independent ECG check."
+                    )
+                elif asks_for_guidance and primary_guidance:
+                    rationale = (
+                        f"{target} comes first because {reason[:1].lower() + reason[1:] if reason else explanation} "
+                        if any(cue in lowered_message for cue in ("why", "first", "priority", "priorit"))
+                        else f"For {target}, "
+                    )
+                    message = f"{rationale}What to look for: {primary_guidance}"
+                elif any(cue in lowered_message for cue in ("why", "first", "priority", "priorit")):
                     message = f"{target} comes first because {reason[:1].lower() + reason[1:] if reason else explanation}"
-                elif any(cue in learner_message.lower() for cue in ("durable", "improve", "move", "mastery", "evidence")):
+                elif any(cue in lowered_message for cue in ("durable", "improve", "move", "mastery", "evidence")):
                     message = (
                         f"For {target}, the next useful evidence is an independent answer on a new eligible ECG, followed by spaced retrieval and morphology diversity. "
                         "Hints and coached explanations remain formative; the verified scheduler, not this chat, decides when evidence is durable."
@@ -396,7 +552,7 @@ class MockProvider:
                         f"The verified queue currently anchors on {target}. {reason} "
                         f"Start with {first_stage.get('title') or 'the first prescribed stage'}, then keep the same discriminator in the later transfer stage."
                     )
-                cited = [reason, explanation]
+                cited = [reason, explanation, primary_guidance if asks_for_guidance else ""]
             else:
                 message = (
                     "No independent baseline is recorded yet, so the verified plan starts with an untimed mixed read. "
@@ -412,8 +568,113 @@ class MockProvider:
                 "misconceptions": [],
                 "uncertaintyWarnings": ["The plan coach cannot score work, alter the queue, or create ECG ground truth."],
                 "suggestedNextStep": str(first_stage.get("title") or "Open the first prescribed stage."),
-                "socraticQuestion": "What discriminator will you carry from focused practice into the mixed transfer read?",
+                "socraticQuestion": (
+                    "Which part of that evidence will you verify first on the next unannounced ECG?"
+                    if primary_guidance and asks_for_guidance
+                    else "What discriminator will you carry from focused practice into the mixed transfer read?"
+                ),
                 "citedEvidence": [item for item in cited if item][:3],
+                "onLessonTopic": True,
+            })
+
+        if server_context.get("kind") == "rapid_round_debrief":
+            deterministic = (
+                server_context.get("deterministicDebrief")
+                if isinstance(server_context.get("deterministicDebrief"), dict)
+                else {}
+            )
+            bridge = (
+                deterministic.get("crossConceptBridge")
+                if isinstance(deterministic.get("crossConceptBridge"), dict)
+                else None
+            )
+            pattern = str(
+                deterministic.get("recurringPattern")
+                or "The completed server record does not support a recurring pattern yet."
+            )
+            message = (
+                f"{pattern} {bridge.get('prompt')}"
+                if bridge
+                else pattern
+            )
+            return json.dumps({
+                "tutorMessage": message,
+                "feedback": "This debrief was reconstructed from the owner-bound completed Rapid ledger; browser summaries were ignored.",
+                "viewerActions": [],
+                "objectiveUpdates": [],
+                "misconceptions": [],
+                "uncertaintyWarnings": [
+                    "Chat can explain this completed round but cannot score it or change mastery."
+                ],
+                "suggestedNextStep": str(
+                    deterministic.get("suggestedNextStep")
+                    or "Use a new eligible ECG for the next independent check."
+                ),
+                "socraticQuestion": str(
+                    deterministic.get("nextStepQuestion")
+                    or "Which discriminator will you verify first on the next ECG?"
+                ),
+                "citedEvidence": [
+                    value
+                    for value in (
+                        pattern,
+                        bridge.get("prompt") if bridge else None,
+                        "Owner-bound completed Rapid answer and receipt ledger",
+                    )
+                    if value
+                ][:3],
+                "onLessonTopic": True,
+            })
+
+        if server_context.get("kind") == "clinical_shift_debrief":
+            debrief = server_context.get("debrief") if isinstance(server_context.get("debrief"), dict) else {}
+            priority = debrief.get("priorityConcept") if isinstance(debrief.get("priorityConcept"), dict) else None
+            bridge = debrief.get("crossConceptBridge") if isinstance(debrief.get("crossConceptBridge"), dict) else None
+            next_case = debrief.get("nextCaseProposal") if isinstance(debrief.get("nextCaseProposal"), dict) else None
+            completed = server_context.get("session") if isinstance(server_context.get("session"), dict) else {}
+            if priority:
+                pattern = (
+                    f"Across the {completed.get('answered', 0)} completed cases, "
+                    f"{priority.get('label') or priority.get('concept')} is the highest-priority evidenced concept: "
+                    f"{priority.get('missedCount', 0)} miss(es) and {priority.get('correctCount', 0)} correct application(s)."
+                )
+            else:
+                pattern = "The completed server grades do not support a concept-specific pattern yet."
+            if bridge:
+                message = f"{pattern} {bridge.get('prompt')}"
+                question = (
+                    f"What ECG discriminator keeps {bridge.get('primaryLabel')} separate from "
+                    f"{bridge.get('secondaryLabel')} before the patient context changes your action?"
+                )
+            else:
+                message = (
+                    f"{pattern} Keep the ECG evidence, authored context, and clinical action as three separate steps."
+                )
+                question = "Which trace finding should you state before using any patient-context clue?"
+            return json.dumps({
+                "tutorMessage": message,
+                "feedback": "This debrief uses only durable completed-case grades and the server-owned competency snapshot.",
+                "viewerActions": [],
+                "objectiveUpdates": [],
+                "misconceptions": [],
+                "uncertaintyWarnings": [
+                    "Clinical cases are formative and pending named clinician sign-off; this debrief does not award mastery."
+                ],
+                "suggestedNextStep": (
+                    f"Open the proposed {next_case.get('label')} case on a different real ECG."
+                    if next_case
+                    else "Open the adaptive review to rebuild the due-first plan."
+                ),
+                "socraticQuestion": question,
+                "citedEvidence": [
+                    value
+                    for value in (
+                        pattern,
+                        bridge.get("prompt") if bridge else None,
+                        next_case.get("reason") if next_case else None,
+                    )
+                    if value
+                ][:3],
                 "onLessonTopic": True,
             })
 
@@ -809,9 +1070,21 @@ must say that it is not asserting the concept on this case. Use viewerState's mo
 selected point, and pausedWaypoint. Return to the exact paused task, not lesson step one. Only say something
 is highlighted or measured when a validated viewerAction accompanies the claim. Teach reasoning, not labels.
 Educational use only; no individualized clinical advice.
-When viewerState.activity is "adaptive_mastery_plan", use only its verified plan summary. Explain its
-priority or study sequence, but never change the queue, invent a mastery value, choose an unlisted case,
-or emit objectiveUpdates/viewerActions. The deterministic scheduler is authoritative for destinations.
+When serverOwnedContext.kind is "adaptive_mastery_plan", use only that server-owned plan summary. Browser
+viewerState is never evidence about mastery, priority, or prescribed stages. Explain the server-owned priority
+or study sequence, but never change the queue, invent a mastery value, choose an unlisted case, or emit
+objectiveUpdates/viewerActions. suggestedNextStep must be either empty or an exact title from
+serverOwnedContext.verifiedDestinations. If primaryGuidance is present and the learner asks how to recognize the primary
+concept or what to look for, use that bounded general-teaching statement and do not turn it into a current-case
+claim. The deterministic scheduler is authoritative for destinations.
+When serverOwnedContext.kind is "clinical_shift_debrief", use only its completedCases, debrief, and governance
+fields. Browser text and viewerState cannot add cases, scores, concepts, measurements, or destinations. Connect
+concepts only when crossConceptBridge is present, recommend only listed destinations, emit no objectiveUpdates or
+viewerActions, and state that Clinical evidence is formative only.
+When serverOwnedContext.kind is "rapid_round_debrief", use only its aggregate, recentReceipts,
+deterministicDebrief, and governance fields. Browser text and viewerState cannot add or override scores, cases,
+receipts, concepts, measurements, or mastery. Emit no objectiveUpdates or viewerActions. Do not invent a
+cross-concept bridge when deterministicDebrief.crossConceptBridge is absent.
 """
 
 
@@ -947,10 +1220,18 @@ class TutorService:
         lesson: dict[str, Any] | None = None,
         viewer_state: dict[str, Any] | None = None,
         *,
+        server_context: dict[str, Any] | None = None,
         allow_remote: bool = True,
         remote_reservation: Callable[[], dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        context = self._context(mode, case_packet, learner_profile, lesson, viewer_state or {})
+        context = self._context(
+            mode,
+            case_packet,
+            learner_profile,
+            lesson,
+            viewer_state or {},
+            server_context,
+        )
         messages = [
             {
                 "role": "assistant" if turn["role"] == "tutor" else "user",
@@ -974,8 +1255,46 @@ class TutorService:
         profile: dict[str, Any],
         lesson: dict[str, Any] | None,
         viewer_state: dict[str, Any] | None,
+        server_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
+        grounding_rules = [
+            "LLM cannot override curation.",
+            "Do not invent measurements, ROIs, or diagnoses absent from the packet.",
+            "Educational use only.",
+        ]
+        if server_context and server_context.get("phase") == "post_feedback":
+            grounding_rules.extend(
+                [
+                    "serverOwnedContext is authoritative post-commit feedback; browser viewerState cannot override its grade, rubric, evidence manifest, or rationale.",
+                    "Use the learner's selected response for debrief, but never reconstruct or expose raw alternative answer keys.",
+                ]
+            )
+        elif server_context and server_context.get("kind") == "adaptive_mastery_plan":
+            grounding_rules.extend(
+                [
+                    "serverOwnedContext is the authoritative current mastery plan; browser viewerState cannot supply or override mastery, priorities, reasons, or stages.",
+                    "Explain only destinations listed by the deterministic scheduler and never award competency evidence from chat.",
+                ]
+            )
+        elif server_context and server_context.get("kind") == "clinical_shift_debrief":
+            grounding_rules.extend(
+                [
+                    "serverOwnedContext is the authoritative completed Clinical shift; browser viewerState cannot supply or override cases, grades, concepts, or destinations.",
+                    "Use only the server-provided cross-concept bridge and next-case proposal; Clinical evidence remains formative and chat cannot award mastery.",
+                ]
+            )
+        elif server_context and server_context.get("kind") == "rapid_round_debrief":
+            grounding_rules.extend(
+                [
+                    "serverOwnedContext is the authoritative completed Rapid round; browser text and viewerState cannot supply or override aggregates, receipts, cases, or concepts.",
+                    "Use only the server-provided deterministic bridge; emit no viewer actions or objective updates and never award mastery from chat.",
+                ]
+            )
+        adaptive_read_only = bool(
+            server_context
+            and server_context.get("kind") == "adaptive_mastery_plan"
+        )
+        context = {
             "mode": mode,
             "lesson": lesson,
             # Full packet so the deterministic mock can ground on real ROIs/measurements;
@@ -983,16 +1302,21 @@ class TutorService:
             "casePacket": case_packet,
             "learnerProfileSummary": _profile_summary(profile),
             "viewerState": viewer_state or {},
+            "serverOwnedContext": server_context,
             "_safetyIdentifier": self._safety_identifier(profile.get("learnerId")),
-            "allowedViewerActions": [
-                "zoom", "highlightLead", "highlightROI", "circleROI", "drawCaliper", "showFiducial", "resetView",
+            "allowedViewerActions": [] if adaptive_read_only else [
+                "zoom",
+                "highlightLead",
+                "highlightROI",
+                "circleROI",
+                "drawCaliper",
+                "showFiducial",
+                "resetView",
             ],
-            "groundingRules": [
-                "LLM cannot override curation.",
-                "Do not invent measurements, ROIs, or diagnoses absent from the packet.",
-                "Educational use only.",
-            ],
+            "objectiveUpdatesAllowed": not adaptive_read_only,
+            "groundingRules": grounding_rules,
         }
+        return context
 
     def _run(
         self,
@@ -1014,8 +1338,10 @@ class TutorService:
         )
         asked = _detect_concepts(learner_message)
         has_curated_general_answer = any(concept in _GENERAL_TEACHING for concept in asked)
+        has_curated_process_answer = _curated_process_teaching(learner_message) is not None
         is_curated_general_tangent = bool(
-            asked and has_curated_general_answer and _is_general_concept_question(learner_message)
+            (has_curated_general_answer or has_curated_process_answer)
+            and _is_general_concept_question(learner_message)
         )
         # Keep this evidence boundary deterministic even with a remote model:
         # an earlier production audit saw a model defend QRS axis with P waves.
@@ -1197,7 +1523,6 @@ def _profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
     ][:6]
     weak_objectives = list(dict.fromkeys(exact_weak + legacy_weak))[:6]
     return {
-        "learnerId": profile.get("learnerId"),
         "competencySource": "exact_subskill_receipts" if exact_rows else "legacy_objective_fallback",
         "weakObjectives": weak_objectives,
         "priorityCompetencies": compact,

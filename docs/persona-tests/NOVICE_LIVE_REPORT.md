@@ -1,5 +1,7 @@
 # Novice live-use report
 
+> **Historical audit snapshot.** This report records the build and date named below; it is retained as defect-discovery evidence, not current product status. See [the remediation ledger](../PRODUCT_REMEDIATION_LEDGER.md) for reconciled fixes, verification, and remaining gates.
+
 **Persona:** first-year medical student, low ECG confidence, visual/stepwise learner, keyboard-reliant  
 **Build tested:** `http://localhost:3100` on 2026-07-10  
 **Viewports:** 1366×768 and 390×844  

@@ -1,0 +1,20 @@
+# The GitHub integration checks out committed files and the Vercel project uses
+# `frontend` as its Root Directory. Ignore only local artifacts and secrets;
+# broad directory rules can remove tracked frontend build inputs unexpectedly.
+frontend/.next/
+frontend/.next-*/
+frontend/.playwright/
+frontend/.turbo/
+frontend/.vercel/
+frontend/blob-report/
+frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/
+frontend/*.tsbuildinfo
+
+.env
+.env.*
+*.db
+*.db-*
+*.sqlite
+*.sqlite3

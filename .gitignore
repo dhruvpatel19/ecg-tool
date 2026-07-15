@@ -6,11 +6,15 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tmp/
+backend/.tmp/
 .coverage
 
 # Node / Next
 node_modules/
 .next/
+frontend/.next-e2e-*/
+frontend/.next-review-*/
 out/
 dist/
 *.tsbuildinfo

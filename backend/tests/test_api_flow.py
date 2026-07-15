@@ -83,7 +83,12 @@ def test_tutorial_equivalent_retry_can_exclude_the_first_case() -> None:
 
     second = client.get(f"/tutorials/axis?concept=axis_normal&excludeCaseId={first_id}")
     assert second.status_code == 200
-    assert second.json()["recommendedCase"]["caseId"] != first_id
+    second_id = second.json()["recommendedCase"]["caseId"]
+    assert second_id != first_id
+
+    independent = client.get("/practice/next?conceptId=axis_normal")
+    assert independent.status_code == 200
+    assert independent.json()["case"]["caseId"] not in {first_id, second_id}
 
 
 def test_practice_next_supports_bounded_round_no_repeat_exclusions() -> None:

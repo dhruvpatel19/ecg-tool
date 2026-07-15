@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 
+from ..clinical.item_reference import is_public_item_reference, public_item_reference
 from ..clinical.schemas import ClinicalCaseItem
 
 
@@ -139,6 +140,21 @@ class ClinicalItemStore:
             row = conn.execute(
                 "SELECT item_json FROM clinical_case_items WHERE item_id = ?", (item_id,)
             ).fetchone()
+            if row is None and is_public_item_reference(item_id):
+                # Public Clinical handles are keyed, one-way aliases.  Resolve
+                # across the small reviewed bank without ever transporting the
+                # diagnosis-bearing authoring id back to the learner.
+                candidates = conn.execute(
+                    "SELECT item_id, item_json FROM clinical_case_items"
+                ).fetchall()
+                row = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if public_item_reference(str(candidate["item_id"])) == item_id
+                    ),
+                    None,
+                )
         return ClinicalCaseItem.model_validate_json(row["item_json"]) if row else None
 
     def list_for_serving(
@@ -188,6 +204,36 @@ class ClinicalItemStore:
                 agg[objective]["items"] += 1
                 agg[objective]["ecgs"].add(item.ecg_id)
         return {k: {"items": v["items"], "distinctEcgs": len(v["ecgs"])} for k, v in sorted(agg.items())}
+
+    def application_coverage(
+        self, status: str = "harness_pass"
+    ) -> dict[str, dict[str, dict[str, int]]]:
+        """Exact formative application capacity by objective and Clinical lane.
+
+        Generic ECG support is not enough for an ``apply_in_context`` handoff:
+        the authored item must explicitly grade that objective's decision in the
+        requested setting. Keeping this server-derived prevents links from
+        advertising a globally present concept that the selected lane cannot serve.
+        """
+        from collections import defaultdict
+
+        agg: dict[str, dict[str, dict]] = defaultdict(
+            lambda: defaultdict(lambda: {"items": 0, "ecgs": set()})
+        )
+        for item in self.list_for_serving(status=status):
+            for objective in set(item.application_objectives):
+                agg[objective][item.situation]["items"] += 1
+                agg[objective][item.situation]["ecgs"].add(item.ecg_id)
+        return {
+            objective: {
+                lane: {
+                    "items": values["items"],
+                    "distinctEcgs": len(values["ecgs"]),
+                }
+                for lane, values in sorted(lanes.items())
+            }
+            for objective, lanes in sorted(agg.items())
+        }
 
     def iter_items(self) -> Iterable[ClinicalCaseItem]:
         with self.connect() as conn:

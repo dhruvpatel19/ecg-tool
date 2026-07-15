@@ -576,7 +576,8 @@
         };
       }
       function finish(acc) {
-        var bestKey = global.FOUNDATIONS_BEST_KEY || 'found_best:guest';
+        var bestKey = global.FOUNDATIONS_BEST_KEY;
+        if (!bestKey) throw new Error('Foundations requires an authenticated owner.');
         var best = +(localStorage.getItem(bestKey) || 0);
         if (acc > best) { localStorage.setItem(bestKey, acc); best = acc; }
         var secs = Math.round((Date.now() - t0) / 1000);

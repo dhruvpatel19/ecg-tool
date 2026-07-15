@@ -33,6 +33,7 @@ class SourceDescriptor:
     source_url: str = ""
     doi: str = ""
     corpus_role: str = "waveform_and_labels"
+    published_uncompressed_size: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ def source_catalog_entry(source_id: str) -> dict[str, object]:
         "licenseName": descriptor.license_name,
         "sourceUrl": descriptor.source_url,
         "doi": descriptor.doi,
+        "publishedUncompressedSize": descriptor.published_uncompressed_size,
     }
     entry.update({key: value for key, value in optional.items() if value})
     return entry
@@ -152,5 +154,22 @@ KNOWN_SOURCES: dict[str, SourceDescriptor] = {
         source_id="staff-iii", version="1.0.0", license_id="ODC-BY-1.0",
         access="open", label_authority="protocol-timed PTCA ischemia recordings",
         patient_ids_available=True, educational_uses=("acute_serial",),
+    ),
+    "mit-bih-vfdb": SourceDescriptor(
+        source_id="mit-bih-vfdb",
+        version="1.0.0",
+        license_id="ODC-BY-1.0",
+        access="open",
+        label_authority=(
+            "expert reference WFDB rhythm-change annotations; rhythm labels only, no beat labels"
+        ),
+        patient_ids_available=True,
+        educational_uses=("rhythm_stream",),
+        dataset_title="MIT-BIH Malignant Ventricular Ectopy Database",
+        license_name="Open Data Commons Attribution License (ODC-By) 1.0",
+        source_url="https://physionet.org/content/vfdb/1.0.0/",
+        doi="https://doi.org/10.13026/C22P44",
+        corpus_role="expert_two_channel_rhythm_stream_waveform_and_labels",
+        published_uncompressed_size="33.1 MB",
     ),
 }

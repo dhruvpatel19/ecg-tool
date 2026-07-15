@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, Crosshair, Eraser, HeartPulse, RefreshCw, Ta
 import { PointerEvent, type ReactElement, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { leadLayout, mapPointToStandardEcgCoordinate, type ECGPoint } from "@/lib/coordinates";
-import type { ClickGradeResult, GroundedRoi, MedianBeats, ViewerAction, ViewerTaskEvidence, ViewerTaskSpec, WaveformResponse } from "@/lib/types";
+import type { ClickGradeResult, EcgCapability, GroundedRoi, MedianBeats, ViewerAction, ViewerTaskEvidence, ViewerTaskSpec, WaveformResponse, WaveformScope } from "@/lib/types";
 
 const WIDTH = 1200;
 // At the default 10-second window, 1200 px / (10 s * 25 mm/s) = 4.8 px/mm.
@@ -45,7 +45,10 @@ function taskRoiConcept(task?: ViewerTaskSpec) {
 }
 
 type ECGViewerProps = {
-  caseId: string;
+  /** Opaque ECG request capability. It must never be rendered as a learner label. */
+  ecgRef: EcgCapability;
+  /** Owner/session scope required by assessment waveform routes. */
+  waveformScope?: WaveformScope;
   actions?: ViewerAction[];
   groundedRois?: GroundedRoi[];
   /** Hidden reviewed geometry used to frame and validate a task without revealing labels. */
@@ -65,11 +68,17 @@ type ECGViewerProps = {
   task?: ViewerTaskSpec;
   /** Emits the actual waveform evidence collected by the active curriculum task. */
   onTaskEvidence?: (evidence: ViewerTaskEvidence) => void;
+  /** Assessment modes collect raw evidence; only Guided may request immediate correctness. */
+  gradingMode?: "immediate" | "deferred";
+  /** Server-signed context required by immediate Guided grading endpoints. */
+  guidedContext?: string | null;
 };
 
-export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois = [], onCoordinate, gradeConcept, gradePrompt, medianBeats = null, onReady, toolbar = "full", task, onTaskEvidence }: ECGViewerProps) {
-  const [waveform, setWaveform] = useState<WaveformResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = [], gradingRois = [], onCoordinate, gradeConcept, gradePrompt, medianBeats = null, onReady, toolbar = "full", task, onTaskEvidence, gradingMode = "immediate", guidedContext = null }: ECGViewerProps) {
+  const [loadedWaveform, setLoadedWaveform] = useState<{ ecgRef: EcgCapability; scopeKey: string; data: WaveformResponse } | null>(null);
+  const [loadError, setLoadError] = useState<{ ecgRef: EcgCapability; scopeKey: string; message: string } | null>(null);
+  const [loadingRequest, setLoadingRequest] = useState<{ ecgRef: EcgCapability; scopeKey: string } | null>(null);
+  const [loadVersion, setLoadVersion] = useState(0);
   const [timeWindow, setTimeWindow] = useState({ start: 0, end: 10 });
   const [highlightedLeads, setHighlightedLeads] = useState<string[]>([]);
   const [overlays, setOverlays] = useState<ViewerAction[]>([]);
@@ -90,38 +99,97 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
   const svgRef = useRef<SVGSVGElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const readyFired = useRef(false);
+  const onReadyRef = useRef(onReady);
+  const taskRef = useRef(task);
+  const gradingRoisRef = useRef(gradingRois);
+  const initializedTaskKeyRef = useRef<string | null>(null);
   const clipPrefix = useId().replaceAll(":", "");
 
+  onReadyRef.current = onReady;
+  taskRef.current = task;
+  gradingRoisRef.current = gradingRois;
+
+  // Parents construct task/ROI objects while rendering. Depend on their
+  // semantic contents so an equivalent rerender does not reset the ECG view,
+  // while a genuinely different task still does.
+  const taskSignature = task ? JSON.stringify(task) : "";
+  const gradingRoisSignature = gradingMode === "immediate"
+    ? gradingRois.map((roi) => `${roi.concept}:${roi.lead}:${roi.timeStartSec}:${roi.timeEndSec}`).join("|")
+    : "";
+  const waveformScopeKind = waveformScope?.kind ?? "catalog";
+  const waveformScopeId = waveformScope?.kind === "guided"
+    ? waveformScope.lessonId
+    : waveformScope?.kind === "training"
+      ? waveformScope.campaignId
+    : waveformScope?.kind === "rapid"
+      ? waveformScope.roundId
+      : waveformScope?.kind === "clinical"
+        ? waveformScope.sessionId
+        : "";
+  const waveformScopeKey = `${waveformScopeKind}:${waveformScopeId}`;
+  const taskInitializationKey = `${ecgRef}|${waveformScopeKey}|${gradingMode}|${taskSignature}|${gradingRoisSignature}`;
+
+  // A prop change must hide the previous patient's trace during the very first
+  // render, before effects have a chance to run. Keeping the loaded opaque
+  // request reference beside the payload prevents traces crossing contexts.
+  const waveform = loadedWaveform && loadedWaveform.ecgRef === ecgRef && loadedWaveform.scopeKey === waveformScopeKey
+    ? loadedWaveform.data
+    : null;
+  const error = loadError && loadError.ecgRef === ecgRef && loadError.scopeKey === waveformScopeKey ? loadError.message : null;
+  const loading = Boolean(loadingRequest && loadingRequest.ecgRef === ecgRef && loadingRequest.scopeKey === waveformScopeKey) || (!waveform && !error);
   const medianAvailable = Boolean(medianBeats?.available);
 
-  // Reset the one-shot ready signal when the case changes.
+  // Reset the one-shot ready signal when the scoped ECG request changes.
   useEffect(() => {
     readyFired.current = false;
-  }, [caseId]);
+  }, [ecgRef, waveformScopeKey]);
 
   useEffect(() => {
     let cancelled = false;
-    setError(null);
+    const requestScope: WaveformScope = waveformScopeKind === "guided"
+      ? { kind: "guided", lessonId: waveformScopeId }
+      : waveformScopeKind === "training"
+        ? { kind: "training", campaignId: waveformScopeId }
+      : waveformScopeKind === "rapid"
+        ? { kind: "rapid", roundId: waveformScopeId }
+        : waveformScopeKind === "clinical"
+          ? { kind: "clinical", sessionId: waveformScopeId }
+          : { kind: "catalog" };
+    setLoadError(null);
+    setLoadingRequest({ ecgRef, scopeKey: waveformScopeKey });
     api
-      .waveform(caseId, timeWindow.start, timeWindow.end)
+      .waveform(ecgRef, timeWindow.start, timeWindow.end, undefined, requestScope)
       .then((data) => {
+        if ((data.ecgRef ?? data.caseId) !== ecgRef) {
+          throw new Error("Waveform capability mismatch");
+        }
         if (!cancelled) {
-          setWaveform(data);
+          setLoadedWaveform({ ecgRef, scopeKey: waveformScopeKey, data });
+          setLoadingRequest(null);
           if (!readyFired.current) {
             readyFired.current = true;
-            onReady?.();
+            onReadyRef.current?.();
           }
         }
       })
       .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
+        if (!cancelled) {
+          setLoadingRequest(null);
+          setLoadError({
+            ecgRef,
+            scopeKey: waveformScopeKey,
+            message: err.name === "AbortError"
+              ? "This ECG took too long to load."
+              : "This ECG could not be loaded.",
+          });
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [caseId, timeWindow.start, timeWindow.end]);
+  }, [ecgRef, waveformScopeId, waveformScopeKey, waveformScopeKind, timeWindow.start, timeWindow.end, loadVersion]);
 
-  // Reset graded feedback and annotations when the case changes.
+  // Reset graded feedback and annotations when the scoped ECG request changes.
   useEffect(() => {
     setClickFeedback(null);
     setIdentifyMode(false);
@@ -133,17 +201,29 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
     setMedianMode(false);
     setMarchPoints([]);
     setTaskFeedback(null);
-  }, [caseId]);
+  }, [ecgRef, waveformScopeKey]);
 
   useEffect(() => {
+    // Loading a waveform (and later zooming or panning it) may change the
+    // response duration. That must not reinitialize precise-entry controls and
+    // overwrite evidence the learner has already entered for this task.
+    if (initializedTaskKeyRef.current === taskInitializationKey) return;
+    initializedTaskKeyRef.current = taskInitializationKey;
+    const activeTask = taskRef.current;
+    const activeGradingRois = gradingRoisRef.current;
     setMarchPoints([]);
     setTaskFeedback(null);
-    setIdentifyMode(task?.mode === "point");
+    setIdentifyMode(activeTask?.mode === "point");
     setClickFeedback(null);
-    const concept = taskRoiConcept(task);
-    const reviewed = gradingRois.find((roi) => roi.concept === concept
-      && (!task?.allowedLeads?.length || task.allowedLeads.includes(roi.lead)));
-    const lead = reviewed?.lead ?? task?.allowedLeads?.[0] ?? "II";
+    const concept = taskRoiConcept(activeTask);
+    // Reviewed answer geometry may frame a scaffolded Guided task. Deferred
+    // assessment modes must remain blind: an answer ROI must never choose the
+    // lead, viewport, scroll position, or precise-entry defaults precommit.
+    const reviewed = gradingMode === "immediate"
+      ? activeGradingRois.find((roi) => roi.concept === concept
+        && (!activeTask?.allowedLeads?.length || activeTask.allowedLeads.includes(roi.lead)))
+      : undefined;
+    const lead = reviewed?.lead ?? activeTask?.allowedLeads?.[0] ?? "II";
     const nextWindow = reviewed
       ? fitActionWindowToLead(reviewed.timeStartSec - 0.12, reviewed.timeEndSec + 0.12, lead, waveform?.durationSec ?? 10)
       : { start: 0, end: waveform?.durationSec ?? 10 };
@@ -170,7 +250,7 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
       const columnWidth = stage.scrollWidth / COLS;
       stage.scrollLeft = Math.max(0, column * columnWidth - (stage.clientWidth - columnWidth) / 2);
     }, 0);
-  }, [caseId, task?.mode, task?.prompt]);
+  }, [ecgRef, waveformScopeKey, gradingMode, taskSignature, gradingRoisSignature, taskInitializationKey, waveform?.durationSec]);
 
   // Drop out of median-beat mode if the new case has no median beats.
   useEffect(() => {
@@ -183,7 +263,7 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
     return map;
   }, [waveform]);
 
-  const printScale = useMemo(() => paperScale(timeWindow), [timeWindow.start, timeWindow.end]);
+  const printScale = useMemo(() => paperScale(timeWindow), [timeWindow]);
 
   function resetView() {
     setTimeWindow({ start: 0, end: waveform?.durationSec ?? 10 });
@@ -272,13 +352,20 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
   }
 
   async function gradeAt(point: ECGPoint) {
+    if (gradingMode === "deferred") {
+      setClickFeedback(null);
+      setTaskFeedback("Point recorded. Correctness will be revealed after you commit your response.");
+      if (task?.mode === "point") onTaskEvidence?.({ mode: "point", point });
+      return null;
+    }
     setGrading(true);
     try {
-      const result = await api.gradeClick(caseId, {
+      const result = await api.gradeClick(ecgRef, {
         lead: point.lead,
         timeSec: point.timeSec,
         amplitudeMv: point.amplitudeMv,
         concept: task?.mode === "point" ? task.concept : gradeConcept ?? null,
+        guidedContext,
       });
       setClickFeedback({ ...result, point });
       if (task?.mode === "point") {
@@ -302,15 +389,21 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
 
   async function gradeRegion(roi: UserRoi) {
     if (task?.mode !== "region") return;
+    if (gradingMode === "deferred") {
+      setTaskFeedback("Region recorded. Correctness will be revealed after you commit your response.");
+      onTaskEvidence?.({ mode: "region", roi });
+      return;
+    }
     setGrading(true);
     try {
-      const result = await api.gradeRegion(caseId, {
+      const result = await api.gradeRegion(ecgRef, {
         lead: roi.lead,
         timeStartSec: roi.timeStartSec,
         timeEndSec: roi.timeEndSec,
         ampMinMv: roi.ampMinMv,
         ampMaxMv: roi.ampMaxMv,
         concept: task.concept,
+        guidedContext,
       });
       setTaskFeedback(result.feedback);
       onTaskEvidence?.({ mode: "region", roi, correct: result.correct, noTarget: result.noTarget, feedback: result.feedback });
@@ -331,15 +424,21 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
       onTaskEvidence?.({ mode: "caliper", lead: roi.lead, timeStartSec: roi.timeStartSec, timeEndSec: roi.timeEndSec, valueMs });
       return;
     }
+    if (gradingMode === "deferred") {
+      setTaskFeedback(`${task.measurement.toUpperCase()} span recorded at ${valueMs} ms. Correctness will be revealed after commit.`);
+      onTaskEvidence?.({ mode: "caliper", lead: roi.lead, timeStartSec: roi.timeStartSec, timeEndSec: roi.timeEndSec, valueMs });
+      return;
+    }
     setGrading(true);
     try {
-      const result = await api.gradeRegion(caseId, {
+      const result = await api.gradeRegion(ecgRef, {
         lead: roi.lead,
         timeStartSec: roi.timeStartSec,
         timeEndSec: roi.timeEndSec,
         ampMinMv: roi.ampMinMv,
         ampMaxMv: roi.ampMaxMv,
         concept,
+        guidedContext,
       });
       const feedback = result.noTarget
         ? `No reviewed ${concept.replaceAll("_", " ")} boundary is available here. ${result.feedback}`
@@ -359,14 +458,25 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
 
   async function addMarchedPoint(point: ECGPoint) {
     if (task?.mode !== "march") return;
+    if (gradingMode === "deferred") {
+      setMarchPoints((current) => {
+        const duplicate = current.some((existing) => existing.lead === point.lead && Math.abs(existing.timeSec - point.timeSec) < 0.08);
+        const next = duplicate ? current : [...current, point].sort((a, b) => a.timeSec - b.timeSec);
+        setTaskFeedback(`${next.length} of ${task.minimumMarkers} markers recorded. Correctness follows commit.`);
+        onTaskEvidence?.({ mode: "march", points: next });
+        return next;
+      });
+      return;
+    }
     const concept = task.target === "p_waves" ? "p_wave" : "qrs_complex";
     setGrading(true);
     try {
-      const result = await api.gradeClick(caseId, {
+      const result = await api.gradeClick(ecgRef, {
         lead: point.lead,
         timeSec: point.timeSec,
         amplitudeMv: point.amplitudeMv,
         concept,
+        guidedContext,
       });
       if (!result.correct) {
         setTaskFeedback(result.noTarget ? `This case cannot safely grade ${task.target.replaceAll("_", " ")}: ${result.feedback}` : result.feedback);
@@ -533,7 +643,7 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
   }
 
   return (
-    <section className="panel ecg-viewer" aria-label="Interactive 12-lead ECG viewer">
+    <section className="panel ecg-viewer" aria-label="Interactive 12-lead ECG viewer" aria-busy={loading}>
       {toolbar === "none" ? null : (
       <div className="viewer-toolbar">
         <div className="viewer-toolbar-main">
@@ -563,6 +673,7 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
             }}
             aria-pressed={medianMode}
             disabled={!medianAvailable}
+            aria-label={medianAvailable ? (medianMode ? "Hide median beat" : "Show median beat") : "Median beat unavailable"}
             title={medianAvailable ? (medianMode ? "Hide median beat" : "Show median beat") : "No median beat available for this case"}
           >
             <HeartPulse size={18} aria-hidden="true" />
@@ -576,6 +687,7 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
             }}
             aria-pressed={identifyMode}
             disabled={medianMode || Boolean(task && task.mode !== "point")}
+            aria-label="Identify a feature on the ECG"
             title="Identify feature (click to grade)"
           >
             <Target size={18} aria-hidden="true" />
@@ -586,32 +698,40 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
             onClick={() => setShowAllLabels((current) => !current)}
             aria-pressed={showAllLabels}
             disabled={medianMode}
+            aria-label={showAllLabels ? "Hide ECG annotation labels" : "Show ECG annotation labels"}
             title={showAllLabels ? "Hide ROI labels" : "Show all ROI labels"}
           >
             <Tag size={17} aria-hidden="true" />
           </button>
-          <button className="icon-button" type="button" onClick={() => zoom(0.55)} disabled={medianMode} title="Zoom in">
+          <button className="icon-button" type="button" onClick={() => zoom(0.55)} disabled={medianMode} aria-label="Zoom in" title="Zoom in">
             <ZoomIn size={18} aria-hidden="true" />
           </button>
-          <button className="icon-button" type="button" onClick={() => zoom(1.8)} disabled={medianMode} title="Zoom out">
+          <button className="icon-button" type="button" onClick={() => zoom(1.8)} disabled={medianMode} aria-label="Zoom out" title="Zoom out">
             <ZoomOut size={18} aria-hidden="true" />
           </button>
-          <button className="icon-button" type="button" onClick={() => pan(-0.8)} disabled={medianMode} title="Pan left">
+          <button className="icon-button" type="button" onClick={() => pan(-0.8)} disabled={medianMode} aria-label="Pan ECG left" title="Pan left">
             <ChevronLeft size={18} aria-hidden="true" />
           </button>
-          <button className="icon-button" type="button" onClick={() => pan(0.8)} disabled={medianMode} title="Pan right">
+          <button className="icon-button" type="button" onClick={() => pan(0.8)} disabled={medianMode} aria-label="Pan ECG right" title="Pan right">
             <ChevronRight size={18} aria-hidden="true" />
           </button>
-          <button className="icon-button" type="button" onClick={() => setOverlays([])} disabled={medianMode} title="Clear AI highlights">
+          <button className="icon-button" type="button" onClick={() => setOverlays([])} disabled={medianMode} aria-label="Clear tutor highlights" title="Clear tutor highlights">
             <Eraser size={17} aria-hidden="true" />
           </button>
-          <button className="icon-button" type="button" onClick={resetView} disabled={medianMode} title="Reset view">
+          <button className="icon-button" type="button" onClick={resetView} disabled={medianMode} aria-label="Reset ECG view" title="Reset view">
             <RefreshCw size={17} aria-hidden="true" />
           </button>
         </div>
       </div>
       )}
-      {error ? <div className="warning">{error}</div> : null}
+      {error ? (
+        <div className="warning viewer-load-error" role="alert">
+          <span>{error}</span>
+          <button className="button subtle small" type="button" onClick={() => setLoadVersion((value) => value + 1)}>
+            Retry ECG
+          </button>
+        </div>
+      ) : null}
       {identifyMode || task ? (
         <div className="identify-banner">
           <Target size={15} aria-hidden="true" />
@@ -637,8 +757,18 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
           ) : null}
         </div>
       ) : null}
-      <div ref={stageRef} className={`viewer-stage${!medianMode && identifyMode ? " identify" : ""}`}>
-        {medianMode && medianBeats ? (
+      <div
+        ref={stageRef}
+        className={`viewer-stage${!medianMode && identifyMode ? " identify" : ""}`}
+        role="region"
+        aria-label="Scrollable ECG tracing"
+        tabIndex={0}
+      >
+        {!waveform ? (
+          <div className="viewer-loading" role="status" aria-live="polite">
+            {error ? "ECG unavailable." : "Loading ECG…"}
+          </div>
+        ) : medianMode && medianBeats ? (
           <svg
             viewBox={`0 0 ${WIDTH} ${MEDIAN_HEIGHT}`}
             role="img"
@@ -676,17 +806,15 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
             onPointerDown={onPointerDown}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerCancel}
-            style={{ aspectRatio: `${WIDTH} / ${HEIGHT}`, minHeight: 0, touchAction: "none" }}
+            style={{ aspectRatio: `${WIDTH} / ${HEIGHT}`, minHeight: 0, touchAction: task ? "pan-x pan-y" : "auto" }}
           >
             <PanelDefs prefix={clipPrefix} />
             <PaperGrid timeWindow={timeWindow} />
-            {leadLayout.map((row, rowIndex) =>
-              row.map((lead, columnIndex) => (
+            {leadLayout.map((row) =>
+              row.map((lead) => (
                 <LeadPanel
                   key={lead}
                   lead={lead}
-                  row={rowIndex}
-                  column={columnIndex}
                   points={signalByLead.get(lead) ?? []}
                   timeWindow={timeWindow}
                   highlighted={highlightedLeads.includes(lead)}
@@ -763,11 +891,14 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
         </details>
       ) : null}
       {toolbar === "none" ? null : (
-        <div className="viewer-help">
-          {medianMode
-            ? "Median beat: one averaged complex per lead on the same square calibrated paper (small box 0.04 s × 0.1 mV, large box 0.2 s × 0.5 mV). Use it to compare morphology without beat-to-beat noise."
-            : "Standard print: sequential 2.5-second lead columns plus a continuous lead-II rhythm strip at 25 mm/s and 10 mm/mV. Grid boxes stay square through zoom. Click to map the correct lead, acquisition time, and amplitude; drag within one panel to annotate."}
-        </div>
+        <details className="viewer-help">
+          <summary>{medianMode ? "About the median beat" : "ECG paper and controls"}</summary>
+          <p>
+            {medianMode
+              ? "Median beat: one averaged complex per lead on the same square calibrated paper (small box 0.04 s × 0.1 mV, large box 0.2 s × 0.5 mV). Use it to compare morphology without beat-to-beat noise."
+              : "Standard print: sequential 2.5-second lead columns plus a continuous lead-II rhythm strip at 25 mm/s and 10 mm/mV. Grid boxes stay square through zoom. Click to map the correct lead, acquisition time, and amplitude; drag within one panel to annotate."}
+          </p>
+        </details>
       )}
       {clickFeedback ? (
         <div className={`click-feedback ${clickFeedback.noTarget ? "neutral" : clickFeedback.correct ? "ok" : "miss"}`}>
@@ -779,18 +910,12 @@ export function ECGViewer({ caseId, actions = [], groundedRois = [], gradingRois
         </div>
       ) : null}
       {taskFeedback ? <div className="click-feedback neutral" role="status" aria-live="polite"><strong>Task evidence</strong><span>{taskFeedback}</span></div> : null}
-      <div className="coordinate-readout">
-        {selectedPoint ? (
-          <>
-            <span className="coord-chip"><Crosshair size={14} aria-hidden="true" /> {selectedPoint.lead}</span>
-            <span>{selectedPoint.timeSec.toFixed((waveform?.samplingFrequency ?? 100) >= 500 ? 3 : 2)} sec</span>
-            <span>{selectedPoint.amplitudeMv.toFixed(3)} mV</span>
-            <span className="muted">source resolution ≈ {Math.round(1000 / (waveform?.samplingFrequency ?? 100))} ms</span>
-          </>
-        ) : (
-          <span>No point selected</span>
-        )}
-      </div>
+      {selectedPoint ? <div className="coordinate-readout">
+        <span className="coord-chip"><Crosshair size={14} aria-hidden="true" /> {selectedPoint.lead}</span>
+        <span>{selectedPoint.timeSec.toFixed((waveform?.samplingFrequency ?? 100) >= 500 ? 3 : 2)} sec</span>
+        <span>{selectedPoint.amplitudeMv.toFixed(3)} mV</span>
+        <span className="muted">source resolution ≈ {Math.round(1000 / (waveform?.samplingFrequency ?? 100))} ms</span>
+      </div> : null}
     </section>
   );
 }
@@ -1089,16 +1214,12 @@ function MedianBeatPanel({
 
 function LeadPanel({
   lead,
-  row,
-  column,
   points,
   timeWindow,
   highlighted,
   clipPrefix,
 }: {
   lead: string;
-  row: number;
-  column: number;
   points: Array<{ timeSec: number; amplitudeMv: number }>;
   timeWindow: TimeWindow;
   highlighted: boolean;

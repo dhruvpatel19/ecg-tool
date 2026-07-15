@@ -720,7 +720,7 @@ export const M04_AV_CONDUCTION_MODULE: ProductionModule = {
       caseContract: caseSpec({ selectorLessonId: "pr-av-block", requestedConcept: "av_block_third_degree", minimumTier: "A", requiredEvidence: ["Explicit complete-block support", "Atrial and ventricular events", "No stable conducted relationship", "Escape rate"], requiredLeads: ["II", "V1"], allowedUses: ["scored_recognition", "transfer"], fallback: "authored_simulation", forbiddenClaims: ["Sinus bradycardia from ventricular rate", "Precise escape focus without evidence"] }),
       interactions: s7Interactions, minimumScore: 0.9,
       connections: { recallFrom: "M4-S0 two-clock method", changesNow: "Both clocks persist without phase lock", reuseNext: "Escape rhythm and bradycardia context", clinicalUse: "Recognizes a high-grade conduction pattern from direct timing evidence" },
-      handoffs: [handoff("train", "Train · AV dissociation", "av_block_third_degree", "discriminate", "faded"), handoff("clinical", "Clinical preview · severe bradycardia", "bradycardia_with_pulse", "apply_in_context", "guided")],
+      handoffs: [handoff("train", "Train · AV dissociation", "av_block_third_degree", "discriminate", "faded"), handoff("clinical", "Clinical preview · severe bradycardia", "bradycardia_with_pulse", "apply_in_context", "guided", { focus: "bradycardia", subskill: "apply_in_context", lane: "ed", length: 5 })],
     }),
     buildScene({
       id: "m04-s8", partId: "m04-part-3", minutes: 5,
@@ -742,7 +742,7 @@ export const M04_AV_CONDUCTION_MODULE: ProductionModule = {
       caseContract: caseSpec({ selectorLessonId: "pr-av-block", requestedConcept: "av_block_third_degree", minimumTier: "A", requiredEvidence: ["Grounded rhythm and rate", "Authored pulse and perfusion facts", "Authored reversible-cause data categories"], requiredLeads: ["II", "V1"], allowedUses: ["transfer"], fallback: "authored_simulation", forbiddenClaims: ["Perfusion inferred from ECG", "Cause diagnosed from ECG alone", "Drug dose", "Device setting"] }),
       interactions: s9Interactions, minimumScore: 0.9,
       connections: { recallFrom: "M4-S7 AV dissociation", changesNow: "Bedside perfusion and reversible causes are added without contaminating ECG truth", reuseNext: "Clinical bradycardia with a pulse", clinicalUse: "Perfusion-first escalation and cause investigation" },
-      handoffs: [handoff("clinical", "Clinical · Bradycardia with a pulse", "bradycardia_with_pulse", "apply_in_context", "faded"), handoff("train", "Train · Bradycardia context", "brady_context", "calibrate_confidence", "guided")],
+      handoffs: [handoff("clinical", "Clinical · Bradycardia with a pulse", "bradycardia_with_pulse", "apply_in_context", "faded", { focus: "bradycardia", subskill: "apply_in_context", lane: "clinic", length: 5 }), handoff("train", "Train · Bradycardia context", "brady_context", "calibrate_confidence", "guided")],
     }),
     buildScene({
       id: "m04-s10", partId: "m04-part-4", minutes: 8,
@@ -753,7 +753,7 @@ export const M04_AV_CONDUCTION_MODULE: ProductionModule = {
       caseContract: caseSpec({ selectorLessonId: "pr-av-block", requestedConcept: "av_conduction_mixed", minimumTier: "A", requiredEvidence: ["Contract-matched first degree, Mobitz contrast, 2:1 uncertainty, complete block, or blocked PAC", "P/QRS events", "PR behavior", "QRS duration"], requiredLeads: ["II", "V1"], allowedUses: ["scored_recognition", "measurement", "transfer"], fallback: "authored_simulation", forbiddenClaims: ["Unsupported subtype", "Treatment order"] }),
       interactions: s10Interactions, minimumScore: 0.8,
       connections: { recallFrom: "All M4 relationship patterns", changesNow: "Targets are unannounced and assistance is metered", reuseNext: "M5 ventricular activation and Clinical/Rapid practice", clinicalUse: "A concise, defensible conduction interpretation" },
-      handoffs: [handoff("train", "Train · AV conduction contrasts", "av_conduction_mixed", "discriminate", "independent"), handoff("rapid", "Rapid · Bradycardia mixed reads", "bradycardia", "synthesize", "independent"), handoff("clinical", "Clinical · Bradycardia with a pulse", "bradycardia_with_pulse", "apply_in_context", "faded")],
+      handoffs: [handoff("train", "Train · AV conduction contrasts", "av_conduction_mixed", "discriminate", "independent"), handoff("rapid", "Rapid · Bradycardia recognition", "bradycardia", "synthesize", "independent", { focus: "bradycardia", receiptConcept: "bradycardia", subskill: "recognize", pace: "untimed", suggestedLength: 5 }), handoff("clinical", "Clinical · Bradycardia with a pulse", "bradycardia_with_pulse", "apply_in_context", "faded", { focus: "bradycardia", subskill: "apply_in_context", lane: "clinic", length: 5 })],
     }),
   ],
 };

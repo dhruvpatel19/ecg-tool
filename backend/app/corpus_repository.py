@@ -8,6 +8,7 @@ without that corpus; the fixture repository is an explicit test-only opt-out.
 
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 import hashlib
 import math
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .ontology import PRACTICE_GROUPS
 from .schemas import LEADS
 from .source_policy import NEVER_LEARNER_SERVE_SOURCES, packet_mode_policy
 from .store import CaseStore, LocalWaveformStore
@@ -110,6 +112,15 @@ class CorpusRepository:
         # not on every load-balancer probe. The immutable corpus hash pins the
         # audited result for this running release.
         self._deployment_check = self._build_deployment_check()
+        # The release corpus is read-only for the lifetime of this repository.
+        # Availability powers several setup pages, so precompute the small set
+        # of public practice-group counts once instead of reopening the 879 MiB
+        # SQLite index for every `/concepts` request.
+        self._concept_ab_count_cache = self.store.concept_ab_counts()
+        for group in PRACTICE_GROUPS:
+            self._group_reliable_count_cached(
+                tuple(sorted(set(str(item) for item in group.get("concepts", []))))
+            )
 
     def build_index(self, limit: int | None = None) -> dict[str, Any]:
         """The corpus is prebuilt offline; refresh the live status counters."""
@@ -154,10 +165,16 @@ class CorpusRepository:
         )
 
     def concept_ab_counts(self) -> dict[str, int]:
-        return self.store.concept_ab_counts()
+        return dict(self._concept_ab_count_cache)
 
     def group_reliable_count(self, concept_ids: list[str]) -> int:
-        return self.store.distinct_case_count(concept_ids)
+        return self._group_reliable_count_cached(
+            tuple(sorted(set(str(item) for item in concept_ids)))
+        )
+
+    @lru_cache(maxsize=256)
+    def _group_reliable_count_cached(self, concept_ids: tuple[str, ...]) -> int:
+        return self.store.distinct_case_count(list(concept_ids))
 
     def deployment_readiness(self) -> tuple[bool, str]:
         """Return the cached, fail-closed release-corpus capability verdict."""

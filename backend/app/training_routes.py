@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
+from threading import RLock
 from typing import Any, Callable, Literal
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Cookie, Header, HTTPException, Query
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .auth import SESSION_COOKIE_NAME
+from .assessment_presentation import (
+    assessment_display_id,
+    public_assessment_record,
+    public_case_packet,
+    public_case_summary,
+    public_waveform,
+)
+from .assessment_ledger import AssessmentLedgerError
+from .config import get_settings
 from .data_sources import case_summary
+from .ecg_capability import issue_ecg_capability, matches_ecg_capability
 from .grading import grade_attempt, grade_click_answer
 from .objectives import objective_definition
 from .ontology import PRACTICE_GROUPS
@@ -22,17 +33,22 @@ from .source_policy import (
     retention_morphology_key,
 )
 from .subskill_tasks import (
+    STRUCTURED_CHOICE_SUBSKILLS,
     build_subskill_task,
     calibration_grade,
     discrimination_task_available,
     mechanism_task_available,
+    grade_subskill_task,
+    training_independent_receipt_available,
 )
+from .training_store import TrainingExposureConflictError
 
 
 LearnerResolver = Callable[[str | None, str, str | None], str]
 PacketTransformer = Callable[[dict[str, Any]], dict[str, Any]]
 
 CAMPAIGN_LENGTHS = (10, 25, 50, 100, 500, 1000, 5000)
+TRAINING_POOL_CACHE_MAX_ENTRIES = 4
 TRAINING_PHASE_CYCLE = (
     "target", "target", "target", "mimic", "mimic",
     "negative", "negative", "transfer", "transfer", "transfer",
@@ -61,6 +77,8 @@ class TrainingCampaignSubmitBody(BaseModel):
     evidenceNote: str = Field(default="", max_length=10_000)
     viewerTaskEvidence: dict[str, Any] | None = None
     subskillTaskAnswer: str = Field(default="", max_length=160)
+    subskillTaskMatches: dict[str, str] = Field(default_factory=dict, max_length=3)
+    subskillTaskValue: float | None = Field(default=None, ge=0, le=5000)
     receiptConcept: str | None = Field(default=None, max_length=160)
 
 
@@ -188,13 +206,24 @@ def _receipt_concept(campaign: dict[str, Any]) -> str:
 def _public_pending_slot(slot: dict[str, Any]) -> dict[str, Any]:
     """Remove the durable answer key from the pre-commit response.
 
-    Phase is pedagogical (and transfer remains unannounced), but caseFocus and
-    targetPresent directly reveal the server-owned target/mimic truth.
+    Named build phases are pedagogical, while transfer remains unannounced.
+    Case focus and target presence always reveal the server-owned truth.
     """
-    return {
+    public = {
         key: value for key, value in slot.items()
         if key not in {"caseFocus", "targetPresent"}
     }
+    reason = str(slot.get("selectionReason") or "planned_sequence")
+    if slot.get("phase") == "transfer":
+        public.pop("phase", None)
+    if reason == "recent_independent_reuse_unavoidable":
+        public["selectionReason"] = "recent_reuse_unavoidable"
+    elif reason != "planned_sequence":
+        public["selectionReason"] = (
+            "adaptive_recheck" if "recheck" in reason or "miss" in reason or "overcall" in reason
+            else "adaptive_variation"
+        )
+    return public
 
 
 def _pool_entry_from_truth(
@@ -333,7 +362,10 @@ def _evidence_valid(
     if subskill == "measure":
         key, leads, _ = _measurement_contract(concept)
         if not key:
-            return len(note.strip()) >= 15 and any(char.isdigit() for char in note), False
+            # A note can document rehearsal, but without a server-owned numeric
+            # target its value cannot be called correct or used as mastery
+            # evidence. Submit-time logic records completeness separately.
+            return False, False
         if evidence.get("mode") != "caliper" or evidence.get("lead") not in leads:
             return False, True
         measured = evidence.get("valueMs")
@@ -343,15 +375,313 @@ def _evidence_valid(
         expected_ms = 60_000 / expected_value if concept == "rate" and expected_value > 0 else expected_value
         tolerance = 90 if concept == "rate" else 35
         return abs(float(measured) - float(expected_ms)) <= tolerance, True
-    return len(note.strip()) >= 20, False
+    # Structured synthesis/application/mechanism choices are graded below from
+    # a server-owned answer key. Never let prose length stand in for semantic
+    # evidence; an unsupported subskill fails closed.
+    return False, False
+
+
+def _adaptation_contract(
+    *,
+    expected: str | None,
+    classification_correct: bool,
+    evidence_valid: bool,
+) -> tuple[str, str]:
+    """Choose the next unseen roster role from the committed response.
+
+    Classification errors receive another example of the missed class. When
+    the ECG decision is right but the required skill task is not, the same
+    class is rehearsed again. A fully correct answer switches class to prevent
+    memorizing a target-present cadence.
+    """
+
+    if not classification_correct:
+        if expected == "absent":
+            return "contrast", "contrast_after_overcall"
+        return "target", "target_recheck_after_miss"
+    if not evidence_valid:
+        if expected == "absent":
+            return "contrast", "contrast_skill_recheck"
+        return "target", "target_skill_recheck"
+    if expected == "absent":
+        return "target", "target_after_contrast_success"
+    return "contrast", "contrast_after_target_success"
+
+
+def _grade_claimed_training_submission(
+    *,
+    campaign_store: Any,
+    learning_store: Any,
+    campaign: dict[str, Any],
+    case: dict[str, Any],
+    slot: dict[str, Any],
+    body: TrainingCampaignSubmitBody,
+    reservation: dict[str, Any],
+) -> dict[str, Any]:
+    """Grade and commit only after the pending lease is durably claimed.
+
+    The route owns failure recovery around this function. Keeping every grading
+    branch inside one callable guarantees that any exception before the atomic
+    store commit releases the exact claim rather than leaving a learner stuck.
+    """
+
+    concept = str(campaign["conceptId"])
+    subskill = str(campaign["subskill"])
+    receipt_concept = _receipt_concept(campaign)
+    expected = _expected_answer(case, concept, subskill)
+    focus_grounded = _focus_is_grounded(case, str(slot["caseFocus"]), subskill)
+    classification_correct = (
+        expected is not None
+        and body.selectedAnswer == expected
+        and focus_grounded
+    )
+    evidence_valid, trace_native = _evidence_valid(
+        case, receipt_concept, subskill, body.viewerTaskEvidence, body.evidenceNote
+    )
+    measurement_unverified = bool(
+        subskill == "measure" and not _measurement_contract(receipt_concept)[0]
+    )
+    task_contract = build_subskill_task(
+        case_id=body.caseId,
+        case_concept=concept,
+        subskill=subskill,
+        case_focus=str(slot["caseFocus"]),
+        contrast_family=_contrast_family(concept),
+        variant=int(slot["position"]),
+        case_packet=case,
+    )
+    task_complete = True
+    task_score = 1.0 if evidence_valid else 0.0
+    evidence_source = "trace_native" if trace_native else "response"
+    task_result: dict[str, Any] | None = None
+    if measurement_unverified:
+        task_complete = (
+            len(body.evidenceNote.strip()) >= 15
+            and any(char.isdigit() for char in body.evidenceNote)
+        )
+        evidence_valid = False
+        task_score = 0.0
+        evidence_source = "unverified_measurement_rehearsal"
+    elif subskill == "measure" and task_contract is not None:
+        trace_evidence_valid = evidence_valid
+        task_result = grade_subskill_task(
+            task_contract,
+            numeric_value=body.subskillTaskValue,
+        )
+        task_complete = bool(task_result["complete"])
+        evidence_valid = bool(trace_evidence_valid and task_result["correct"])
+        task_score = float(task_result["score"])
+        evidence_source = f"trace_native+{task_contract.evidence_source}"
+    elif subskill == "measure":
+        task_complete = False
+        evidence_valid = False
+        task_score = 0.0
+        evidence_source = "missing_packet_measurement_task"
+    elif subskill in STRUCTURED_CHOICE_SUBSKILLS:
+        task_result = (
+            grade_subskill_task(
+                task_contract,
+                answer=body.subskillTaskAnswer,
+                matches=body.subskillTaskMatches,
+            )
+            if task_contract
+            else None
+        )
+        task_complete = bool(task_result and task_result["complete"])
+        evidence_valid = bool(task_result and task_result["correct"])
+        task_score = float(task_result["score"]) if task_result else 0.0
+        evidence_source = (
+            task_contract.evidence_source if task_contract else "response"
+        )
+    elif subskill == "calibrate_confidence":
+        task_complete = task_contract is not None
+        task_score, evidence_valid = calibration_grade(
+            body.confidence, classification_correct
+        )
+        evidence_source = "confidence_commit"
+
+    # Recognition of the campaign target and performance of the selected skill
+    # are separate constructs. A learner can measure a QRS correctly while
+    # misnaming the pattern, or know a mechanism while overcalling its presence.
+    # Preserve both outcomes instead of converting every classification miss
+    # into a false measure/localize/mechanism miss.
+    subskill_correct = (
+        classification_correct if subskill == "recognize" else evidence_valid
+    )
+    misconceptions: list[str] = []
+    if not classification_correct:
+        misconceptions.append(f"target_status_error:{concept}")
+    if measurement_unverified and not task_complete:
+        misconceptions.append("subskill_task_incomplete:measure")
+    elif subskill == "measure" and not task_complete:
+        misconceptions.append("subskill_task_incomplete:measure")
+    elif subskill in STRUCTURED_CHOICE_SUBSKILLS and not task_complete:
+        misconceptions.append(f"subskill_task_incomplete:{subskill}")
+    elif task_complete and not evidence_valid and not measurement_unverified:
+        misconceptions.append(f"subskill_task_error:{subskill}")
+
+    structured = StructuredInterpretation(
+        framework="clerkship",
+        selectedConcepts=[concept] if body.selectedAnswer == "present" else [],
+    )
+    attempt = AttemptRequest(
+        learnerId=str(campaign["learnerId"]),
+        caseId=body.caseId,
+        mode="concept_practice",
+        focusObjective=concept,
+        structuredAnswer=structured,
+        freeTextAnswer=(
+            f"{concept}: {body.selectedAnswer}."
+            + (
+                f" Evidence: {body.evidenceNote.strip()}"
+                if body.evidenceNote.strip()
+                else ""
+            )
+        ),
+        confidence=body.confidence,
+        hintsUsed=body.hintsUsed,
+    )
+    grade = {
+        **grade_attempt(case, attempt),
+        "masteryDelta": {},
+        "legacyObjectiveMasterySuppressed": True,
+        "trainingClassificationCorrect": classification_correct,
+        "trainingSubskillEvidenceCorrect": evidence_valid,
+        "trainingSubskillTaskComplete": task_complete,
+        "trainingSubskillTaskScore": round(task_score, 4),
+        "trainingEvidenceSource": evidence_source,
+        "trainingEvidenceVerifiable": not measurement_unverified,
+        "trainingOutcomeKind": (
+            "unverified_rehearsal" if measurement_unverified else "scored_task"
+        ),
+        "trainingSubskillTaskResult": task_result,
+    }
+    exact_receipt_target = receipt_concept == concept
+    independently_assessable = bool(
+        (subskill in {"localize", "measure"} and trace_native and evidence_valid)
+        or (
+            subskill in STRUCTURED_CHOICE_SUBSKILLS
+            and task_complete
+            and task_contract
+            and task_contract.independently_assessable
+        )
+        or (subskill == "calibrate_confidence" and task_complete)
+    )
+    independently_assessed = (
+        slot["phase"] == "transfer"
+        and body.hintsUsed == 0
+        and exact_receipt_target
+        and independently_assessable
+        and (
+            subskill in STRUCTURED_CHOICE_SUBSKILLS
+            or subskill == "calibrate_confidence"
+            or expected == "present"
+            or concept in MEASUREMENT_TARGETS
+        )
+        and focus_grounded
+    )
+    event_correct = (
+        classification_correct and task_complete
+        if measurement_unverified
+        else subskill_correct
+    )
+    receipt_event = {
+        "eventKey": (
+            f"train:{campaign['campaignId']}:{slot['position']}:"
+            f"{body.caseId}:{subskill}"
+        ),
+        "_serverVerifiedScoring": True,
+        "moduleId": "train",
+        "sceneId": f"{receipt_concept}:{slot['phase']}",
+        "interactionId": f"{body.caseId}:{subskill}",
+        "concept": receipt_concept,
+        "subskills": [subskill],
+        "score": (
+            task_score if subskill == "calibrate_confidence" else (1.0 if event_correct else 0.0)
+        ),
+        "correct": event_correct,
+        "attempts": 1,
+        "assistance": "scaffolded" if body.hintsUsed else "independent",
+        "hintsUsed": body.hintsUsed,
+        "confidence": body.confidence,
+        "evidenceLevel": (
+            "independent_transfer" if independently_assessed else "guided"
+        ),
+        "trainingPhase": slot["phase"],
+        "evidenceSource": evidence_source,
+        "caseId": body.caseId,
+        "caseProvenance": "real_eligible",
+        "unverifiedRehearsal": measurement_unverified,
+        "caseEligible": (
+            exact_receipt_target
+            and focus_grounded
+            and _is_training_case(case, concept, subskill)
+        ),
+        "misconceptions": misconceptions,
+        "_retentionVerified": independently_assessed,
+        "_retentionMorphologyKey": retention_morphology_key(case),
+    }
+    response_data = {
+        "selectedAnswer": body.selectedAnswer,
+        "confidence": body.confidence,
+        "hintsUsed": body.hintsUsed,
+        "evidenceNote": body.evidenceNote,
+        "viewerTaskEvidence": body.viewerTaskEvidence,
+        "subskillTaskAnswer": body.subskillTaskAnswer,
+        "subskillTaskMatches": body.subskillTaskMatches,
+        "subskillTaskValue": body.subskillTaskValue,
+        "expectedAnswer": expected,
+        "structuredAnswer": structured.model_dump(),
+        "freeTextAnswer": attempt.freeTextAnswer,
+    }
+    summary = {
+        "position": slot["position"],
+        "caseId": body.caseId,
+        "phase": slot["phase"],
+        "correct": subskill_correct,
+        "scored": not measurement_unverified,
+        "outcomeKind": (
+            "unverified_rehearsal" if measurement_unverified else "scored_task"
+        ),
+        "classificationCorrect": classification_correct,
+        "focusGrounded": focus_grounded,
+        "selectedResponse": body.selectedAnswer,
+        "confidence": body.confidence,
+        "hintsUsed": body.hintsUsed,
+        "misconceptions": misconceptions,
+    }
+    adaptation_preference, adaptation_reason = _adaptation_contract(
+        expected=expected,
+        classification_correct=classification_correct,
+        evidence_valid=evidence_valid,
+    )
+    return campaign_store.finalize_answer(
+        learning_store=learning_store,
+        campaign_id=str(campaign["campaignId"]),
+        case_id=body.caseId,
+        learner_id=str(campaign["learnerId"]),
+        lease_id=str(reservation["leaseId"]),
+        submission_key=str(reservation["submissionKey"]),
+        response=response_data,
+        # Deterministic grading and evidence persistence never wait for an LLM.
+        # Post-commit TutorChat remains available on explicit use.
+        grade=grade,
+        tutor=None,
+        receipt_event=receipt_event,
+        summary=summary,
+        confidence=body.confidence,
+        hints_used=body.hintsUsed,
+        adaptation_preference=adaptation_preference,
+        adaptation_reason=adaptation_reason,
+    )
 
 
 def _public_campaign(campaign: dict[str, Any]) -> dict[str, Any]:
-    """Keep the immutable 5,000-slot phase sequence server-side.
+    """Keep the server-owned 5,000-slot planned recipe server-side.
 
-    The current slot and aggregate phase counts are sufficient for rendering;
-    serializing the full sequence after every answer would create quadratic
-    response bandwidth over a long campaign.
+    The current slot and aggregate phase counts are sufficient for rendering.
+    Queued slot contracts may be reordered after a response; the durable slots,
+    not this initial recipe array, are authoritative for current order.
     """
     public = dict(campaign)
     public.pop("phases", None)
@@ -368,20 +698,31 @@ def build_training_router(
     resolve_learner: LearnerResolver,
 ) -> APIRouter:
     router = APIRouter(prefix="/training/campaigns", tags=["training-campaigns"])
+    capability_secret = get_settings().adaptive_plan_context_secret
     bind_case_packets = getattr(learning_store, "set_case_packet_provider", None)
     if callable(bind_case_packets):
         bind_case_packets(repo.get_case)
-    pool_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    # Each value can describe most of the 22k-record release corpus. Keep only a
+    # small working set so exploring multiple competencies cannot retain one
+    # full-corpus list per objective/subskill for the life of the worker.
+    pool_cache: OrderedDict[tuple[str, str], list[dict[str, Any]]] = OrderedDict()
+    pool_cache_lock = RLock()
 
     def eligible_pool(concept: str, subskill: str) -> list[dict[str, Any]]:
         key = (concept, subskill)
-        if key in pool_cache:
-            return pool_cache[key]
         if subskill not in ALLOWED_SUBSKILLS:
             return []
         definition = objective_definition(concept)
-        if definition and subskill not in definition.allowed_subskills:
+        # Reject unknown client-supplied strings before the indexed repository
+        # performs a full-corpus scan. All learner competencies are registry
+        # owned; accepting an arbitrary key cannot produce a target case.
+        if definition is None or subskill not in definition.allowed_subskills:
             return []
+        with pool_cache_lock:
+            cached = pool_cache.get(key)
+            if cached is not None:
+                pool_cache.move_to_end(key)
+                return cached
         family = _contrast_family(concept)
         if subskill == "discriminate" and not discrimination_task_available(concept):
             return []
@@ -436,8 +777,28 @@ def build_training_router(
                 else (1, entry["caseId"]),
             )
         )
-        pool_cache[key] = entries
-        return entries
+        with pool_cache_lock:
+            # Another request may have populated the same pool while this one
+            # was built. Reuse that immutable working set and preserve LRU order.
+            cached = pool_cache.get(key)
+            if cached is not None:
+                pool_cache.move_to_end(key)
+                return cached
+            pool_cache[key] = entries
+            pool_cache.move_to_end(key)
+            while len(pool_cache) > TRAINING_POOL_CACHE_MAX_ENTRIES:
+                pool_cache.popitem(last=False)
+            return entries
+
+    def require_known_objective(concept: str) -> None:
+        if objective_definition(concept) is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "unknown_training_objective",
+                    "message": "Choose a competency from the current objective registry.",
+                },
+            )
 
     def owned(
         campaign_id: str, authorization: str | None, session_cookie: str | None
@@ -447,6 +808,67 @@ def build_training_router(
         if not campaign or campaign.get("learnerId") != learner:
             raise HTTPException(status_code=404, detail="Training campaign not found")
         return campaign
+
+    def case_reference(campaign: dict[str, Any], canonical_id: str) -> str:
+        return issue_ecg_capability(
+            capability_secret,
+            str(campaign["learnerId"]),
+            "training",
+            str(campaign["campaignId"]),
+            str(canonical_id),
+        )
+
+    def reference_matches(
+        campaign: dict[str, Any], reference: object, canonical_id: str
+    ) -> bool:
+        return matches_ecg_capability(
+            reference,
+            capability_secret,
+            str(campaign["learnerId"]),
+            "training",
+            str(campaign["campaignId"]),
+            str(canonical_id),
+        )
+
+    def public_answer(
+        campaign: dict[str, Any], answer: dict[str, Any]
+    ) -> dict[str, Any]:
+        canonical_id = str(answer.get("caseId") or "")
+        ordinal = int(answer.get("position") or 0) + 1
+        return public_assessment_record(
+            answer,
+            case_reference=case_reference(campaign, canonical_id),
+            display_id=assessment_display_id("training", ordinal),
+        )
+
+    def public_summary(
+        campaign: dict[str, Any], summary: dict[str, Any]
+    ) -> dict[str, Any]:
+        public = dict(summary)
+        public["recent"] = [
+            public_assessment_record(
+                attempt,
+                case_reference=case_reference(
+                    campaign, str(attempt.get("caseId") or "")
+                ),
+                display_id=assessment_display_id(
+                    "training", int(attempt.get("position") or 0) + 1
+                ),
+            )
+            for attempt in (summary.get("recent") or [])
+        ]
+        return public
+
+    def public_campaign(campaign: dict[str, Any]) -> dict[str, Any]:
+        public = _public_campaign(campaign)
+        for key in ("pendingCaseId", "feedbackCaseId"):
+            canonical_id = public.get(key)
+            public[key] = (
+                case_reference(campaign, str(canonical_id))
+                if canonical_id
+                else None
+            )
+        return public
 
     def payload(campaign: dict[str, Any] | None) -> dict[str, Any]:
         if not campaign:
@@ -465,12 +887,29 @@ def build_training_router(
                 subskill=str(campaign["subskill"]),
                 case_focus=str(slot["caseFocus"]),
                 contrast_family=_contrast_family(str(campaign["conceptId"])),
+                variant=int(slot["position"]),
+                case_packet=case,
             ) if slot else None
+            reference = case_reference(campaign, str(pending))
+            display_id = assessment_display_id(
+                "training", int(slot["position"] if slot else campaign["position"]) + 1
+            )
+            public_slot = _public_pending_slot(slot) if slot else None
+            if public_slot is not None:
+                public_slot["caseId"] = reference
             current = {
                 "kind": "pending",
-                "slot": _public_pending_slot(slot) if slot else None,
-                "case": blind_summary(case_summary(case)),
-                "packet": blind_packet(packet_provider(case)),
+                "slot": public_slot,
+                "case": public_case_summary(
+                    blind_summary(case_summary(case)),
+                    case_reference=reference,
+                    display_id=display_id,
+                ),
+                "packet": public_case_packet(
+                    blind_packet(packet_provider(case)),
+                    case_reference=reference,
+                    display_id=display_id,
+                ),
                 "task": task.public if task else None,
             }
         elif feedback:
@@ -486,23 +925,54 @@ def build_training_router(
                     subskill=str(campaign["subskill"]),
                     case_focus=str(slot["caseFocus"]),
                     contrast_family=_contrast_family(str(campaign["conceptId"])),
+                    variant=int(slot["position"]),
+                    case_packet=case,
                 ) if slot else None
+                reference = case_reference(campaign, str(feedback))
+                display_id = assessment_display_id(
+                    "training", int(slot["position"] if slot else campaign["position"] - 1) + 1
+                )
                 current = {
                     "kind": "feedback",
-                    "slot": slot,
-                    "case": blind_summary(case_summary(case)),
-                    "packet": packet_provider(case),
-                    "answer": answer,
+                    "slot": public_assessment_record(
+                        slot,
+                        case_reference=reference,
+                        display_id=display_id,
+                    ) if slot else None,
+                    "case": public_case_summary(
+                        blind_summary(case_summary(case)),
+                        case_reference=reference,
+                        display_id=display_id,
+                    ),
+                    "packet": public_case_packet(
+                        packet_provider(case),
+                        case_reference=reference,
+                        display_id=display_id,
+                    ),
+                    "answer": public_answer(campaign, answer),
                     "task": task.public if task else None,
                 }
         return {
-            "campaign": _public_campaign(campaign),
+            "campaign": public_campaign(campaign),
             "current": current,
-            "summary": campaign_store.summary(campaign["campaignId"]),
+            "summary": public_summary(
+                campaign, campaign_store.summary(campaign["campaignId"])
+            ),
         }
 
     @router.get("/pool")
-    def pool(conceptId: str = Query(min_length=1), subskill: str = Query(default="recognize")) -> dict[str, Any]:
+    def pool(
+        response: Response,
+        conceptId: str = Query(min_length=1, max_length=160),
+        subskill: str = Query(default="recognize", max_length=80),
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        resolve_learner(authorization, "demo", session_cookie)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Authorization, Cookie"
+        require_known_objective(conceptId)
         entries = eligible_pool(conceptId, subskill)
         role_counts = {
             role: sum(1 for entry in entries if entry["role"] == role)
@@ -515,6 +985,9 @@ def build_training_router(
             "roleCounts": role_counts,
             "allowedLengths": list(CAMPAIGN_LENGTHS),
             "source": "audited_waveform_only",
+            "independentReceiptsAvailable": training_independent_receipt_available(
+                conceptId, subskill
+            ),
         }
 
     @router.post("")
@@ -525,30 +998,44 @@ def build_training_router(
     ) -> dict[str, Any]:
         if body.subskill not in ALLOWED_SUBSKILLS:
             raise HTTPException(status_code=422, detail="Unknown Training subskill")
+        require_known_objective(body.conceptId)
         learner = resolve_learner(authorization, body.learnerId, session_cookie)
-        active = campaign_store.get_active(learner)
-        if active and not body.replaceActive:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "active_training_campaign", "campaignId": active["campaignId"]},
-            )
-        if active:
-            campaign_store.abandon(active["campaignId"])
         entries = eligible_pool(body.conceptId, body.subskill)
         if not entries:
             raise HTTPException(status_code=409, detail="No eligible distinct audited waveform ECGs support this competency")
-        plan = _build_plan(
+        canonical_plan = _build_plan(
             entries,
             min(body.length, len(entries)),
             reserve_transfer_roles={"target", "mimic"}
             if body.subskill == "discriminate" else None,
         )
         learning_store.ensure_profile(learner)
-        campaign = campaign_store.create_campaign(
-            learner, body.conceptId, body.subskill, body.length, len(entries), plan,
-            context_key=body.contextKey,
-        )
-        campaign = campaign_store.claim_next(campaign["campaignId"]) or campaign
+        try:
+            started = campaign_store.start_or_return_campaign(
+                learner,
+                body.conceptId,
+                body.subskill,
+                body.length,
+                len(entries),
+                canonical_plan,
+                entries,
+                context_key=body.contextKey,
+                replace_active=body.replaceActive,
+            )
+        except TrainingExposureConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "training_live_exposure_conflict",
+                    "message": "Another active assessment is using ECGs required by this exact set. Finish that assessment, then start Training again.",
+                },
+            ) from exc
+        campaign = started["campaign"]
+        if started["status"] == "existing":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "active_training_campaign", "campaignId": campaign["campaignId"]},
+            )
         return payload(campaign)
 
     @router.get("/active")
@@ -566,6 +1053,49 @@ def build_training_router(
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
         return payload(owned(campaign_id, authorization, session_cookie))
+
+    @router.get("/{campaign_id}/waveform/{case_ref}")
+    def get_campaign_waveform(
+        campaign_id: str,
+        case_ref: str,
+        response: Response,
+        leads: str | None = Query(default=None, max_length=120),
+        start: float = Query(default=0, ge=0),
+        end: float | None = Query(default=None, ge=0),
+        maxPoints: int = Query(default=1200, ge=100, le=5000),
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        campaign = owned(campaign_id, authorization, session_cookie)
+        canonical_id = next(
+            (
+                str(candidate)
+                for candidate in (
+                    campaign.get("pendingCaseId"),
+                    campaign.get("feedbackCaseId"),
+                )
+                if candidate and reference_matches(campaign, case_ref, str(candidate))
+            ),
+            None,
+        )
+        if canonical_id is None:
+            raise HTTPException(status_code=404, detail="Training ECG not found")
+        lead_list = [lead.strip() for lead in leads.split(",")] if leads else None
+        if lead_list and (len(lead_list) > 12 or any(not lead or len(lead) > 8 for lead in lead_list)):
+            raise HTTPException(status_code=422, detail="Invalid waveform lead selection")
+        waveform = repo.get_waveform_window(
+            canonical_id,
+            leads=lead_list,
+            start=start,
+            end=end,
+            max_points=maxPoints,
+        )
+        if not waveform:
+            raise HTTPException(status_code=404, detail="Training ECG not found")
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Authorization, Cookie"
+        return public_waveform(waveform, case_reference=case_ref)
 
     @router.post("/{campaign_id}/next")
     def next_case(
@@ -588,17 +1118,55 @@ def build_training_router(
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
         campaign = owned(campaign_id, authorization, session_cookie)
-        prior = campaign_store.get_answer(campaign_id, body.caseId)
-        if prior:
-            response = payload(campaign_store.get_campaign(campaign_id))
-            response.update({"answer": prior, "replay": True})
-            return response
-        if campaign.get("pendingCaseId") != body.caseId:
+        pending_id = str(campaign.get("pendingCaseId") or "")
+        feedback_id = str(campaign.get("feedbackCaseId") or "")
+        canonical_id = next(
+            (
+                candidate
+                for candidate in (pending_id, feedback_id)
+                if candidate and reference_matches(campaign, body.caseId, candidate)
+            ),
+            None,
+        )
+        if canonical_id is None:
             raise HTTPException(
                 status_code=409,
-                detail={"code": "training_case_not_pending", "pendingCaseId": campaign.get("pendingCaseId")},
+                detail={
+                    "code": "training_case_not_pending",
+                    "pendingCaseId": (
+                        case_reference(campaign, pending_id) if pending_id else None
+                    ),
+                },
             )
-        case = repo.get_case(body.caseId)
+        body = body.model_copy(update={"caseId": canonical_id})
+        prior = campaign_store.get_answer(campaign_id, canonical_id)
+        if prior:
+            if (
+                prior.get("integrityStatus") == "finalizing"
+                or not prior.get("receipt")
+                or not prior["receipt"].get("eventId")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "training_legacy_answer_quarantined",
+                        "message": "This historical Training answer has no complete receipt ledger.",
+                    },
+                )
+            response = payload(campaign_store.get_campaign(campaign_id))
+            response.update({"answer": public_answer(campaign, prior), "replay": True})
+            return response
+        if pending_id != canonical_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "training_case_not_pending",
+                    "pendingCaseId": (
+                        case_reference(campaign, pending_id) if pending_id else None
+                    ),
+                },
+            )
+        case = repo.get_case(canonical_id)
         if not _is_training_case(case, campaign["conceptId"], campaign["subskill"]):
             raise HTTPException(status_code=409, detail="Training submissions require a source-contracted Tier A/B waveform ECG")
         slot = campaign_store.get_slot_for_case(campaign_id, body.caseId)
@@ -613,173 +1181,104 @@ def build_training_router(
                 status_code=422,
                 detail="The submitted receipt target does not match the server-owned campaign contract",
             )
-        expected = _expected_answer(case, concept, subskill)
-        focus_grounded = _focus_is_grounded(case, slot["caseFocus"], subskill)
-        classification_correct = expected is not None and body.selectedAnswer == expected and focus_grounded
-        evidence_valid, trace_native = _evidence_valid(
-            case, receipt_concept, subskill, body.viewerTaskEvidence, body.evidenceNote
-        )
-        task_contract = build_subskill_task(
-            case_id=body.caseId,
-            case_concept=concept,
-            subskill=subskill,
-            case_focus=str(slot["caseFocus"]),
-            contrast_family=_contrast_family(concept),
-        )
-        task_complete = True
-        task_score = 1.0 if evidence_valid else 0.0
-        evidence_source = "trace_native" if trace_native else "response"
-        if subskill in {"discriminate", "explain_mechanism"}:
-            task_complete = bool(task_contract and body.subskillTaskAnswer)
-            evidence_valid = bool(
-                task_complete
-                and task_contract
-                and body.subskillTaskAnswer == task_contract.correct_answer
+        try:
+            reservation = campaign_store.claim_answer_submission(
+                campaign_id=campaign_id,
+                case_id=body.caseId,
+                learner_id=str(campaign["learnerId"]),
             )
-            task_score = 1.0 if evidence_valid else 0.0
-            evidence_source = task_contract.evidence_source if task_contract else "response"
-        elif subskill == "calibrate_confidence":
-            task_complete = task_contract is not None
-            task_score, evidence_valid = calibration_grade(
-                body.confidence, classification_correct
+        except AssessmentLedgerError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "training_assessment_unavailable",
+                    "message": "This Training item changed before it could be reserved. Resume the campaign and try again.",
+                },
+            ) from exc
+        if reservation["status"] == "replay":
+            recorded = reservation
+        elif reservation["status"] != "claimed":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "training_case_not_pending",
+                    "pendingCaseId": (
+                        case_reference(
+                            campaign, str(reservation.get("pendingCaseId"))
+                        )
+                        if reservation.get("pendingCaseId")
+                        else None
+                    ),
+                },
             )
-            evidence_source = "confidence_commit"
-
-        subskill_correct = (
-            evidence_valid
-            if subskill == "calibrate_confidence"
-            else classification_correct and evidence_valid
-        )
-        misconceptions: list[str] = []
-        if not classification_correct:
-            misconceptions.append(f"target_status_error:{concept}")
-        if task_complete and not evidence_valid:
-            misconceptions.append(f"subskill_task_error:{subskill}")
-
-        structured = StructuredInterpretation(
-            framework="clerkship",
-            selectedConcepts=[concept] if body.selectedAnswer == "present" else [],
-        )
-        attempt = AttemptRequest(
-            learnerId=campaign["learnerId"],
-            caseId=body.caseId,
-            mode="concept_practice",
-            focusObjective=concept,
-            structuredAnswer=structured,
-            freeTextAnswer=(
-                f"{concept}: {body.selectedAnswer}."
-                + (f" Evidence: {body.evidenceNote.strip()}" if body.evidenceNote.strip() else "")
-            ),
-            confidence=body.confidence,
-            hintsUsed=body.hintsUsed,
-        )
-        grade = {
-            **grade_attempt(case, attempt),
-            "masteryDelta": {},
-            "legacyObjectiveMasterySuppressed": True,
-            "trainingClassificationCorrect": classification_correct,
-            "trainingSubskillEvidenceCorrect": evidence_valid,
-            "trainingSubskillTaskComplete": task_complete,
-            "trainingSubskillTaskScore": round(task_score, 4),
-            "trainingEvidenceSource": evidence_source,
-        }
-        exact_receipt_target = receipt_concept == concept
-        independently_assessable = bool(
-            (subskill in {"localize", "measure"} and trace_native and evidence_valid)
-            or (
-                subskill == "discriminate"
-                and task_complete
-                and task_contract
-                and task_contract.independently_assessable
-            )
-            or (
-                subskill == "explain_mechanism"
-                and task_complete
-                and task_contract
-                and task_contract.independently_assessable
-            )
-            or (subskill == "calibrate_confidence" and task_complete)
-        )
-        independently_assessed = (
-            slot["phase"] == "transfer"
-            and body.hintsUsed == 0
-            and exact_receipt_target
-            and independently_assessable
-            and (
-                subskill in {"discriminate", "explain_mechanism", "calibrate_confidence"}
-                or expected == "present"
-                or concept in MEASUREMENT_TARGETS
-            )
-            and focus_grounded
-        )
-        event = learning_store.save_guided_learning_event(
-            campaign["learnerId"],
-            {
-                "eventKey": f"train:{campaign_id}:{slot['position']}:{body.caseId}:{subskill}",
-                "_serverVerifiedScoring": True,
-                "moduleId": "train",
-                "sceneId": f"{receipt_concept}:{slot['phase']}",
-                "interactionId": f"{body.caseId}:{subskill}",
-                "concept": receipt_concept,
-                "subskills": [subskill],
-                "score": task_score if subskill == "calibrate_confidence" else (1.0 if subskill_correct else 0.0),
-                "correct": subskill_correct,
-                "attempts": 1,
-                "assistance": "scaffolded" if body.hintsUsed else "independent",
-                "hintsUsed": body.hintsUsed,
-                "confidence": body.confidence,
-                "evidenceLevel": "independent_transfer" if independently_assessed else "guided",
-                "trainingPhase": slot["phase"],
-                "evidenceSource": evidence_source,
-                "caseId": body.caseId,
-                "caseProvenance": "real_eligible",
-                "caseEligible": exact_receipt_target
-                and focus_grounded
-                and _is_training_case(case, concept, subskill),
-                "misconceptions": misconceptions,
-                "_retentionVerified": independently_assessed,
-                "_retentionMorphologyKey": retention_morphology_key(case),
-            },
-        )
-        response_data = {
-            "selectedAnswer": body.selectedAnswer,
-            "confidence": body.confidence,
-            "hintsUsed": body.hintsUsed,
-            "evidenceNote": body.evidenceNote,
-            "viewerTaskEvidence": body.viewerTaskEvidence,
-            "subskillTaskAnswer": body.subskillTaskAnswer,
-            "expectedAnswer": expected,
-            "structuredAnswer": structured.model_dump(),
-            "freeTextAnswer": attempt.freeTextAnswer,
-        }
-        summary = {
-            "position": slot["position"],
-            "caseId": body.caseId,
-            "phase": slot["phase"],
-            "correct": subskill_correct,
-            "classificationCorrect": classification_correct,
-            "focusGrounded": focus_grounded,
-            "selectedResponse": body.selectedAnswer,
-            "confidence": body.confidence,
-            "hintsUsed": body.hintsUsed,
-            "evidenceLevel": event["effectiveEvidenceLevel"],
-            "misconceptions": misconceptions,
-        }
-        recorded = campaign_store.record_answer(
-            campaign_id=campaign_id, case_id=body.caseId, response=response_data,
-            # Deterministic grading and evidence persistence never wait for an
-            # LLM. Post-commit TutorChat remains available on explicit use.
-            grade=grade, tutor=None, receipt=event, summary=summary,
-            confidence=body.confidence, hints_used=body.hintsUsed,
-        )
+        else:
+            try:
+                recorded = _grade_claimed_training_submission(
+                    campaign_store=campaign_store,
+                    learning_store=learning_store,
+                    campaign=campaign,
+                    case=case,
+                    slot=slot,
+                    body=body,
+                    reservation=reservation,
+                )
+            except AssessmentLedgerError as exc:
+                campaign_store.release_answer_submission(
+                    campaign_id=campaign_id,
+                    learner_id=str(campaign["learnerId"]),
+                    lease_id=str(reservation["leaseId"]),
+                    submission_key=str(reservation["submissionKey"]),
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "training_assessment_changed",
+                        "message": "This Training item changed before the answer could be committed. Resume the campaign to continue safely.",
+                    },
+                ) from exc
+            except Exception:
+                campaign_store.release_answer_submission(
+                    campaign_id=campaign_id,
+                    learner_id=str(campaign["learnerId"]),
+                    lease_id=str(reservation["leaseId"]),
+                    submission_key=str(reservation["submissionKey"]),
+                )
+                raise
+            if recorded["status"] not in {"recorded", "replay"}:
+                campaign_store.release_answer_submission(
+                    campaign_id=campaign_id,
+                    learner_id=str(campaign["learnerId"]),
+                    lease_id=str(reservation["leaseId"]),
+                    submission_key=str(reservation["submissionKey"]),
+                )
         if recorded["status"] == "replay":
             response = payload(campaign_store.get_campaign(campaign_id))
-            response.update({"answer": recorded["answer"], "replay": True})
+            response.update({
+                "answer": public_answer(campaign, recorded["answer"]),
+                "replay": True,
+            })
             return response
+        if recorded["status"] == "legacy_incomplete":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "training_legacy_answer_quarantined",
+                    "message": "This historical Training answer has no complete receipt ledger.",
+                },
+            )
         if recorded["status"] != "recorded":
-            raise HTTPException(status_code=409, detail="Training case is no longer pending")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "training_assessment_changed",
+                    "message": "This Training item changed before the answer could be committed. Resume the campaign to continue safely.",
+                },
+            )
         response = payload(campaign_store.get_campaign(campaign_id))
-        response.update({"answer": recorded["answer"], "replay": False})
+        response.update({
+            "answer": public_answer(campaign, recorded["answer"]),
+            "replay": False,
+        })
         return response
 
     @router.post("/{campaign_id}/abandon")
@@ -788,7 +1287,12 @@ def build_training_router(
         authorization: str | None = Header(default=None),
         session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     ) -> dict[str, Any]:
-        owned(campaign_id, authorization, session_cookie)
-        return payload(campaign_store.abandon(campaign_id))
+        campaign = owned(campaign_id, authorization, session_cookie)
+        return payload(
+            campaign_store.abandon(
+                campaign_id,
+                learner_id=str(campaign["learnerId"]),
+            )
+        )
 
     return router

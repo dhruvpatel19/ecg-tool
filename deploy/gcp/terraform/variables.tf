@@ -424,6 +424,111 @@ variable "acme_email" {
   }
 }
 
+variable "auth_email_delivery_mode" {
+  description = "Provider-neutral account-email transport for the runtime. GCP deployments support disabled during foundation setup and smtp for an enabled instance; memory is never deployable."
+  type        = string
+  default     = "disabled"
+
+  validation {
+    condition     = contains(["disabled", "smtp"], var.auth_email_delivery_mode)
+    error_message = "auth_email_delivery_mode must be disabled or smtp."
+  }
+}
+
+variable "auth_email_from_address" {
+  description = "Non-secret RFC-style From address used for verification, recovery, and email 2FA."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = length(var.auth_email_from_address) <= 320 && !strcontains(var.auth_email_from_address, "\n") && !strcontains(var.auth_email_from_address, "\r") && (var.auth_email_from_address == "" || strcontains(var.auth_email_from_address, "@"))
+    error_message = "auth_email_from_address must be empty during foundation setup or a single-line email value of at most 320 characters."
+  }
+}
+
+variable "auth_email_reply_to" {
+  description = "Non-secret monitored support Reply-To address for authentication and security mail. Required before enabling the production VM; empty is allowed only during foundation setup."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = length(var.auth_email_reply_to) <= 320 && !strcontains(var.auth_email_reply_to, "\n") && !strcontains(var.auth_email_reply_to, "\r") && (var.auth_email_reply_to == "" || strcontains(var.auth_email_reply_to, "@"))
+    error_message = "auth_email_reply_to must be empty during foundation setup or a single-line email value of at most 320 characters."
+  }
+}
+
+variable "auth_public_app_url" {
+  description = "Non-secret final HTTPS frontend origin used to build verification, reset, and email-change links."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.auth_public_app_url == "" || can(regex("^https://[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+(:443)?$", var.auth_public_app_url))
+    error_message = "auth_public_app_url must be empty during foundation setup or an HTTPS origin without path, query, fragment, or credentials."
+  }
+}
+
+variable "auth_smtp_host" {
+  description = "Non-secret SMTP submission hostname. Do not include a scheme or port."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.auth_smtp_host == "" || (length(var.auth_smtp_host) <= 253 && strcontains(var.auth_smtp_host, ".") && can(regex("^[A-Za-z0-9.-]+$", var.auth_smtp_host)))
+    error_message = "auth_smtp_host must be empty during foundation setup or a single DNS hostname."
+  }
+}
+
+variable "auth_smtp_port" {
+  description = "SMTP submission port. This reviewed GCP transport uses explicit STARTTLS on port 587; implicit-TLS ports are not supported."
+  type        = number
+  default     = 587
+
+  validation {
+    condition     = var.auth_smtp_port == 587
+    error_message = "auth_smtp_port must be 587 for the reviewed explicit-STARTTLS transport."
+  }
+}
+
+variable "auth_smtp_username" {
+  description = "Non-secret SMTP submission username. It is required whenever the production VM is enabled; the password remains in Secret Manager."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = length(var.auth_smtp_username) <= 320 && !strcontains(var.auth_smtp_username, "\n") && !strcontains(var.auth_smtp_username, "\r")
+    error_message = "auth_smtp_username must be a single-line value of at most 320 characters."
+  }
+}
+
+variable "auth_smtp_starttls" {
+  description = "Require SMTP STARTTLS. Enabled instances fail closed unless this remains true."
+  type        = bool
+  default     = true
+}
+
+variable "auth_smtp_timeout_seconds" {
+  description = "Bounded SMTP connection and delivery timeout in seconds."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.auth_smtp_timeout_seconds == floor(var.auth_smtp_timeout_seconds) && var.auth_smtp_timeout_seconds >= 2 && var.auth_smtp_timeout_seconds <= 60
+    error_message = "auth_smtp_timeout_seconds must be an integer from 2 through 60."
+  }
+}
+
+variable "auth_smtp_password_secret_id" {
+  description = "Secret Manager container ID for the required SMTP password. Terraform creates no secret version and never accepts the password value."
+  type        = string
+  default     = "ecg-auth-smtp-password"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,255}$", var.auth_smtp_password_secret_id))
+    error_message = "auth_smtp_password_secret_id must be a valid 1-255 character Secret Manager ID."
+  }
+}
+
 variable "llm_provider" {
   description = "Runtime tutor provider. Production tutoring uses openai-compatible; mock is for deterministic non-production validation only."
   type        = string
@@ -565,6 +670,23 @@ variable "min_state_free_bytes" {
   validation {
     condition     = var.min_state_free_bytes == floor(var.min_state_free_bytes) && var.min_state_free_bytes >= 268435456 && var.min_state_free_bytes <= 53687091200
     error_message = "min_state_free_bytes must be an integer from 256 MiB through 50 GiB."
+  }
+}
+
+variable "authenticated_retention_policy_acknowledged" {
+  description = "Set true only after product/legal approval of the authenticated-learner retention and deletion policy. This is an external governance acknowledgement, not a retention duration."
+  type        = bool
+  default     = false
+}
+
+variable "authenticated_retention_policy_reference" {
+  description = "Non-secret policy ID or documentation location supporting authenticated_retention_policy_acknowledged. Leave empty until approved."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.authenticated_retention_policy_reference == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._:/#@+-]{7,511}$", var.authenticated_retention_policy_reference))
+    error_message = "authenticated_retention_policy_reference must be empty or an 8-512 character single-line non-secret policy ID/URL using only letters, digits, . _ : / # @ + -."
   }
 }
 

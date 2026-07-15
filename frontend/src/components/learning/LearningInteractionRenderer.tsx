@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDown, ArrowUp, CheckCircle2, CircleAlert, RotateCcw, Target } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { feedbackFor, gradeInteraction } from "@/lib/learning/gradeInteraction";
 import type { InteractionEvidence, LearningInteraction } from "@/lib/learning/interactionTypes";
 import type { ViewerTaskEvidence } from "@/lib/types";
@@ -11,6 +11,12 @@ const ALL_LEADS = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4"
 type LearningInteractionRendererProps = {
   interaction: LearningInteraction;
   packetMeasurements?: Record<string, unknown>;
+  gradePacketMeasurement?: (request: {
+    measurementKey: string;
+    value: number;
+    tolerance: number;
+    derive?: "rr_from_heart_rate";
+  }) => Promise<{ correct: boolean; noTarget: boolean; feedback: string }>;
   viewerEvidence?: ViewerTaskEvidence | null;
   onEvidence: (evidence: InteractionEvidence) => void;
   savedEvidence?: InteractionEvidence;
@@ -34,16 +40,21 @@ function scrambledSequence(interaction: Extract<LearningInteraction, { kind: "se
   return values;
 }
 
-export function LearningInteractionRenderer({ interaction, packetMeasurements, viewerEvidence, onEvidence, savedEvidence }: LearningInteractionRendererProps) {
+export function LearningInteractionRenderer({ interaction, packetMeasurements, gradePacketMeasurement, viewerEvidence, onEvidence, savedEvidence }: LearningInteractionRendererProps) {
   const [attempts, setAttempts] = useState(savedEvidence?.attempts ?? 0);
   const [response, setResponse] = useState<unknown>(() => savedEvidence?.response ?? initialResponse(interaction));
   const [evidence, setEvidence] = useState<InteractionEvidence | null>(savedEvidence ?? null);
+  const [inputRevision, setInputRevision] = useState(0);
+  const [checking, setChecking] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
 
   useEffect(() => {
     setAttempts(savedEvidence?.attempts ?? 0);
     setResponse(savedEvidence?.response ?? initialResponse(interaction));
     setEvidence(savedEvidence ?? null);
-  }, [interaction.id]);
+    setChecking(false);
+    setServerError(null);
+  }, [interaction, savedEvidence]);
 
   useEffect(() => {
     if (!viewerEvidence) return;
@@ -57,9 +68,42 @@ export function LearningInteractionRenderer({ interaction, packetMeasurements, v
   const notAssessable = evidence?.feedbackBranch === "not_assessable";
   const showScaffold = attempts >= interaction.maxAttemptsBeforeScaffold && !evidence?.correct;
 
-  function submit() {
+  async function submit() {
     const nextAttempts = attempts + 1;
-    const result = gradeInteraction(interaction, response, nextAttempts, { packetMeasurements });
+    let serverMeasurementGrade: { correct: boolean; noTarget: boolean } | undefined;
+    if (
+      interaction.kind === "numeric_entry"
+      && interaction.target.source === "packet_measurement"
+      && interaction.target.measurementKey
+      && packetMeasurements?.[interaction.target.measurementKey] === undefined
+    ) {
+      if (!gradePacketMeasurement) {
+        setServerError("This reviewed measurement could not be checked right now. Your entry is still here.");
+        return;
+      }
+      const value = Number(response);
+      if (!Number.isFinite(value)) return;
+      setChecking(true);
+      setServerError(null);
+      try {
+        const graded = await gradePacketMeasurement({
+          measurementKey: interaction.target.measurementKey,
+          value,
+          tolerance: interaction.target.tolerance,
+          derive: interaction.target.derive,
+        });
+        serverMeasurementGrade = {
+          correct: graded.correct,
+          noTarget: graded.noTarget,
+        };
+      } catch {
+        setServerError("The measurement check did not complete. Your entry is still here—try again.");
+        return;
+      } finally {
+        setChecking(false);
+      }
+    }
+    const result = gradeInteraction(interaction, response, nextAttempts, { packetMeasurements, serverMeasurementGrade });
     setAttempts(nextAttempts);
     setEvidence(result);
     onEvidence(result);
@@ -68,6 +112,7 @@ export function LearningInteractionRenderer({ interaction, packetMeasurements, v
   function reset() {
     setResponse(initialResponse(interaction));
     setEvidence(null);
+    setInputRevision((current) => current + 1);
   }
 
   return (
@@ -82,7 +127,7 @@ export function LearningInteractionRenderer({ interaction, packetMeasurements, v
       </header>
 
       <div className="learning-interaction-body">
-        <InteractionInput interaction={interaction} response={response} setResponse={setResponse} viewerEvidence={viewerEvidence} />
+        <InteractionInput key={`${interaction.id}:${inputRevision}`} interaction={interaction} response={response} setResponse={setResponse} viewerEvidence={viewerEvidence} />
         {showScaffold ? (
           <div className="learning-scaffold" role="note">
             <strong>Smaller step</strong>
@@ -95,12 +140,13 @@ export function LearningInteractionRenderer({ interaction, packetMeasurements, v
             <span><strong>{feedback.heading}</strong>{feedback.body}{feedback.nextPrompt ? <em>{feedback.nextPrompt}</em> : null}</span>
           </div>
         ) : null}
+        {serverError ? <div className="warning" role="alert">{serverError}</div> : null}
       </div>
 
       <footer className="learning-interaction-actions">
         <button className="button subtle" type="button" onClick={reset}><RotateCcw size={15} /> Reset response</button>
         <span className="muted">{interaction.subskills.map((skill) => skill.replaceAll("_", " ")).join(" · ")}</span>
-        <button className="button primary" type="button" onClick={submit} disabled={!responseReady(interaction, response, viewerEvidence)}>Check my evidence</button>
+        <button className="button primary" type="button" onClick={() => void submit()} disabled={checking || !responseReady(interaction, response, viewerEvidence)}>{checking ? "Checking…" : "Check my evidence"}</button>
       </footer>
     </section>
   );
@@ -196,10 +242,7 @@ function InteractionInput({ interaction, response, setResponse, viewerEvidence }
   }
 
   if (interaction.kind === "clinical_stage") {
-    const answers = (response as Record<string, string>) ?? {};
-    const firstUnanswered = interaction.stages.findIndex((stage) => !answers[stage.id]);
-    const visibleThrough = firstUnanswered === -1 ? interaction.stages.length - 1 : firstUnanswered;
-    return <div className="learning-clinical-stages">{interaction.stages.slice(0, visibleThrough + 1).map((stage, index) => <fieldset key={stage.id} className={index === visibleThrough ? "active" : "committed"}><legend>Stage {index + 1} · {stage.heading}</legend><p>{stage.revealCopy}</p><strong>{stage.question}</strong><div className="learning-option-grid">{stage.options.map((option) => <button key={option.id} type="button" className={answers[stage.id] === option.id ? "selected" : ""} aria-pressed={answers[stage.id] === option.id} onClick={() => setResponse({ ...answers, [stage.id]: option.id })}>{option.label}</button>)}</div>{answers[stage.id] && index === visibleThrough && index < interaction.stages.length - 1 ? <p className="muted">Decision committed. The next clinical information is now available below.</p> : null}</fieldset>)}</div>;
+    return <ClinicalStageInput interaction={interaction} response={response} setResponse={setResponse} />;
   }
 
   if (interaction.kind === "hotspot_map") {
@@ -258,6 +301,53 @@ function InteractionInput({ interaction, response, setResponse, viewerEvidence }
   }
 
   return null;
+}
+
+function ClinicalStageInput({ interaction, response, setResponse }: {
+  interaction: Extract<LearningInteraction, { kind: "clinical_stage" }>;
+  response: unknown;
+  setResponse: (value: unknown) => void;
+}) {
+  const answers = response && typeof response === "object"
+    ? response as Record<string, string>
+    : {};
+  const firstUnanswered = interaction.stages.findIndex((stage) => !answers[stage.id]);
+  const activeIndex = firstUnanswered === -1 ? interaction.stages.length : firstUnanswered;
+  const [draftChoice, setDraftChoice] = useState({ stageId: "", optionId: "" });
+
+  const visibleStages = interaction.stages.slice(0, Math.min(activeIndex + 1, interaction.stages.length));
+  return <div className="learning-clinical-stages">
+    {visibleStages.map((stage, index) => {
+      const committedOptionId = answers[stage.id];
+      const committed = Boolean(committedOptionId);
+      const active = index === activeIndex && !committed;
+      const draftOptionId = active && draftChoice.stageId === stage.id ? draftChoice.optionId : "";
+      const selectedOptionId = committedOptionId || draftOptionId;
+      return <fieldset key={stage.id} className={active ? "active" : "committed"} disabled={committed}>
+        <legend>Stage {index + 1} · {stage.heading}</legend>
+        <p>{stage.revealCopy}</p>
+        <strong>{stage.question}</strong>
+        <div className="learning-option-grid">
+          {stage.options.map((option) => <button
+            key={option.id}
+            type="button"
+            disabled={committed}
+            className={selectedOptionId === option.id ? "selected" : ""}
+            aria-pressed={selectedOptionId === option.id}
+            onClick={() => setDraftChoice({ stageId: stage.id, optionId: option.id })}
+          >{option.label}</button>)}
+        </div>
+        {active ? <button
+          className="button primary small learning-stage-commit"
+          type="button"
+          disabled={!draftOptionId}
+          onClick={() => setResponse({ ...answers, [stage.id]: draftOptionId })}
+        >{index === interaction.stages.length - 1 ? "Commit final stage" : "Commit stage and reveal next"}</button> : null}
+        {committed ? <p className="muted" role="status">Decision committed. This stage is locked.</p> : null}
+      </fieldset>;
+    })}
+    {firstUnanswered === -1 ? <p className="muted" role="status">All staged decisions are committed. Check your evidence when ready.</p> : null}
+  </div>;
 }
 
 function MapCanvas({ canvas }: { canvas: "torso" | "hexaxial" | "conduction_tree" | "waveform" | "heart" }) {

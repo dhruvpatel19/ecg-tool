@@ -3,12 +3,15 @@
 A SEPARATE grader from ``grading.grade_attempt`` (which is a concept-set intersection
 the Foundations loop depends on). This one grades the answer-class model with the 3 axes,
 compound-option parsing, the required-safety/acuity caps applied at grade time, and the
-confidence upside-cap. Its OUTPUT is the same ``grade`` dict contract ``save_attempt``
-consumes, so mastery tracking is reused unchanged.
+confidence upside-cap. Its output preserves the common ``grade`` shape for
+attempt history and feedback, but this automated-screened bank is formative:
+it never emits legacy objective-mastery deltas. Exact Clinical observations are
+recorded separately as formative concept x subskill events by the shift writer.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -109,17 +112,6 @@ def _discriminator_actions(item: ClinicalCaseItem, packet: dict[str, Any], teste
     return actions
 
 
-def _mastery_delta(tested: list[str], correct: bool, confidence: int | None) -> dict[str, float]:
-    deltas: dict[str, float] = {}
-    high_conf = (confidence or 3) >= 4
-    for obj in tested:
-        if correct:
-            deltas[obj] = 0.08
-        else:
-            deltas[obj] = -0.1 if high_conf else -0.06
-    return deltas
-
-
 def _safety_capped(item: ClinicalCaseItem, option: Option, packet: dict[str, Any]) -> bool:
     """True if an ideal/acceptable option must be capped for missing a required safety action."""
     if option.answer_class not in {"ideal", "acceptable"}:
@@ -158,7 +150,12 @@ def _grade_dict(
         "missedObjectives": [] if correct else tested,
         "overcalledObjectives": [],
         "misconceptions": [],
-        "masteryDelta": _mastery_delta(tested, correct, confidence),
+        # Fail closed: the currently served authored bank is pending named
+        # clinician sign-off, so neither a correct answer nor a miss/timeout may
+        # move the legacy objective summary. A future reviewed-independent bank
+        # must use a separate server-authorized exact-receipt path; changing an
+        # item status or client payload is deliberately insufficient.
+        "masteryDelta": {},
         "feedback": feedback,
         "teachingPoints": [_cap(item.evidence_manifest.action_rationale)] if item.evidence_manifest.action_rationale else [],
         # clinical extras
@@ -184,11 +181,19 @@ def _grade_option_based(item: ClinicalCaseItem, packet: dict[str, Any], answer: 
             item, 0.0, tested, correct=False,
             feedback="Time. Here is the safest interpretation — review the discriminating feature.",
             answer_class=None, confidence=answer.confidence, timed_out=True,
+            axes={"clinical_decision": 0.0},
             calibration={"timedOut": True, "confidence": answer.confidence},
         )
     option = next((o for o in item.options if o.id == answer.selected_option_id), None)
     if option is None:
-        return _grade_dict(item, 0.0, tested, correct=False, feedback="No option selected.")
+        return _grade_dict(
+            item,
+            0.0,
+            tested,
+            correct=False,
+            feedback="No option selected.",
+            axes={"clinical_decision": 0.0},
+        )
 
     base = BASE_CREDIT.get(option.answer_class, 0.0)
     safety_flags: list[str] = []
@@ -227,9 +232,14 @@ def _grade_option_based(item: ClinicalCaseItem, packet: dict[str, Any], answer: 
         "highConfidenceWrong": high_conf_wrong,
         "confidence": answer.confidence,
     }
+    axes = {
+        **option.axis_scores,
+        "clinical_decision": round(base, 3),
+        "safety": 0.0 if capped or option.answer_class in {"under_triage", "unsafe"} else 1.0,
+    }
     return _grade_dict(
         item, score, tested, correct, feedback,
-        answer_class=option.answer_class, axes=option.axis_scores, confidence=answer.confidence,
+        answer_class=option.answer_class, axes=axes, confidence=answer.confidence,
         safety_flags=safety_flags, calibration=calibration,
         viewer_actions=_discriminator_actions(item, packet, tested),
     )
@@ -276,6 +286,164 @@ def _grade_click(item: ClinicalCaseItem, packet: dict[str, Any], answer: Clinica
     return _grade_dict(item, 1.0 if correct else 0.0, tested, correct, feedback,
                        answer_class=None, axes=axes, confidence=answer.confidence,
                        viewer_actions=_discriminator_actions(item, packet, tested))
+
+
+def _grade_fillin(
+    item: ClinicalCaseItem, packet: dict[str, Any], answer: ClinicalAnswer
+) -> dict[str, Any]:
+    """Grade a unit-aware numeric response against the exact packet served.
+
+    The target value is never copied into the learner payload.  A response
+    within the authored tolerance is successful; a near miss earns visible
+    partial practice credit but is still recorded as a miss for the exact
+    formative measurement cell.
+    """
+
+    tested = _tested_objectives(item, packet)
+    task = item.fill_in_task
+    if answer.timed_out or answer.fill_in_value is None or task is None:
+        return _grade_dict(
+            item,
+            0.0,
+            tested,
+            correct=False,
+            feedback="Time." if answer.timed_out else "No measurement was entered.",
+            axes={"measurement_accuracy": 0.0},
+            confidence=answer.confidence,
+            timed_out=answer.timed_out,
+            calibration={"timedOut": answer.timed_out, "confidence": answer.confidence},
+        )
+
+    expected_raw = grounding.features(packet).get(task.expected_feature)
+    try:
+        expected = float(expected_raw)
+        submitted = float(answer.fill_in_value)
+    except (TypeError, ValueError):
+        expected = math.nan
+        submitted = math.nan
+    if not math.isfinite(expected) or not math.isfinite(submitted):
+        return _grade_dict(
+            item,
+            0.0,
+            tested,
+            correct=False,
+            feedback="This measurement could not be graded from the grounded ECG packet.",
+            axes={"measurement_accuracy": 0.0},
+            confidence=answer.confidence,
+        )
+
+    error = abs(submitted - expected)
+    correct = error <= task.tolerance
+    score = 1.0 if correct else (0.5 if error <= 2 * task.tolerance else 0.0)
+    submitted_text = f"{submitted:g} {task.unit}"
+    expected_text = f"{expected:g} {task.unit}"
+    feedback = (
+        f"Within range — {submitted_text} is within ±{task.tolerance:g} {task.unit} "
+        f"of the packet measurement ({expected_text})."
+        if correct
+        else f"Your estimate was {submitted_text}; the packet measurement is {expected_text}. "
+        "Recheck QRS onset, T-wave end, and the ECG grid scale."
+    )
+    high_conf_wrong = bool(not correct and confidence_band(answer.confidence) == "high")
+    return _grade_dict(
+        item,
+        score,
+        tested,
+        correct,
+        feedback,
+        answer_class=None,
+        axes={"measurement_accuracy": score},
+        confidence=answer.confidence,
+        calibration={
+            "measurementError": round(error, 3),
+            "highConfidenceWrong": high_conf_wrong,
+            "confidence": answer.confidence,
+        },
+        viewer_actions=_discriminator_actions(item, packet, tested),
+    )
+
+
+def _grade_matching(
+    item: ClinicalCaseItem, packet: dict[str, Any], answer: ClinicalAnswer
+) -> dict[str, Any]:
+    """Grade a source-boundary mapping without manufacturing pathology mastery."""
+
+    task = item.matching_task
+    if task is None:
+        return _grade_dict(
+            item,
+            0.0,
+            [],
+            correct=False,
+            feedback="This matching task could not be graded.",
+            axes={"evidence_source_matching": 0.0},
+            confidence=answer.confidence,
+        )
+
+    axis_by_source = {
+        "ecg_support": "ecg_evidence",
+        "authored_context": "authored_context_boundary",
+        "unsupported_claim": "unsupported_claim_boundary",
+    }
+    valid_choice_ids = {choice.id for choice in task.choices}
+    expected_row_ids = {row.id for row in task.rows}
+    submitted_row_ids = set(answer.matches)
+    complete_shape = (
+        submitted_row_ids == expected_row_ids
+        and all(choice_id in valid_choice_ids for choice_id in answer.matches.values())
+        and len(set(answer.matches.values())) == len(expected_row_ids)
+    )
+    row_results: list[dict[str, Any]] = []
+    axes: dict[str, float] = {}
+    for row in task.rows:
+        submitted = answer.matches.get(row.id)
+        row_correct = bool(
+            not answer.timed_out
+            and complete_shape
+            and submitted == row.correct_choice_id
+        )
+        axes[axis_by_source[row.source_type]] = 1.0 if row_correct else 0.0
+        row_results.append(
+            {
+                "rowId": row.id,
+                "submittedChoiceId": submitted,
+                "correctChoiceId": row.correct_choice_id,
+                "correct": row_correct,
+            }
+        )
+    score = sum(1.0 for result in row_results if result["correct"]) / len(row_results)
+    correct = bool(row_results) and all(result["correct"] for result in row_results)
+    axes["evidence_source_matching"] = round(score, 3)
+    if answer.timed_out:
+        feedback = "Time. Review which facts come from the ECG, the vignette, or neither."
+    elif not complete_shape:
+        feedback = "Complete one valid evidence source for every clause."
+    elif correct:
+        feedback = "All three evidence boundaries are correct."
+    else:
+        correct_count = sum(1 for result in row_results if result["correct"])
+        feedback = f"{correct_count} of {len(row_results)} evidence boundaries are correct."
+    result = _grade_dict(
+        item,
+        score,
+        [],
+        correct=correct,
+        feedback=feedback,
+        answer_class=None,
+        axes=axes,
+        confidence=answer.confidence,
+        calibration={
+            "highConfidenceWrong": bool(
+                not correct and confidence_band(answer.confidence) == "high"
+            ),
+            "confidence": answer.confidence,
+            "matchingComplete": complete_shape,
+        },
+        timed_out=answer.timed_out,
+    )
+    result["matchingResults"] = row_results
+    result["matchingCorrect"] = correct
+    return result
 
 
 def _grade_spoterror(item: ClinicalCaseItem, packet: dict[str, Any], answer: ClinicalAnswer) -> dict[str, Any]:
@@ -333,13 +501,20 @@ def _grade_stepwise(item: ClinicalCaseItem, packet: dict[str, Any], answer: Clin
             "score": round(combined, 3),
             "correctObjectives": tested if sequence_correct else [],
             "missedObjectives": [] if sequence_correct else tested,
-            # Exact ECG objectives move only from the pre-management sequence;
-            # choosing a plausible action cannot manufacture recognition credit.
-            "masteryDelta": _mastery_delta(tested, sequence_correct, answer.confidence),
+            # Sequence performance remains visible in the formative axes and
+            # exact event history, but this unreviewed item cannot move mastery.
+            "masteryDelta": {},
             "axisScores": {
                 **(action_grade.get("axisScores") or {}),
                 "ecg_sequence": round(sequence_score, 3),
-                "clinical_decision": round(float(action_grade["score"]), 3),
+                "clinical_decision": round(
+                    float(
+                        (action_grade.get("axisScores") or {}).get(
+                            "clinical_decision", action_grade["score"]
+                        )
+                    ),
+                    3,
+                ),
             },
             "stepResults": step_results,
             "clinicalApplicationEvidence": "formative_only",
@@ -357,6 +532,10 @@ def _grade_stepwise(item: ClinicalCaseItem, packet: dict[str, Any], answer: Clin
 def grade_clinical_answer(item: ClinicalCaseItem, packet: dict[str, Any], answer: ClinicalAnswer) -> dict[str, Any]:
     if item.question_type == "click":
         grade = _grade_click(item, packet, answer)
+    elif item.question_type == "fillin":
+        grade = _grade_fillin(item, packet, answer)
+    elif item.question_type == "matching":
+        grade = _grade_matching(item, packet, answer)
     elif item.question_type == "spoterror":
         grade = _grade_spoterror(item, packet, answer)
     elif item.question_type == "stepwise":

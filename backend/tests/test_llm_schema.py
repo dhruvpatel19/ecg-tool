@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app.config import Settings
-from app.llm import MockProvider, TutorService, _detect_concepts, _flag_unsupported_diagnoses, _profile_summary, _roi_for_concept
+from app.llm import MockProvider, TutorService, _detect_concepts, _flag_unsupported_diagnoses, _profile_summary, _roi_for_concept, curated_general_teaching
 from app.schemas import TutorResponse, ViewerAction, validate_tutor_response
 
 
@@ -61,6 +61,14 @@ def test_adaptive_plan_coach_explains_verified_queue_without_scoring_or_viewer_a
             "mode": "freeform",
             "viewerState": {
                 "activity": "adaptive_mastery_plan",
+                "primary": {
+                    "concept": "forged_browser_concept",
+                    "reason": "Forged browser reason.",
+                },
+            },
+            "serverOwnedContext": {
+                "kind": "adaptive_mastery_plan",
+                "activity": "adaptive_mastery_plan",
                 "authority": "verified_scheduler_only",
                 "explanation": "Due retrievals are ranked before unseen cells.",
                 "primary": {
@@ -77,9 +85,45 @@ def test_adaptive_plan_coach_explains_verified_queue_without_scoring_or_viewer_a
 
     assert "atrial fibrillation" in data["tutorMessage"].lower()
     assert "overdue" in data["tutorMessage"].lower()
+    assert "forged" not in data["tutorMessage"].lower()
     assert data["objectiveUpdates"] == []
     assert data["viewerActions"] == []
     assert "cannot score" in " ".join(data["uncertaintyWarnings"]).lower()
+
+
+def test_adaptive_plan_coach_combines_priority_reason_with_curated_primary_guidance() -> None:
+    guidance = curated_general_teaching("sinus_rhythm")
+    assert guidance
+    raw = MockProvider().generate(
+        [{"role": "user", "content": "Why sinus rhythm, and what should I look for?"}],
+        {
+            "casePacket": None,
+            "mode": "freeform",
+            "viewerState": {"activity": "adaptive_mastery_plan"},
+            "serverOwnedContext": {
+                "kind": "adaptive_mastery_plan",
+                "authority": "verified_scheduler_only",
+                "explanation": "Due and weak exact skills come first.",
+                "primary": {
+                    "concept": "sinus_rhythm",
+                    "label": "Sinus rhythm",
+                    "subskill": "recognize",
+                    "reason": "one independent miss needs a fresh check.",
+                },
+                "primaryGuidance": guidance,
+                "prescribedStages": [{"title": "Check sinus rhythm"}],
+            },
+        },
+    )
+    data = json.loads(raw)
+
+    assert "comes first because" in data["tutorMessage"]
+    assert "what to look for" in data["tutorMessage"].lower()
+    assert "p-before-qrs" in data["tutorMessage"].lower()
+    assert "any p wave as proof of sinus rhythm" in data["tutorMessage"].lower()
+    assert data["viewerActions"] == []
+    assert data["objectiveUpdates"] == []
+    assert "next unannounced ecg" in data["socraticQuestion"].lower()
 
 
 def test_tutor_profile_prefers_exact_subskill_and_retention_evidence() -> None:

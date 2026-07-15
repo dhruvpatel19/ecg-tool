@@ -12,7 +12,7 @@ import re
 import sqlite3
 from typing import Any
 
-from .ontology import DEFAULT_MASTERY
+from .assessment_ledger import append_event, terminal_event_id, terminalize_lease
 from .storage import LearningStore, utc_now
 
 
@@ -21,6 +21,10 @@ _GUEST_NAMESPACE = re.compile(r"^g_[A-Za-z0-9_-]{24,64}$")
 
 class GuestProgressClaimConflict(ValueError):
     """The presented guest namespace is already owned by another account."""
+
+
+class GuestProgressClaimUnavailable(ValueError):
+    """The presented legacy guest namespace contains no claimable work."""
 
 
 def _json(value: str | None, fallback: Any) -> Any:
@@ -56,6 +60,7 @@ class GuestProgressService:
                     ON guest_progress_claims(user_id, claimed_at);
                 """
             )
+            self.store.ensure_account_write_guards(conn)
 
     @staticmethod
     def _validate_guest(guest_id: str) -> None:
@@ -84,6 +89,35 @@ class GuestProgressService:
         with self.store.connect() as conn:
             return self._summary(conn, guest_id)
 
+    @staticmethod
+    def empty_summary() -> dict[str, Any]:
+        """Return the migration preview for a browser without a legacy identity."""
+
+        return {
+            "hasProgress": False,
+            "claimable": False,
+            "totalActivities": 0,
+            "attempts": 0,
+            "guidedInteractions": 0,
+            "competencyReceipts": 0,
+            "lessonScenes": 0,
+            "tutorThreads": 0,
+            "reviewSessions": 0,
+            "rapidRounds": 0,
+            "clinicalSessions": 0,
+            "trainingCampaigns": 0,
+            "learnerEvents": 0,
+            "learningPreferences": 0,
+            "competencies": 0,
+            "lastActivityAt": None,
+        }
+
+    def delete(self, guest_id: str) -> int:
+        """Erase the current guest namespace without touching any account."""
+
+        self._validate_guest(guest_id)
+        return self.store.delete_guest_learning_record(guest_id)
+
     def _summary(self, conn: sqlite3.Connection, guest_id: str) -> dict[str, Any]:
         counts = {
             "attempts": self._count(conn, "attempts", "learner_id", guest_id),
@@ -95,6 +129,8 @@ class GuestProgressService:
             "rapidRounds": self._count(conn, "rapid_rounds", "learner_id", guest_id),
             "clinicalSessions": self._count(conn, "clinical_shift_sessions", "learner_id", guest_id),
             "trainingCampaigns": self._count(conn, "training_campaigns", "learner_id", guest_id),
+            "learnerEvents": self._count(conn, "learner_events", "owner_id", guest_id),
+            "learningPreferences": self._count(conn, "learner_preferences", "learner_id", guest_id),
         }
         competency_rows = 0
         if self._table_exists(conn, "objective_mastery"):
@@ -124,6 +160,8 @@ class GuestProgressService:
             ("rapid_rounds", "learner_id", "updated_at"),
             ("clinical_shift_sessions", "learner_id", "updated_at"),
             ("training_campaigns", "learner_id", "updated_at"),
+            ("learner_events", "owner_id", "occurred_at"),
+            ("learner_preferences", "learner_id", "updated_at"),
         )
         for table, owner_column, timestamp_column in timestamp_tables:
             if not self._table_exists(conn, table):
@@ -139,7 +177,7 @@ class GuestProgressService:
         ).fetchone()
         return {
             "hasProgress": total > 0,
-            "claimable": claimed is None,
+            "claimable": total > 0 and claimed is None,
             "totalActivities": total,
             **counts,
             "lastActivityAt": max(timestamps) if timestamps else None,
@@ -163,12 +201,18 @@ class GuestProgressService:
         username: str,
         display_name: str,
         password_hash: str,
+        email_normalized: str | None,
         guest_id: str,
+        session_token: str | None,
+        session_expires_at: str | None,
+        _transaction_hook: Any | None = None,
+        _failure_hook: Any | None = None,
     ) -> dict[str, Any]:
-        """Create an account and claim inside one transaction.
+        """Create an account, claim, and issue its session in one transaction.
 
-        A conflict rolls back the username, profile defaults, and all ownership
-        changes together, so registration can be retried safely.
+        A conflict or session failure rolls back the username, profile defaults,
+        session, and all ownership changes together, so registration is safely
+        retryable.
         """
         self._validate_guest(guest_id)
         now = utc_now()
@@ -176,22 +220,83 @@ class GuestProgressService:
             try:
                 if not conn.in_transaction:
                     conn.execute("BEGIN IMMEDIATE")
-                conn.execute(
-                    "INSERT INTO users (user_id, username, display_name, password_hash, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, username, display_name, password_hash, now),
+                self.store._insert_new_user_graph(
+                    conn,
+                    user_id=user_id,
+                    username=username,
+                    display_name=display_name,
+                    password_hash=password_hash,
+                    email_normalized=email_normalized,
+                    account_origin="established",
+                    now=now,
                 )
-                conn.execute(
-                    "INSERT INTO learner_profiles (learner_id, display_name, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (user_id, display_name, now, now),
-                )
-                for objective, mastery in DEFAULT_MASTERY.items():
-                    conn.execute(
-                        "INSERT INTO objective_mastery (learner_id, objective, mastery) VALUES (?, ?, ?)",
-                        (user_id, objective, mastery),
+                claim = self._claim(conn, guest_id, user_id)
+                if _transaction_hook is not None:
+                    _transaction_hook(conn, now, claim)
+                if session_token is not None and session_expires_at is not None:
+                    self.store._insert_session(
+                        conn,
+                        token=session_token,
+                        user_id=user_id,
+                        expires_at=session_expires_at,
+                        now=now,
                     )
-                return self._claim(conn, guest_id, user_id)
+                if _failure_hook is not None:
+                    _failure_hook(conn)
+                return claim
+            except Exception:
+                conn.rollback()
+                raise
+
+    def claim_and_create_session(
+        self,
+        *,
+        guest_id: str,
+        user_id: str,
+        expected_password_hash: str,
+        session_token: str,
+        session_expires_at: str,
+        replacement_password_hash: str | None = None,
+        _failure_hook: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Claim and mint a login session under one credential-checked write lock."""
+
+        self._validate_guest(guest_id)
+        now = utc_now()
+        with self.store.connect() as conn:
+            try:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT password_hash FROM users WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+                if not current or str(current["password_hash"]) != expected_password_hash:
+                    return None
+                if replacement_password_hash is not None:
+                    updated = conn.execute(
+                        "UPDATE users SET password_hash = ? "
+                        "WHERE user_id = ? AND password_hash = ?",
+                        (replacement_password_hash, user_id, expected_password_hash),
+                    )
+                    if int(updated.rowcount) != 1:
+                        return None
+                    if self.store._table_exists(conn, "export_authorizations"):
+                        conn.execute(
+                            "DELETE FROM export_authorizations WHERE user_id = ?",
+                            (user_id,),
+                        )
+                claim = self._claim(conn, guest_id, user_id)
+                self.store._insert_session(
+                    conn,
+                    token=session_token,
+                    user_id=user_id,
+                    expires_at=session_expires_at,
+                    now=now,
+                )
+                if _failure_hook is not None:
+                    _failure_hook(conn)
+                return claim
             except Exception:
                 conn.rollback()
                 raise
@@ -221,6 +326,10 @@ class GuestProgressService:
             raise ValueError("Target account does not exist")
 
         summary = self._summary(conn, guest_id)
+        if not summary["claimable"]:
+            raise GuestProgressClaimUnavailable(
+                "No unclaimed legacy guest progress is available for this browser."
+            )
         now = utc_now()
         self._normalize_active_sessions(conn, guest_id, user_id, now)
         self._merge_guided_events(conn, guest_id, user_id)
@@ -236,6 +345,37 @@ class GuestProgressService:
                 ).fetchall()
             )
         self._merge_pathway_progress(conn, guest_id, user_id)
+
+        # Lease-linked events use a composite foreign key that includes owner.
+        # Defer the relationship until both sides are rekeyed so a guest claim
+        # remains one atomic ownership transfer even on pre-cascade databases.
+        if self._table_exists(conn, "assessment_leases") or self._table_exists(conn, "learner_events"):
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+        if self._table_exists(conn, "assessment_leases"):
+            conn.execute(
+                "UPDATE assessment_leases SET owner_id = ? WHERE owner_id = ?",
+                (user_id, guest_id),
+            )
+        if self._table_exists(conn, "learner_events"):
+            conn.execute(
+                "UPDATE learner_events SET owner_id = ? WHERE owner_id = ?",
+                (user_id, guest_id),
+            )
+        if self._table_exists(conn, "learner_preferences"):
+            account_preferences = conn.execute(
+                "SELECT 1 FROM learner_preferences WHERE learner_id = ?",
+                (user_id,),
+            ).fetchone()
+            if account_preferences:
+                conn.execute(
+                    "DELETE FROM learner_preferences WHERE learner_id = ?",
+                    (guest_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE learner_preferences SET learner_id = ? WHERE learner_id = ?",
+                    (user_id, guest_id),
+                )
 
         # Global integer/UUID primary keys remain unchanged; only their owner is
         # rekeyed. Dependent answer/message rows continue to reference those IDs.
@@ -552,12 +692,12 @@ class GuestProgressService:
             if not self._table_exists(conn, table):
                 continue
             account_rows = conn.execute(
-                f"SELECT {id_column}, updated_at FROM {table} WHERE learner_id = ? "
+                f"SELECT {id_column}, learner_id, updated_at FROM {table} WHERE learner_id = ? "
                 f"AND {resumable_where} ORDER BY updated_at DESC",
                 (user_id,),
             ).fetchall()
             guest_rows = conn.execute(
-                f"SELECT {id_column}, updated_at FROM {table} WHERE learner_id = ? "
+                f"SELECT {id_column}, learner_id, updated_at FROM {table} WHERE learner_id = ? "
                 f"AND {resumable_where} ORDER BY updated_at DESC",
                 (guest_id,),
             ).fetchall()
@@ -567,6 +707,43 @@ class GuestProgressService:
             for row in [*account_rows, *guest_rows]:
                 if row[id_column] == keep:
                     continue
+                if table in {"training_campaigns", "rapid_rounds", "clinical_shift_sessions"}:
+                    mode = {
+                        "training_campaigns": "training",
+                        "rapid_rounds": "rapid",
+                        "clinical_shift_sessions": "clinical",
+                    }[table]
+                    lease = conn.execute(
+                        "SELECT al.lease_id, al.integrity_status, alc.ecg_id "
+                        "FROM assessment_leases al LEFT JOIN assessment_lease_cases alc "
+                        "ON alc.lease_id = al.lease_id AND alc.ordinal = 0 "
+                        "WHERE al.owner_id = ? AND al.mode = ? AND al.session_id = ? "
+                        "AND al.state IN ('active', 'submitting') LIMIT 1",
+                        (str(row["learner_id"]), mode, str(row[id_column])),
+                    ).fetchone()
+                    if lease is not None:
+                        lease_id = str(lease["lease_id"])
+                        lease_owner = str(row["learner_id"])
+                        terminalize_lease(
+                            conn,
+                            lease_id=lease_id,
+                            owner_id=lease_owner,
+                            terminal_state="abandoned",
+                            terminal_at=now,
+                        )
+                        append_event(
+                            conn,
+                            event_id=terminal_event_id(lease_id, "abandoned"),
+                            owner_id=lease_owner,
+                            mode=mode,
+                            session_id=str(row[id_column]),
+                            lease_id=lease_id,
+                            ecg_id=str(lease["ecg_id"]) if lease["ecg_id"] else None,
+                            event_type="item_abandoned",
+                            evidence_level="formative",
+                            integrity_status=str(lease["integrity_status"]),
+                            occurred_at=now,
+                        )
                 assignments = ["status = 'abandoned'", "updated_at = ?"]
                 values: list[Any] = [now]
                 for column in clear_columns:

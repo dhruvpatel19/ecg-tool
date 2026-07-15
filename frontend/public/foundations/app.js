@@ -5,26 +5,35 @@
   'use strict';
   var SCENES = global.SCENES, T = global.Tutor, NV = global.NVCard;
   var PARTS = ['What am I looking at?', 'Measure one beat', 'One lead → twelve', 'The systematic read'];
-  var owner = new URLSearchParams(window.location.search).get('owner') || 'guest';
-  owner = /^[A-Za-z0-9_-]{1,80}$/.test(owner) ? owner : 'guest';
-  var KEY = 'foundations_state_v1:' + owner;
-  var BEST_KEY = 'found_best:' + owner;
+  var requestedOwner = new URLSearchParams(window.location.search).get('owner');
+  var owner = requestedOwner && /^u_[A-Za-z0-9_-]{1,77}$/.test(requestedOwner) ? requestedOwner : null;
+  var KEY = owner ? 'foundations_state_v1:' + owner : null;
+  var BEST_KEY = owner ? 'found_best:' + owner : null;
   global.FOUNDATIONS_BEST_KEY = BEST_KEY;
 
   var state = load() || { completed: {}, current: 0, nv: {}, skipped: {}, testedOut: {} };
   state.completed = state.completed || {};
   state.skipped = state.skipped || {};
   state.testedOut = state.testedOut || {};
+  var knownSceneIds = {};
+  SCENES.forEach(function (scene) { knownSceneIds[scene.id] = true; });
+  Object.keys(state.completed).forEach(function (sceneId) {
+    if (!knownSceneIds[sceneId] || state.completed[sceneId] !== true) delete state.completed[sceneId];
+  });
+  Object.keys(state.skipped).forEach(function (sceneId) {
+    if (!knownSceneIds[sceneId] || state.skipped[sceneId] !== true) delete state.skipped[sceneId];
+  });
   // v1 incorrectly counted skipped scenes as completed. Migrate that persisted state
   // so "review later" never masquerades as completion or mastery.
   Object.keys(state.skipped).forEach(function (sceneId) { delete state.completed[sceneId]; });
-  var idx = state.current || 0;
+  var idx = Number.isInteger(state.current) ? Math.max(0, Math.min(SCENES.length - 1, state.current)) : 0;
   var curCtx = null;
   var evidenceSeq = 0;
   var evidenceSession = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
 
-  function load() { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } }
-  function save() { state.current = idx; state.nv = NV.state(); localStorage.setItem(KEY, JSON.stringify(state)); emit('progress', progressDetail()); maybeComplete(); }
+  function load() { if (!KEY) return null; try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } }
+  function save() { if (!KEY) return; state.current = idx; state.nv = NV.state(); localStorage.setItem(KEY, JSON.stringify(state)); emit('progress', progressDetail()); maybeComplete(); }
+  function bestAccuracy() { return BEST_KEY ? +(localStorage.getItem(BEST_KEY) || 0) : 0; }
 
   // --- telemetry bridge --------------------------------------------------------
   // When embedded in the host app (iframe), report progress to the parent via
@@ -44,12 +53,12 @@
       currentId: cur.id || null,
       part: cur.part || null,
       done: done >= total,
-      bestAccuracy: +(localStorage.getItem(BEST_KEY) || 0),
+      bestAccuracy: bestAccuracy(),
       stateSnapshot: {
         completed: Object.keys(state.completed),
         skipped: Object.keys(state.skipped),
         current: idx,
-        bestAccuracy: +(localStorage.getItem(BEST_KEY) || 0),
+        bestAccuracy: bestAccuracy(),
         nv: state.nv || {},
         testedOut: state.testedOut || {}
       }
@@ -83,6 +92,10 @@
   function sceneNumInPart(i) { var p = SCENES[i].part, n = 0; for (var k = 0; k <= i; k++) if (SCENES[k].part === p) n++; return n; }
 
   function renderChrome() {
+    var pct = Math.round(Object.keys(state.completed).length / SCENES.length * 100);
+    document.getElementById('progFill').style.width = pct + '%';
+    var skippedTotal = Object.keys(state.skipped).length;
+    document.getElementById('progPct').textContent = pct + '%' + (skippedTotal ? ' · ' + skippedTotal + ' review' : '');
     document.getElementById('partRail').innerHTML = PARTS.map(function (p, i) {
       var part = i + 1;
       var sc = scenesInPart(part), doneCt = sc.filter(function (s) { return state.completed[s.id]; }).length;
@@ -106,11 +119,6 @@
     document.getElementById('scSub').textContent = sc.sub;
     document.getElementById('scMeta').textContent = 'Part ' + sc.part + '/4 · scene ' + sceneNumInPart(idx) + '/' + scenesInPart(sc.part).length + (state.skipped[sc.id] ? ' · review later' : '');
     document.getElementById('scId').textContent = sc.id;
-    var pct = Math.round(Object.keys(state.completed).length / SCENES.length * 100);
-    document.getElementById('progFill').style.width = pct + '%';
-    var skippedTotal = Object.keys(state.skipped).length;
-    document.getElementById('progPct').textContent = pct + '%' + (skippedTotal ? ' · ' + skippedTotal + ' review' : '');
-
     var doneAlready = !!state.completed[sc.id];
     var canMovePast = doneAlready || !!state.skipped[sc.id];
     curCtx = {
@@ -202,6 +210,21 @@
 
   // --- boot ----------------------------------------------------------------
   function boot() {
+    if (!owner) {
+      document.getElementById('scMeta').textContent = 'Account-required module';
+      document.getElementById('scTitle').textContent = 'Open Foundations from TRACE';
+      document.getElementById('scSub').textContent = 'This lesson needs your verified learning workspace.';
+      document.getElementById('sceneRoot').innerHTML =
+        '<div class="warning" role="alert"><b>No guest learning state was opened.</b> ' +
+        'Return to TRACE, sign in, and launch Foundations from Guided learning.</div>';
+      document.getElementById('btnNext').disabled = true;
+      document.getElementById('btnPrev').disabled = true;
+      document.getElementById('skipScene').disabled = true;
+      document.getElementById('nvBtn').disabled = true;
+      document.getElementById('tutorInput').disabled = true;
+      document.getElementById('tutorSend').disabled = true;
+      return;
+    }
     T.mount(document.getElementById('tutorStream'), document.getElementById('tutorInput'), document.getElementById('tutorSend'));
     initNV();
     document.getElementById('btnNext').onclick = next;

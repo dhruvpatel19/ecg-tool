@@ -5,7 +5,7 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, repo, store
 
 
 PASSWORD = "Sup3r-Secret-Pw!"
@@ -133,8 +133,26 @@ def test_guided_competency_event_replay_is_exactly_once() -> None:
 def test_concept_practice_attempt_is_audit_only_for_legacy_objective_mastery() -> None:
     with TestClient(app) as client:
         user = _register(client, "training_owner")
-        case = client.get("/cases").json()[0]
-        packet = client.get(f"/cases/{case['caseId']}/packet").json()
+        # The global case listing may begin with an ECG currently protected by
+        # another test learner's active assessment. Guided's selector declares
+        # and enforces a non-pending case, so this generic audit submission does
+        # not bypass the pending-assessment commit gate.
+        guided = client.get("/tutorials/orientation")
+        assert guided.status_code == 200, guided.text
+        case = guided.json()["recommendedCase"]
+        # The learner packet is intentionally answer-blind. Test setup may use
+        # the server repository to choose a valid objective for this audit.
+        with store.connect() as conn:
+            canonical_id = str(conn.execute(
+                "SELECT ecg_id FROM learner_events WHERE owner_id = ? "
+                "AND mode = 'guided' AND session_id = 'tutorial:orientation' "
+                "ORDER BY occurred_at DESC LIMIT 1",
+                (user["userId"],),
+            ).fetchone()[0])
+        assert case["caseId"] != canonical_id
+        assert case["caseId"].startswith("ec_")
+        packet = repo.get_case(canonical_id)
+        assert packet is not None
         focus = packet["supported_objectives"][0]
         before = client.get(f"/learners/{user['userId']}").json()
         before_mastery = before["mastery"]
@@ -143,7 +161,7 @@ def test_concept_practice_attempt_is_audit_only_for_legacy_objective_mastery() -
             "/attempts",
             json={
                 "learnerId": "demo",
-                "caseId": case["caseId"],
+                "caseId": canonical_id,
                 "mode": "concept_practice",
                 "focusObjective": focus,
                 "structuredAnswer": {"framework": "clerkship", "selectedConcepts": []},
@@ -203,6 +221,14 @@ def test_objective_registry_and_complete_unseen_competency_matrix() -> None:
         )
         assert brady_application["independentEvidenceAvailable"] is False
         assert brady_application["independentReceipt"] is None
+
+        synthesis = next(
+            cell
+            for cell in competency_by_id["integrated_interpretation"]["subskills"]
+            if cell["subskill"] == "synthesize"
+        )
+        assert synthesis["independentEvidenceAvailable"] is False
+        assert synthesis["independentReceipt"] is None
 
         rbbb_recognition = next(
             cell

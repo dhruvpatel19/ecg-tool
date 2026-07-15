@@ -133,10 +133,20 @@ resource "google_compute_instance" "app" {
     ecg-backup-uri                    = "gs://${google_storage_bucket.backup.name}/${local.backup_object_prefix}/"
     ecg-auth-secret                   = google_secret_manager_secret.runtime["auth_rate_limit"].secret_id
     ecg-origin-secret                 = google_secret_manager_secret.runtime["origin_shared"].secret_id
+    ecg-auth-smtp-password-secret     = var.auth_email_delivery_mode == "smtp" ? google_secret_manager_secret.runtime["auth_smtp_password"].secret_id : ""
     ecg-llm-secret                    = var.enable_llm_secret ? google_secret_manager_secret.runtime["llm_api_key"].secret_id : ""
     ecg-environment                   = var.environment
     ecg-backend-domain                = var.health_check_host
     ecg-acme-email                    = var.acme_email
+    ecg-auth-email-delivery-mode      = var.auth_email_delivery_mode
+    ecg-auth-email-from-address       = var.auth_email_from_address
+    ecg-auth-email-reply-to           = var.auth_email_reply_to
+    ecg-auth-public-app-url           = var.auth_public_app_url
+    ecg-auth-smtp-host                = var.auth_smtp_host
+    ecg-auth-smtp-port                = tostring(var.auth_smtp_port)
+    ecg-auth-smtp-username            = var.auth_smtp_username
+    ecg-auth-smtp-starttls            = tostring(var.auth_smtp_starttls)
+    ecg-auth-smtp-timeout-seconds     = tostring(var.auth_smtp_timeout_seconds)
     ecg-llm-provider                  = var.llm_provider
     ecg-llm-model                     = var.llm_model
     ecg-llm-base-url                  = var.llm_base_url
@@ -151,6 +161,8 @@ resource "google_compute_instance" "app" {
     ecg-llm-global-daily-limit        = tostring(var.llm_global_daily_limit)
     ecg-backup-max-age-seconds        = tostring(var.backup_max_age_seconds)
     ecg-min-state-free-bytes          = tostring(var.min_state_free_bytes)
+    ecg-auth-retention-acknowledged   = tostring(var.authenticated_retention_policy_acknowledged)
+    ecg-auth-retention-reference      = var.authenticated_retention_policy_reference
     ecg-backend-memory-limit-mb       = tostring(var.backend_memory_limit_mb)
     ecg-backend-memory-reservation-mb = tostring(var.backend_memory_reservation_mb)
     ecg-backend-cpu-limit             = tostring(var.backend_cpu_limit)
@@ -221,6 +233,21 @@ resource "google_compute_instance" "app" {
     }
 
     precondition {
+      condition = (
+        var.auth_email_delivery_mode == "smtp" &&
+        trimspace(var.auth_email_from_address) != "" &&
+        trimspace(var.auth_email_reply_to) != "" &&
+        trimspace(var.auth_public_app_url) != "" &&
+        trimspace(var.auth_smtp_host) != "" &&
+        var.auth_smtp_port == 587 &&
+        trimspace(var.auth_smtp_username) != "" &&
+        trimspace(var.auth_smtp_password_secret_id) != "" &&
+        var.auth_smtp_starttls
+      )
+      error_message = "An enabled backend runs APP_ENV=production and requires complete authenticated SMTP account-email configuration: mode=smtp, From address, monitored Reply-To, HTTPS public app origin, SMTP host, port 587, username, password Secret Manager container, and STARTTLS."
+    }
+
+    precondition {
       condition     = length(local.runtime_asset_bundle) < 240000
       error_message = "The compressed runtime asset bundle exceeds the Compute Engine metadata value limit."
     }
@@ -243,6 +270,18 @@ resource "google_compute_instance" "app" {
     precondition {
       condition     = var.environment != "production" || var.llm_required
       error_message = "Production requires the live grounded tutor readiness dependency (llm_required=true)."
+    }
+
+    precondition {
+      condition = var.authenticated_retention_policy_acknowledged == (
+        var.authenticated_retention_policy_reference != ""
+      )
+      error_message = "Authenticated retention policy acknowledgement and its non-secret reference must be supplied together. Leave both false/empty until governance approval."
+    }
+
+    precondition {
+      condition     = var.environment != "production" || var.authenticated_retention_policy_acknowledged
+      error_message = "Production requires an approved authenticated-learner retention/deletion policy acknowledgement and reference. Terraform does not choose this policy."
     }
 
     precondition {

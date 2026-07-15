@@ -1,12 +1,17 @@
 import type { Metadata } from "next";
 import { connection } from "next/server";
-import { Navigation } from "@/components/Navigation";
+import { AppShell } from "@/components/layout/AppShell";
+import { LearningPreferencesBridge } from "@/components/layout/LearningPreferencesBridge";
 import { AuthProvider } from "@/lib/auth";
 import "./globals.css";
+import "@/components/layout/learning-workspace.css";
 
 export const metadata: Metadata = {
-  title: "TRACE · Adaptive ECG Learning",
-  description: "AI-guided ECG learning, deliberate practice, rapid interpretation, and clinical decision training on grounded real waveforms.",
+  title: {
+    default: "TRACE · ECG learning for medical students",
+    template: "%s · TRACE",
+  },
+  description: "Learn ECG interpretation through guided lessons, focused practice, rapid reads, and clinical cases built for medical students.",
 };
 
 export default async function RootLayout({
@@ -22,11 +27,8 @@ export default async function RootLayout({
     <html lang="en" data-scroll-behavior="smooth">
       <body>
         <AuthProvider>
-          <div className="app-shell">
-            <a className="skip-link" href="#main-content">Skip to learning content</a>
-            <Navigation />
-            <main className="main" id="main-content" tabIndex={-1}>{children}</main>
-          </div>
+          <LearningPreferencesBridge />
+          <AppShell>{children}</AppShell>
         </AuthProvider>
       </body>
     </html>

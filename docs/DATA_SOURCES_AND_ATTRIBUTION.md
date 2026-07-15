@@ -13,10 +13,11 @@ deployment that serves source-derived ECGs.
 | PTB-XL 1.0.3 | 10-second 12-lead waveforms, cardiologist-reviewed SCP-ECG statements, reports, and metadata | [PhysioNet dataset](https://physionet.org/content/ptb-xl/1.0.3/) · [version DOI 10.13026/kfzx-aw45](https://doi.org/10.13026/kfzx-aw45) | [CC BY 4.0 on PhysioNet](https://physionet.org/content/ptb-xl/view-license/1.0.3/) · [canonical license](https://creativecommons.org/licenses/by/4.0/) |
 | PTB-XL+ 1.0.1 | Algorithm-derived measurements, features, fiducials, median beats, and diagnostic statements joined by PTB-XL ECG identifier | [PhysioNet dataset](https://physionet.org/content/ptb-xl-plus/1.0.1/) · [version DOI 10.13026/g6h6-7g88](https://doi.org/10.13026/g6h6-7g88) | [CC BY 4.0 on PhysioNet](https://physionet.org/content/ptb-xl-plus/view-license/1.0.1/) · [canonical license](https://creativecommons.org/licenses/by/4.0/) |
 | Leipzig Heart Center ECG-Database 1.0.0 | Expert-labelled rhythm windows used only in the source-permitted focused Training/Rapid lanes | [PhysioNet dataset](https://physionet.org/content/leipzig-heart-center-ecg/1.0.0/) · [version DOI 10.13026/7a4j-vn37](https://doi.org/10.13026/7a4j-vn37) | [ODC-By 1.0 on PhysioNet](https://physionet.org/content/leipzig-heart-center-ecg/view-license/1.0.0/) · [canonical license](https://opendatacommons.org/licenses/by/1-0/) |
+| MIT-BIH Malignant Ventricular Ectopy Database 1.0.0 | Foundation-only, checksum-gated two-channel rhythm windows for a future reviewed resuscitation-rhythm lane; not connected to current student routes or action mastery | [PhysioNet dataset](https://physionet.org/content/vfdb/1.0.0/) · [version DOI 10.13026/C22P44](https://doi.org/10.13026/C22P44) | [ODC-By 1.0 on PhysioNet](https://physionet.org/content/vfdb/view-license/1.0.0/) · [canonical license](https://opendatacommons.org/licenses/by/1-0/) |
 
 PTB-XL and PTB-XL+ are **Creative Commons Attribution 4.0**, not ODC-By.
-Leipzig remains **Open Data Commons Attribution 1.0**. The executable source
-registry uses `CC-BY-4.0` and `ODC-BY-1.0`, respectively.
+Leipzig and VFDB remain **Open Data Commons Attribution 1.0**. The executable
+source registry uses `CC-BY-4.0` and `ODC-BY-1.0`, respectively.
 
 ## Requested citations
 
@@ -37,7 +38,12 @@ registry uses `CC-BY-4.0` and `ODC-BY-1.0`, respectively.
    Congenital Heart Disease* (version 1.0.0). PhysioNet. 2025.
    RRID:SCR_007345.
    [https://doi.org/10.13026/7a4j-vn37](https://doi.org/10.13026/7a4j-vn37).
-4. Goldberger AL, Amaral LAN, Glass L, et al. PhysioBank, PhysioToolkit, and
+4. Albrecht P, Moody G, Mark R. *MIT-BIH Malignant Ventricular Ectopy
+   Database* (version 1.0.0). PhysioNet. 1999. RRID:SCR_007345.
+   [https://doi.org/10.13026/C22P44](https://doi.org/10.13026/C22P44).
+   Also cite the source-requested Greenwald work shown on the versioned dataset
+   page.
+5. Goldberger AL, Amaral LAN, Glass L, et al. PhysioBank, PhysioToolkit, and
    PhysioNet: Components of a new research resource for complex physiologic
    signals. *Circulation*. 2000;101(23):e215-e220.
    [https://doi.org/10.1161/01.CIR.101.23.E215](https://doi.org/10.1161/01.CIR.101.23.E215).
@@ -51,6 +57,11 @@ registry uses `CC-BY-4.0` and `ODC-BY-1.0`, respectively.
   downsampled from 977 Hz to 100 Hz, and cut into guarded 10-second windows that
   remain inside expert rhythm intervals. These are transformations of the
   source data, not publisher-provided cases.
+- VFDB artifacts and its checksum manifest are version-pinned; two-channel
+  250 Hz source streams are cut into guarded, non-overlapping 10-second windows
+  inside one expert rhythm interval. They remain in a dedicated disconnected
+  rhythm store and do not supply pulse, perfusion, arrest state, treatment, or
+  action-sequence truth.
 - TRACE-authored clinical stems did not occur with the people represented by
   the source ECGs. They are visibly formative teaching context and must not be
   attributed to PTB-XL, PTB-XL+, Leipzig, PhysioNet, or the source authors.

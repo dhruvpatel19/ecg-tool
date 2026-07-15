@@ -1,0 +1,392 @@
+.form {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.intro {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(190px, 280px);
+  align-items: center;
+  gap: 14px;
+  padding: 17px 18px;
+  border: 1px solid #c8d9d2;
+  border-radius: 14px;
+  background: linear-gradient(115deg, #f2faf6, #fff 70%);
+}
+
+.introIcon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--accent-strong);
+  background: #dff1ea;
+}
+
+.intro h2,
+.loadError h2 {
+  margin: 1px 0 4px;
+  font-size: 1.14rem;
+}
+
+.intro p:last-child,
+.loadError p {
+  margin: 0;
+  color: var(--muted);
+  font-size: .8rem;
+  line-height: 1.45;
+}
+
+.intro > small {
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-size: .72rem;
+  line-height: 1.45;
+}
+
+.grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, .82fr) minmax(420px, 1.18fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.stack {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.card,
+.choiceGroup {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+}
+
+.card {
+  display: grid;
+  gap: 12px;
+  padding: 17px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.card > legend {
+  float: left;
+  width: 100%;
+  margin: 0 0 -4px;
+  padding: 0;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 820;
+}
+
+.cardIntro {
+  clear: both;
+  margin: 0;
+  color: var(--muted);
+  font-size: .75rem;
+  line-height: 1.42;
+}
+
+.selectField {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  color: var(--ink);
+  font-size: .76rem;
+  font-weight: 760;
+}
+
+.selectField select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.choiceGroup {
+  display: grid;
+  gap: 7px;
+}
+
+.choiceGroup > legend {
+  padding: 0;
+  color: var(--ink);
+  font-size: .76rem;
+  font-weight: 780;
+}
+
+.lengthChoices,
+.optionChoices {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.lengthChoices {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.optionChoices {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.lengthChoices label,
+.optionChoices label,
+.toggleCard {
+  min-width: 0;
+  display: grid;
+  cursor: pointer;
+}
+
+.lengthChoices label,
+.optionChoices label {
+  position: relative;
+}
+
+.lengthChoices input,
+.optionChoices input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.lengthChoices span,
+.optionChoices span {
+  min-width: 0;
+  min-height: 58px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fafcfb;
+}
+
+.lengthChoices span {
+  justify-items: center;
+  text-align: center;
+}
+
+.lengthChoices strong {
+  font-size: 1rem;
+}
+
+.lengthChoices small,
+.optionChoices small,
+.toggleCard small {
+  color: var(--muted);
+  font-size: .67rem;
+  line-height: 1.35;
+}
+
+.optionChoices strong,
+.toggleCard strong {
+  font-size: .76rem;
+}
+
+.lengthChoices input:checked + span,
+.optionChoices input:checked + span {
+  border-color: var(--accent);
+  background: #edf7f2;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.lengthChoices input:focus-visible + span,
+.optionChoices input:focus-visible + span,
+.toggleCard:has(input:focus-visible) {
+  outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-offset: 2px;
+}
+
+.toggleCard {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fafcfb;
+}
+
+.toggleCard:has(input:checked) {
+  border-color: var(--accent);
+  background: #edf7f2;
+}
+
+.toggleCard input {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.toggleCard > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.saveBar {
+  min-width: 0;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 11px 9px 15px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 6px 20px rgba(24, 48, 40, .06);
+}
+
+.saveBar p {
+  margin: 0;
+  color: var(--muted);
+  font-size: .74rem;
+}
+
+.saveBar > div:last-child {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+}
+
+.saveBar :global(.button) {
+  min-height: 44px;
+}
+
+.savedStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent-strong) !important;
+  font-weight: 760;
+}
+
+.saveError {
+  color: #8c3c34 !important;
+}
+
+.loading,
+.loadError {
+  min-height: 300px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.loading {
+  display: grid;
+  align-content: center;
+  gap: 10px;
+}
+
+.loading span {
+  width: min(620px, 100%);
+  height: 18px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #edf2ef 25%, #f7faf8 50%, #edf2ef 75%);
+  background-size: 200% 100%;
+  animation: preferences-shimmer 1.3s ease-in-out infinite;
+}
+
+.loading span:nth-child(2) {
+  width: min(440px, 75%);
+}
+
+.loading p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: .78rem;
+}
+
+.loadError {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-content: center;
+  align-items: center;
+  gap: 12px;
+}
+
+@keyframes preferences-shimmer {
+  to { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading span { animation: none; }
+}
+
+@media (max-width: 900px) {
+  .intro {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .intro > small {
+    grid-column: 1 / -1;
+    padding: 9px 0 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .intro {
+    align-items: start;
+    padding: 15px;
+  }
+
+  .optionChoices {
+    grid-template-columns: 1fr;
+  }
+
+  .optionChoices span {
+    min-height: 54px;
+  }
+
+  .saveBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .saveBar > div:last-child {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  }
+
+  .saveBar :global(.button) {
+    min-width: 0;
+    padding-inline: 10px;
+  }
+}
+
+@media (max-width: 360px) {
+  .card {
+    padding: 14px;
+  }
+
+  .lengthChoices {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -1,0 +1,5 @@
+# Historical deterministic test fixtures removed by 246b97b. Keep these exact
+# fingerprints so the PR-range scan can pass without weakening any rule, path,
+# or future finding.
+9db59cf1dd45eb89d555cb69b6242539b20b1c95:backend/tests/test_assessment_ecg_capabilities.py:generic-api-key:86
+9db59cf1dd45eb89d555cb69b6242539b20b1c95:frontend/e2e/email-auth.spec.ts:generic-api-key:111

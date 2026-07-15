@@ -27,6 +27,38 @@ def test_new_database_records_versioned_schema_and_full_sync(tmp_path) -> None:
         assert migration["version"] == LEARNER_SCHEMA_VERSION
         assert "Versioned baseline" in migration["description"]
         assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert store.learning_record_integrity() == (True, "ready")
+
+
+def test_learning_record_integrity_rejects_unknown_cells_and_unfinished_rapid_receipts(tmp_path) -> None:
+    store = LearningStore(tmp_path / "integrity.sqlite3")
+    with store.connect() as connection:
+        connection.execute(
+            "INSERT INTO subskill_mastery (learner_id, concept, subskill) "
+            "VALUES ('learner', 'retired_unknown_objective', 'recognize')"
+        )
+    assert store.learning_record_integrity() == (False, "unknown_objective_registry_cell")
+
+    with store.connect() as connection:
+        connection.execute("DELETE FROM subskill_mastery")
+        connection.execute(
+            "INSERT INTO rapid_rounds "
+            "(round_id, learner_id, pace, length, assessment_scope, created_at, updated_at) "
+            "VALUES ('round', 'learner', 'untimed', 1, 'mixed', 'now', 'now')"
+        )
+        connection.execute(
+            "INSERT INTO rapid_round_answers "
+            "(round_id, case_id, response_json, grade_json, result_json, receipts_json, "
+            "attempt_id, created_at) VALUES ('round', 'case', '{}', '{}', '{}', '[]', 1, 'now')"
+        )
+    assert store.learning_record_integrity() == (False, "rapid_answer_receipts_incomplete")
+
+    with store.connect() as connection:
+        connection.execute(
+            "UPDATE rapid_round_answers SET integrity_status = 'legacy_incomplete'"
+        )
+    assert store.learning_record_integrity() == (True, "ready")
 
 
 def test_concurrent_first_requests_create_one_complete_profile(tmp_path) -> None:
@@ -75,6 +107,26 @@ def test_legacy_unversioned_database_is_baselined_after_additive_migration(tmp_p
             "SELECT display_name FROM learner_profiles WHERE learner_id = 'learner-1'"
         ).fetchone()[0] == "Student"
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_version_one_database_migrates_to_registry_versioned_schema(tmp_path) -> None:
+    database = tmp_path / "version-one.sqlite3"
+    original = LearningStore(database)
+    with original.connect() as connection:
+        connection.execute("PRAGMA user_version=1")
+        connection.execute(
+            "INSERT INTO learner_profiles VALUES ('v1-learner', 'V1 Learner', 'before', 'before')"
+        )
+
+    migrated = LearningStore(database)
+    with migrated.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == LEARNER_SCHEMA_VERSION
+        assert connection.execute(
+            "SELECT display_name FROM learner_profiles WHERE learner_id = 'v1-learner'"
+        ).fetchone()[0] == "V1 Learner"
+        assert "registry_version" in {
+            row["name"] for row in connection.execute("PRAGMA table_info(attempts)")
+        }
 
 
 def test_newer_schema_is_rejected_before_any_mutation(tmp_path) -> None:

@@ -170,7 +170,11 @@ export function validateProductionCurriculum(
       if (!scene.layout.focusOrder.length) issues.push({ path: `${scenePath}.layout`, message: "A keyboard/screen-reader focus order is required." });
       if (!scene.tutor.socraticPrompts.length) issues.push({ path: `${scenePath}.tutor`, message: "At least one Socratic prompt is required." });
       if (!scene.tutor.hintLadder.length) issues.push({ path: `${scenePath}.tutor`, message: "A tutor hint ladder is required." });
-      if (!scene.handoffs.length) issues.push({ path: `${scenePath}.handoffs`, message: "At least one cross-mode handoff is required." });
+      // A scene may deliberately have no cross-mode launch when the receiving
+      // mode cannot assess the same construct with an exact executable
+      // destination. Requiring a link here previously forced clinically false
+      // or mastery-inflating handoffs. Present handoffs are validated at launch
+      // by the destination contract; truthful absence is valid curriculum data.
       const interactionIds = new Set<string>();
       for (const [interactionIndex, interaction] of scene.interactions.entries()) {
         const interactionPath = `${scenePath}.interactions[${interactionIndex}](${interaction.id})`;

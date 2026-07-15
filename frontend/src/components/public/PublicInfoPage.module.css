@@ -1,0 +1,142 @@
+.page {
+  width: min(840px, calc(100% - 36px));
+  margin: 0 auto;
+  padding: 64px 0 48px;
+}
+
+.header > a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #176b58;
+  font-size: .82rem;
+  font-weight: 760;
+}
+
+.header > p {
+  margin: 46px 0 12px;
+  color: #08705a;
+  font-size: .7rem;
+  font-weight: 840;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.header h1 {
+  max-width: 760px;
+  margin: 0;
+  color: #14231e;
+  font-size: clamp(2.6rem, 7vw, 4.8rem);
+  line-height: 1;
+  letter-spacing: -.06em;
+}
+
+.intro {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  max-width: 720px;
+  margin-top: 26px;
+  padding: 17px 19px;
+  border: 1px solid #cee0d9;
+  border-radius: 12px;
+  color: #40554d;
+  background: #f0f7f4;
+  font-size: .9rem;
+  line-height: 1.55;
+}
+
+.intro svg {
+  margin-top: 2px;
+  color: #08705a;
+}
+
+.content {
+  display: grid;
+  gap: 34px;
+  margin-top: 52px;
+}
+
+.content section {
+  padding-top: 30px;
+  border-top: 1px solid #dfe7e3;
+}
+
+.content h2 {
+  margin: 0 0 12px;
+  color: #183029;
+  font-size: 1.35rem;
+  letter-spacing: -.025em;
+}
+
+.content h3 {
+  margin: 22px 0 8px;
+  color: #253a33;
+  font-size: 1rem;
+}
+
+.content p,
+.content li {
+  color: #53645d;
+  font-size: .88rem;
+  line-height: 1.68;
+}
+
+.content p {
+  margin: 0 0 12px;
+}
+
+.content ul,
+.content ol {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding-left: 21px;
+}
+
+.content a {
+  color: #08604e;
+  font-weight: 720;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.content code {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: #edf2f0;
+  font-size: .82em;
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 56px;
+  padding-top: 24px;
+  border-top: 1px solid #dfe7e3;
+}
+
+.footer a {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  color: #496058;
+  font-size: .75rem;
+  font-weight: 730;
+}
+
+@media (max-width: 560px) {
+  .page {
+    padding-top: 36px;
+  }
+
+  .header > p {
+    margin-top: 30px;
+  }
+
+  .header h1 {
+    font-size: clamp(2.4rem, 13vw, 3.6rem);
+  }
+}

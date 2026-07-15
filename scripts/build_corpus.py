@@ -11,7 +11,7 @@ quality, runs autonomous curation, and writes:
 Resumable: re-running skips cases already present (unless --rebuild).
 
 Examples:
-  python scripts/build_corpus.py --limit 300 --out data/ecg_corpus_smoke
+  python scripts/build_corpus.py --limit 300 --out data/ecg_corpus_smoke  # diagnostic, never published complete
   python scripts/build_corpus.py --limit 0 --out data/ecg_corpus      # full corpus
 """
 
@@ -37,8 +37,8 @@ from app.ingest.source_contract import source_catalog_entry  # noqa: E402
 from app.ingest.statements import load_scp_reference, load_snomed_descriptions  # noqa: E402
 from app.store import CaseStore, LocalWaveformStore, waveform_fingerprint  # noqa: E402
 
-DEFAULT_PTBXL = os.getenv("PTBXL_DATA_ROOT") or r"G:\.shortcut-targets-by-id\11oXhSW_XGfr7JHvpe-8IZE3_SjLCHU1h\ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.3"
-DEFAULT_PLUS = os.getenv("PTBXL_PLUS_DATA_ROOT") or r"G:\.shortcut-targets-by-id\1DSdHTwL-O3pMXF8LaiadI23ytUGmfCyw\ptb-xl-plus-1.0.1"
+DEFAULT_PTBXL = os.getenv("PTBXL_DATA_ROOT") or "data/raw/ptb-xl/1.0.3"
+DEFAULT_PLUS = os.getenv("PTBXL_PLUS_DATA_ROOT") or "data/raw/ptb-xl-plus/1.0.1"
 
 # Only the columns the pipeline consumes (keeps the feature CSV loads small/fast).
 NEEDED_12SL = [
@@ -48,6 +48,63 @@ NEEDED_12SL = [
     "R_AxisFrontal_Global", "QRS_AxisFront_Global", "P_AxisFront_Global", "T_AxisFront_Global",
     "R_Amp_V1", "S_Amp_V1", "R_Amp_V5", "R_Amp_V6", "R_Amp_aVL", "S_Amp_V3",
 ]
+
+REQUIRED_PTBXL_FILES = (
+    Path("ptbxl_database.csv"),
+    Path("scp_statements.csv"),
+)
+REQUIRED_PTBXL_PLUS_FILES = (
+    Path("features/12sl_features.csv"),
+    Path("features/ecgdeli_features.csv"),
+    Path("labels/12sl_statements.csv"),
+    Path("labels/snomed_description.csv"),
+)
+
+
+def _missing_required_inputs(
+    ptbxl_root: Path,
+    plus_root: Path,
+    *,
+    require_fiducials: bool,
+) -> list[Path]:
+    """Return release-critical source paths absent from this build input."""
+
+    required = [*(ptbxl_root / item for item in REQUIRED_PTBXL_FILES)]
+    required.extend(plus_root / item for item in REQUIRED_PTBXL_PLUS_FILES)
+    if require_fiducials:
+        required.append(plus_root / "fiducial_points" / "ecgdeli")
+    return [path for path in required if not path.exists()]
+
+
+def _release_completion_blockers(
+    *,
+    limit: int,
+    scan_rows: int,
+    errors: int,
+    skipped: int,
+    expected_ptbxl_rows: int,
+    stored_ptbxl_rows: int,
+    fiducials_enabled: bool,
+) -> list[str]:
+    """Explain why a build must remain non-selectable by the runtime."""
+
+    blockers: list[str] = []
+    if limit > 0:
+        blockers.append(f"bounded --limit={limit}")
+    if scan_rows > 0:
+        blockers.append(f"bounded --scan-rows={scan_rows}")
+    if errors:
+        blockers.append(f"{errors} record error(s)")
+    if skipped:
+        blockers.append(f"{skipped} record(s) skipped")
+    if not fiducials_enabled:
+        blockers.append("PTB-XL+ fiducial ingestion disabled")
+    if stored_ptbxl_rows != expected_ptbxl_rows:
+        blockers.append(
+            "PTB-XL row coverage mismatch "
+            f"(stored={stored_ptbxl_rows}, expected={expected_ptbxl_rows})"
+        )
+    return blockers
 
 
 def _load_features(path: Path, needed: list[str] | None, nrows: int | None) -> dict[int, dict]:
@@ -91,6 +148,10 @@ def main() -> int:
     ap.add_argument("--rebuild", action="store_true", help="rebuild cases even if already present")
     ap.add_argument("--progress-every", type=int, default=100)
     args = ap.parse_args()
+    if args.limit < 0 or args.scan_rows < 0:
+        ap.error("--limit and --scan-rows must be non-negative")
+    if args.progress_every < 1:
+        ap.error("--progress-every must be positive")
 
     ptbxl_root = Path(args.ptbxl_root)
     plus_root = Path(args.plus_root)
@@ -106,8 +167,17 @@ def main() -> int:
         manifest_path.unlink()
     fiducial_leads = [s.strip() for s in args.fiducial_leads.split(",") if s.strip()]
 
-    if not (ptbxl_root / "ptbxl_database.csv").exists():
-        print(f"ERROR: PTB-XL not found at {ptbxl_root}", file=sys.stderr)
+    missing_inputs = _missing_required_inputs(
+        ptbxl_root,
+        plus_root,
+        require_fiducials=bool(fiducial_leads),
+    )
+    if missing_inputs:
+        print(
+            "ERROR: required PTB-XL/PTB-XL+ build inputs are missing:\n  - "
+            + "\n  - ".join(str(path) for path in missing_inputs),
+            file=sys.stderr,
+        )
         return 2
 
     print(f"[corpus] PTB-XL={ptbxl_root}\n[corpus] PTB-XL+={plus_root}\n[corpus] out={out}")
@@ -167,20 +237,35 @@ def main() -> int:
     tiers = store.tier_counts()
     concepts = store.concept_ab_counts()
     total = store.count()
+    source_counts = store.source_counts()
+    completion_blockers = _release_completion_blockers(
+        limit=args.limit,
+        scan_rows=args.scan_rows,
+        errors=errors,
+        skipped=skipped,
+        expected_ptbxl_rows=len(db),
+        stored_ptbxl_rows=int(source_counts.get("ptbxl") or 0),
+        fiducials_enabled=bool(fiducial_leads),
+    )
+    if completion_blockers:
+        print(
+            "[corpus] INCOMPLETE: no selectable manifest was written: "
+            + "; ".join(completion_blockers),
+            file=sys.stderr,
+        )
+        return 1
     manifest = {
         "version": 5,
         "licenseContractVersion": 2,
         "source": "ptbxl_ptbxl_plus_corpus",
         "complete": True,  # written LAST; gates auto-selection (see corpus_repository)
-        "ptbxlDataRoot": str(ptbxl_root),
-        "ptbxlPlusDataRoot": str(plus_root),
         "built": built,
         "skipped": skipped,
         "errors": errors,
         "totalCases": total,
         "tierDistribution": tiers,
         "studentFacing": store.student_facing_count(),
-        "sourceCounts": {"ptbxl": total},
+        "sourceCounts": source_counts,
         "sourceCatalog": {
             "ptbxl": source_catalog_entry("ptbxl"),
             "ptbxl-plus": source_catalog_entry("ptbxl-plus"),

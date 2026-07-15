@@ -83,11 +83,11 @@ export function handoff(
   concept: string,
   subskill: LearningSubskill,
   supportLevel: CrossModeHandoff["supportLevel"],
+  destination?: CrossModeHandoff["destination"],
 ): CrossModeHandoff {
-  return { mode, label, concept, subskill, supportLevel };
+  return { mode, label, concept, subskill, supportLevel, destination };
 }
 
 export function productionScene(values: ProductionScene): ProductionScene {
   return values;
 }
-

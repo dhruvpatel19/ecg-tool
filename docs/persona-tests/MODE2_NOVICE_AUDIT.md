@@ -1,5 +1,7 @@
 # Mode 2 novice learner audit
 
+> **Historical audit snapshot.** This report records the build and date named below; it is retained as defect-discovery evidence, not current product status. See [the remediation ledger](../PRODUCT_REMEDIATION_LEDGER.md) for reconciled fixes, verification, and remaining gates.
+
 **Audit date:** 2026-07-12  
 **Persona:** First-year medical student; low ECG confidence; keyboard-first; expects the app to explain why, provide a clear practice goal, and avoid assuming prior pattern fluency.  
 **Scope:** Current live application at `http://127.0.0.1:3110`, especially `/train`, registration/sign-in/sign-out, first-use experience, target selection, question variety, tutor behavior, feedback, mastery visibility, account isolation, and 390 × 844 mobile behavior.

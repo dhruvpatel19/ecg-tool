@@ -28,10 +28,13 @@ Strength = Literal["may_explain", "may_contextualize", "must_not_explain"]
 AnswerClass = Literal[
     "ideal", "acceptable", "over_triage_safe", "under_triage", "unsafe", "insufficient_data"
 ]
-QuestionType = Literal["triage", "stepwise", "click", "spoterror", "oldnew", "mcq"]
+QuestionType = Literal[
+    "triage", "stepwise", "click", "spoterror", "fillin", "matching", "oldnew", "mcq"
+]
 Situation = Literal["clinic", "ward", "ed", "triage", "code"]
 TestedScope = Literal["full_12_lead", "rhythm_only", "zoom_lead"]
 SourceType = Literal["measured", "curated_label", "authored_context"]
+MatchingSourceType = Literal["ecg_support", "authored_context", "unsupported_claim"]
 EpistemicStatus = Literal["determined", "intentionally_underdetermined"]
 DisplayMode = Literal[
     "twelve_lead",
@@ -187,6 +190,92 @@ class RoiTarget(BaseModel):
         return _check_leads(value)
 
 
+class FillInTask(BaseModel):
+    """A unit-aware numeric evidence task graded from a grounded packet feature.
+
+    ``expected_feature`` and ``tolerance`` are server-side key material.  The
+    blinded transport exposes only the response label, unit, and input bounds.
+    Keeping the target as a feature name (rather than copying a numeric answer
+    into every item) binds grading to the exact ECG packet served to the learner.
+    """
+
+    response_label: str
+    unit: Literal["ms", "bpm", "mV", "degrees"]
+    objective_id: str
+    expected_feature: Literal["qt_ms", "qtc_ms", "pr_ms", "qrs_ms", "heart_rate"]
+    tolerance: float = Field(gt=0)
+    min_value: float
+    max_value: float
+    step: float = Field(gt=0)
+
+    model_config = _FORBID
+
+    @model_validator(mode="after")
+    def _valid_range(self) -> "FillInTask":
+        if self.max_value <= self.min_value:
+            raise ValueError("fill-in max_value must be greater than min_value")
+        return self
+
+
+class MatchingChoice(BaseModel):
+    """One public evidence-boundary target in a Clinical matching task."""
+
+    id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+
+    model_config = _FORBID
+
+
+class MatchingRow(BaseModel):
+    """One clause and its server-only evidence-boundary key.
+
+    ``clause`` is learner-facing.  The remaining fields are deliberately kept
+    on the server and bind the key to the exact packet manifest rather than to
+    an unreviewed free-text interpretation.
+    """
+
+    id: str = Field(min_length=1)
+    clause: str = Field(min_length=1)
+    source_type: MatchingSourceType
+    correct_choice_id: str = Field(min_length=1)
+    source_reference: str = Field(min_length=1)
+    objective_id: str | None = None
+
+    model_config = _FORBID
+
+
+class MatchingTask(BaseModel):
+    """Accessible clause-to-source mapping task; no drag gesture is required."""
+
+    choices: list[MatchingChoice]
+    rows: list[MatchingRow]
+
+    model_config = _FORBID
+
+    @model_validator(mode="after")
+    def _complete_bijection(self) -> "MatchingTask":
+        if len(self.choices) != 3 or len(self.rows) != 3:
+            raise ValueError("matching tasks require exactly three choices and three rows")
+        choice_ids = [choice.id for choice in self.choices]
+        row_ids = [row.id for row in self.rows]
+        if len(set(choice_ids)) != len(choice_ids):
+            raise ValueError("matching choice ids must be unique")
+        if len(set(row_ids)) != len(row_ids):
+            raise ValueError("matching row ids must be unique")
+        keyed = [row.correct_choice_id for row in self.rows]
+        if set(keyed) != set(choice_ids) or len(set(keyed)) != len(keyed):
+            raise ValueError("matching rows must form a one-to-one mapping to every choice")
+        source_types = {row.source_type for row in self.rows}
+        if source_types != {"ecg_support", "authored_context", "unsupported_claim"}:
+            raise ValueError("matching tasks require one ECG, one vignette, and one unsupported row")
+        for row in self.rows:
+            if row.source_type == "ecg_support" and not row.objective_id:
+                raise ValueError("the ECG-support matching row requires an objective_id")
+            if row.source_type != "ecg_support" and row.objective_id is not None:
+                raise ValueError("only the ECG-support matching row may carry an objective_id")
+        return self
+
+
 class DisplaySpec(BaseModel):
     """What is on screen (§16E). Default is the full 12-lead."""
 
@@ -249,11 +338,13 @@ class ClinicalAnswer(BaseModel):
     first_look_confidence: Literal[2, 3, 5] | None = None
     click: ClinicalClick | None = None
     machine_line_id: str | None = None
+    fill_in_value: float | None = Field(default=None, ge=0, le=5000)
     confidence: int | None = Field(default=None, ge=1, le=5)  # required in Shift, absent in Learn
     answer_time_ms: int | None = None
     confidence_time_ms: int | None = None  # logged separately from decision time (§16D)
     timed_out: bool = False
     step_answers: list[int] = Field(default_factory=list)
+    matches: dict[str, str] = Field(default_factory=dict, max_length=3)
 
     model_config = _CAMEL_IN
 
@@ -271,6 +362,8 @@ class ClinicalCaseItem(BaseModel):
     options: list[Option] = Field(default_factory=list)
     steps: list[StepwiseStep] = Field(default_factory=list)
     roi_target: RoiTarget | None = None
+    fill_in_task: FillInTask | None = None
+    matching_task: MatchingTask | None = None
     machine_read: list[MachineLine] = Field(default_factory=list)
     evidence_manifest: EvidenceManifest = Field(default_factory=EvidenceManifest)
     # Exact concepts whose downstream clinical use is deliberately assessed by
@@ -305,4 +398,19 @@ class ClinicalCaseItem(BaseModel):
             )
         self.disclosed_objectives = list(dict.fromkeys(self.disclosed_objectives))
         self.application_objectives = list(dict.fromkeys(self.application_objectives))
+        if self.question_type == "matching":
+            if self.matching_task is None:
+                raise ValueError("matching item requires a matching_task")
+            if (
+                self.options
+                or self.steps
+                or self.machine_read
+                or self.roi_target is not None
+                or self.fill_in_task is not None
+            ):
+                raise ValueError("matching item must expose only its matching response surface")
+            if self.application_objectives:
+                raise ValueError("matching evidence-boundary tasks are formative and carry no application objectives")
+        elif self.matching_task is not None:
+            raise ValueError("non-matching item carries a hidden matching_task key")
         return self

@@ -10,8 +10,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main as main_module
+from app.assessment_ledger import append_event, create_lease
 from app.auth import AuthService
-from app.guest_progress import GuestProgressClaimConflict, GuestProgressService
+from app.guest_progress import (
+    GuestProgressClaimConflict,
+    GuestProgressClaimUnavailable,
+    GuestProgressService,
+)
 from app.main import app
 from app.storage import LearningStore
 from app.training_store import TrainingCampaignStore
@@ -35,6 +40,7 @@ def _create_account(store: LearningStore, suffix: str) -> str:
     username = f"claim_{suffix}_{uuid.uuid4().hex[:8]}"
     store.create_user(user_id, username, suffix.title(), "not-used-by-service-tests")
     store.ensure_profile(user_id, suffix.title())
+    store.update_learning_preferences(user_id, {"guidanceLevel": "minimal"})
     return user_id
 
 
@@ -48,6 +54,28 @@ def _insert_attempt(conn, learner_id: str, case_id: str, *, score: float = 0.8) 
         (learner_id, case_id, score, _NOW),
     )
     return int(cursor.lastrowid)
+
+
+def test_empty_legacy_namespace_is_not_claimable_and_registration_rolls_back(tmp_path) -> None:
+    store, claims, auth = _services(tmp_path)
+    guest_id = f"g_{'e' * 24}"
+    owner = _create_account(store, "empty-target")
+
+    summary = claims.summary(guest_id)
+    assert summary["hasProgress"] is False
+    assert summary["claimable"] is False
+    with pytest.raises(GuestProgressClaimUnavailable):
+        claims.claim(guest_id, owner)
+
+    username = f"empty_claim_{uuid.uuid4().hex[:8]}"
+    with pytest.raises(GuestProgressClaimUnavailable):
+        auth.register(
+            username,
+            _PASSWORD,
+            claim_guest_progress=True,
+            guest_id=guest_id,
+        )
+    assert store.get_user_by_username(username) is None
 
 
 def _insert_guided(
@@ -76,6 +104,7 @@ def _insert_guided(
 
 def _seed_every_mode(store: LearningStore, guest_id: str, user_id: str) -> dict[str, int]:
     store.ensure_profile(guest_id, "Guest learner")
+    store.update_learning_preferences(guest_id, {"guidanceLevel": "minimal"})
     with store.connect() as conn:
         conn.execute(
             "UPDATE objective_mastery SET mastery=.70, attempts=2, correct=1, "
@@ -163,7 +192,9 @@ def _seed_every_mode(store: LearningStore, guest_id: str, user_id: str) -> dict[
         )
 
         conn.execute(
-            "INSERT INTO tutor_threads VALUES ('guest-thread', ?, 'freeform', NULL, NULL, 'Guest help', ?, ?)",
+            "INSERT INTO tutor_threads "
+            "(thread_id, learner_id, mode, lesson_id, case_id, scope_key, title, created_at, updated_at) "
+            "VALUES ('guest-thread', ?, 'freeform', NULL, NULL, NULL, 'Guest help', ?, ?)",
             (guest_id, _NOW, _NOW),
         )
         conn.execute(
@@ -198,9 +229,9 @@ def _seed_every_mode(store: LearningStore, guest_id: str, user_id: str) -> dict[
         conn.execute(
             """INSERT INTO rapid_round_answers (
                 round_id, case_id, response_json, grade_json, tutor_json,
-                result_json, receipts_json, attempt_id, created_at
+                result_json, receipts_json, integrity_status, attempt_id, created_at
             ) VALUES ('rapid-guest', 'answered-rapid', '{}', '{}', '{}', '{}',
-                      '[]', ?, ?)""",
+                      '[]', 'legacy_incomplete', ?, ?)""",
             (guest_attempt, _NOW),
         )
 
@@ -261,11 +292,239 @@ def _seed_every_mode(store: LearningStore, guest_id: str, user_id: str) -> dict[
     return {"accountAttempt": account_attempt, "guestAttempt": guest_attempt}
 
 
+_GUEST_DIRECT_TABLES = (
+    "learner_preferences",
+    "subskill_retention_events",
+    "guided_learning_events",
+    "objective_mastery",
+    "subskill_mastery",
+    "attempts",
+    "pathway_progress",
+    "tutor_threads",
+    "review_sessions",
+    "rapid_rounds",
+    "clinical_shift_sessions",
+    "training_campaigns",
+    "learner_profiles",
+)
+
+
+def _seed_account_child_ledgers(store: LearningStore, user_id: str, attempt_id: int) -> None:
+    with store.connect() as conn:
+        conn.execute(
+            "INSERT INTO tutor_threads "
+            "(thread_id, learner_id, mode, lesson_id, case_id, scope_key, title, created_at, updated_at) "
+            "VALUES ('account-thread', ?, 'freeform', NULL, NULL, NULL, 'Account help', ?, ?)",
+            (user_id, _NOW, _NOW),
+        )
+        conn.execute(
+            "INSERT INTO tutor_messages (thread_id, role, content, created_at) "
+            "VALUES ('account-thread', 'user', 'Keep this message', ?)",
+            (_NOW,),
+        )
+        conn.execute(
+            """INSERT INTO rapid_round_answers (
+                round_id, case_id, response_json, grade_json, tutor_json,
+                result_json, receipts_json, integrity_status, attempt_id, created_at
+            ) VALUES ('rapid-account', 'account-answer', '{}', '{}', '{}', '{}',
+                      '[]', 'legacy_incomplete', ?, ?)""",
+            (attempt_id, _NOW),
+        )
+        conn.execute(
+            """INSERT INTO clinical_shift_answers (
+                session_id, item_id, ecg_id, response_json, grade_json,
+                receipts_json, score, correct, attempt_id, created_at
+            ) VALUES ('clinical-account', 'account-item-old', 'account-ecg', '{}', '{}',
+                      '[]', .8, 1, ?, ?)""",
+            (attempt_id, _NOW),
+        )
+        conn.execute(
+            """INSERT INTO training_campaign_slots (
+                campaign_id, ordinal, phase, case_id, case_focus,
+                target_present, status
+            ) VALUES ('training-account', 0, 'recognize', 'account-training-old',
+                      'target', 1, 'answered')"""
+        )
+        conn.execute(
+            """INSERT INTO training_campaign_answers (
+                campaign_id, ordinal, case_id, response_json, grade_json,
+                tutor_json, receipt_json, summary_json, attempt_id, created_at
+            ) VALUES ('training-account', 0, 'account-training-old', '{}', '{}', '{}',
+                      '[]', '{}', ?, ?)""",
+            (attempt_id, _NOW),
+        )
+
+
+def _guest_record_counts(store: LearningStore, guest_id: str) -> dict[str, int]:
+    with store.connect() as conn:
+        counts = {
+            table: int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE learner_id = ?",
+                    (guest_id,),
+                ).fetchone()["n"]
+            )
+            for table in _GUEST_DIRECT_TABLES
+        }
+        counts.update(
+            {
+                "tutor_messages": int(conn.execute(
+                    "SELECT COUNT(*) AS n FROM tutor_messages WHERE thread_id='guest-thread'"
+                ).fetchone()["n"]),
+                "rapid_round_answers": int(conn.execute(
+                    "SELECT COUNT(*) AS n FROM rapid_round_answers WHERE round_id='rapid-guest'"
+                ).fetchone()["n"]),
+                "clinical_shift_answers": int(conn.execute(
+                    "SELECT COUNT(*) AS n FROM clinical_shift_answers WHERE session_id='clinical-guest'"
+                ).fetchone()["n"]),
+                "training_campaign_slots": int(conn.execute(
+                    "SELECT COUNT(*) AS n FROM training_campaign_slots WHERE campaign_id='training-guest'"
+                ).fetchone()["n"]),
+                "training_campaign_answers": int(conn.execute(
+                    "SELECT COUNT(*) AS n FROM training_campaign_answers WHERE campaign_id='training-guest'"
+                ).fetchone()["n"]),
+            }
+        )
+    return counts
+
+
+def test_guest_record_delete_covers_every_owner_table_without_cross_owner_loss(tmp_path) -> None:
+    store, claims, _ = _services(tmp_path)
+    guest_id = f"g_{'d' * 24}"
+    user_id = _create_account(store, "delete-owner")
+    ids = _seed_every_mode(store, guest_id, user_id)
+    _seed_account_child_ledgers(store, user_id, ids["accountAttempt"])
+
+    with store.connect() as conn:
+        # Any future learner-owned table must be added to the atomic deletion
+        # contract and this explicit test ledger in the same change.
+        learner_owned_tables = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            if any(
+                str(column["name"]) == "learner_id"
+                for column in conn.execute(f"PRAGMA table_info({row['name']})").fetchall()
+            )
+        }
+    assert learner_owned_tables == set(_GUEST_DIRECT_TABLES)
+    assert all(count > 0 for count in _guest_record_counts(store, guest_id).values())
+
+    deleted = claims.delete(guest_id)
+    assert deleted > 0
+    assert set(_guest_record_counts(store, guest_id).values()) == {0}
+
+    with store.connect() as conn:
+        for table in _GUEST_DIRECT_TABLES:
+            assert conn.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE learner_id = ?", (user_id,)
+            ).fetchone()["n"] > 0
+        for table, predicate in (
+            ("tutor_messages", "thread_id='account-thread'"),
+            ("rapid_round_answers", "round_id='rapid-account'"),
+            ("clinical_shift_answers", "session_id='clinical-account'"),
+            ("training_campaign_slots", "campaign_id='training-account'"),
+            ("training_campaign_answers", "campaign_id='training-account'"),
+        ):
+            assert conn.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE {predicate}"
+            ).fetchone()["n"] > 0
+
+
+def test_guest_record_delete_rolls_back_every_table_after_injected_failure(tmp_path) -> None:
+    store, _, _ = _services(tmp_path)
+    guest_id = f"g_{'r' * 24}"
+    user_id = _create_account(store, "delete-rollback")
+    _seed_every_mode(store, guest_id, user_id)
+    before = _guest_record_counts(store, guest_id)
+
+    def fail_after_deletes(_conn) -> None:
+        raise RuntimeError("injected guest deletion failure")
+
+    with pytest.raises(RuntimeError, match="injected guest deletion failure"):
+        store.delete_guest_learning_record(guest_id, _failure_hook=fail_after_deletes)
+    assert _guest_record_counts(store, guest_id) == before
+
+
+def test_guest_delete_api_retires_identity_for_anonymous_or_authenticated_browser(
+    tmp_path, monkeypatch
+) -> None:
+    store, claims, auth = _services(tmp_path)
+    monkeypatch.setattr(main_module, "guest_progress_service", claims)
+    monkeypatch.setattr(main_module, "auth_service", auth)
+
+    store.ensure_profile("demo", "Guest learner")
+    with store.connect() as conn:
+        _insert_attempt(conn, "demo", "delete-api-guest")
+
+    old_guest_cookie = f"g_{'o' * 24}"
+    with TestClient(app) as client:
+        client.cookies.set(
+            "ecg_guest", old_guest_cookie, domain="testserver.local", path="/"
+        )
+        deleted = client.delete("/auth/guest-progress")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["ok"] is True
+        assert deleted.json()["deletedRecords"] > 0
+        assert client.cookies.get("ecg_guest") is None
+        cookie_header = deleted.headers.get("set-cookie", "").lower()
+        assert "ecg_guest=" in cookie_header
+        assert "max-age=0" in cookie_header
+        assert "httponly" in cookie_header
+        assert "samesite=lax" in cookie_header
+        assert claims.summary("demo")["hasProgress"] is False
+
+    store.ensure_profile("demo", "Guest learner")
+    with store.connect() as conn:
+        _insert_attempt(conn, "demo", "must-survive-account-rejection")
+
+    with TestClient(app) as account_client:
+        account_client.cookies.set(
+            "ecg_guest", old_guest_cookie, domain="testserver.local", path="/"
+        )
+        username = f"guest_delete_{uuid.uuid4().hex[:8]}"
+        registered = account_client.post(
+            "/auth/register",
+            json={"username": username, "password": _PASSWORD},
+        )
+        assert registered.status_code == 200, registered.text
+        discarded = account_client.delete("/auth/guest-progress")
+        assert discarded.status_code == 200
+        assert discarded.json()["ok"] is True
+        assert account_client.cookies.get("ecg_guest") is None
+        assert claims.summary("demo")["attempts"] == 0
+
+
 def test_claim_merges_existing_account_without_downgrading_or_pk_collisions(tmp_path) -> None:
     store, claims, _ = _services(tmp_path)
     guest_id = f"g_{'a' * 24}"
     user_id = _create_account(store, "existing")
     ids = _seed_every_mode(store, guest_id, user_id)
+    with store.connect() as conn:
+        create_lease(
+            conn,
+            lease_id="lease-training-guest",
+            owner_id=guest_id,
+            mode="training",
+            session_id="training-guest",
+            ecg_ids=["guest-training"],
+            created_at=_NOW,
+            expires_at=_LATER,
+        )
+        append_event(
+            conn,
+            event_id="presented-training-guest",
+            owner_id=guest_id,
+            mode="training",
+            session_id="training-guest",
+            lease_id="lease-training-guest",
+            ecg_id="guest-training",
+            event_type="item_presented",
+            evidence_level="formative",
+            integrity_status="atomic_v2",
+            occurred_at=_NOW,
+        )
 
     receipt = claims.claim(guest_id, user_id)
     assert receipt["claimed"] is True
@@ -357,6 +616,15 @@ def test_claim_merges_existing_account_without_downgrading_or_pk_collisions(tmp_
         assert conn.execute(
             "SELECT status, pending_case_id FROM training_campaigns WHERE campaign_id='training-guest'"
         ).fetchone()[:] == ("abandoned", None)
+        abandoned_lease = conn.execute(
+            "SELECT owner_id, state FROM assessment_leases WHERE lease_id='lease-training-guest'"
+        ).fetchone()
+        assert tuple(abandoned_lease) == (user_id, "abandoned")
+        terminal_event = conn.execute(
+            "SELECT owner_id, event_type FROM learner_events WHERE lease_id='lease-training-guest' "
+            "AND event_type='item_abandoned'"
+        ).fetchone()
+        assert tuple(terminal_event) == (user_id, "item_abandoned")
         assert conn.execute(
             "SELECT 1 FROM learner_profiles WHERE learner_id=?", (guest_id,)
         ).fetchone() is None
@@ -513,7 +781,7 @@ def test_registration_claim_conflict_rolls_back_new_account(tmp_path) -> None:
     assert store.get_user_by_username(blocked_username) is None
 
 
-def test_auth_api_only_claims_when_explicit_and_rotates_guest_cookie(tmp_path, monkeypatch) -> None:
+def test_auth_api_only_claims_when_explicit_and_retires_guest_cookie(tmp_path, monkeypatch) -> None:
     store, claims, auth = _services(tmp_path)
     store.ensure_profile("demo", "Guest")
     with store.connect() as conn:
@@ -554,6 +822,7 @@ def test_auth_api_only_claims_when_explicit_and_rotates_guest_cookie(tmp_path, m
         assert claimed.json()["guestClaim"]["replay"] is False
         cookie_header = claimed.headers.get("set-cookie", "").lower()
         assert "ecg_guest=" in cookie_header
+        assert "max-age=0" in cookie_header
         assert "httponly" in cookie_header
         with store.connect() as conn:
             assert conn.execute(

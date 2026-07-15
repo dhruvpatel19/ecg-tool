@@ -4,7 +4,9 @@ import re
 from pathlib import Path
 
 from app.objectives import (
+    FOUNDATIONAL_OBJECTIVE_IDS,
     GUIDED_OBJECTIVE_IDS,
+    NEUTRAL_WAVEFORM_OBJECTIVES,
     OBJECTIVES,
     SUBSKILLS,
     objective_runtime_availability,
@@ -26,11 +28,38 @@ def test_registry_covers_every_case_concept_and_guided_handoff() -> None:
     assert {concept.id for concept in CONCEPTS} <= set(OBJECTIVES)
     assert _handoff_objectives() == set(GUIDED_OBJECTIVE_IDS)
     assert set(GUIDED_OBJECTIVE_IDS) <= set(OBJECTIVES)
+    assert NEUTRAL_WAVEFORM_OBJECTIVES <= set(OBJECTIVES)
+    assert FOUNDATIONAL_OBJECTIVE_IDS <= set(OBJECTIVES)
+
+
+def test_neutral_qrs_localization_evidence_has_a_visible_registry_cell() -> None:
+    objective = OBJECTIVES["qrs_complex"]
+    assert objective.domain == "waveform_fundamentals"
+    assert objective.allowed_subskills == ("localize",)
+    assert objective.case_concepts == ("normal_ecg",)
+
+
+def test_prior_registry_cells_remain_visible_and_semantically_valid() -> None:
+    prior_pairs = {
+        ("ecg_grid_calibration", "measure"),
+        ("ectopy", "apply_in_context"),
+        ("ischemia_mimic_discrimination", "localize"),
+        ("normal_ecg", "localize"),
+        ("pr_interval", "explain_mechanism"),
+        ("pr_interval", "measure"),
+        ("qrs_duration", "localize"),
+        ("resuscitation_source_boundary", "synthesize"),
+        ("tachyarrhythmia_mixed", "localize"),
+        ("tachyarrhythmia_mixed", "measure"),
+        ("waveform_components", "localize"),
+    }
+    assert all(validate_objective_subskill(objective, subskill) for objective, subskill in prior_pairs)
 
 
 def test_every_objective_has_a_mapping_or_explicit_unavailable_reason() -> None:
     for objective in OBJECTIVES.values():
         assert objective.case_concepts or objective.unavailable_reason
+        assert objective.domain != "unmapped"
         assert objective.allowed_subskills
         assert set(objective.allowed_subskills) <= set(SUBSKILLS)
         for subskill in objective.allowed_subskills:
@@ -49,6 +78,11 @@ def test_source_boundaries_remain_formative() -> None:
         assert objective.unavailable_reason
 
 
+def test_source_boundary_objectives_live_in_student_facing_domains() -> None:
+    assert OBJECTIVES["preexcited_atrial_fibrillation"].domain == "tachyarrhythmia"
+    assert OBJECTIVES["resuscitation_source_boundary"].domain == "integration"
+
+
 def test_wct_registry_is_runtime_locked_without_an_audited_rhythm_source() -> None:
     definition = OBJECTIVES["wide_complex_tachycardia"]
     assert definition.unavailable_reason is None
@@ -61,3 +95,9 @@ def test_wct_registry_is_runtime_locked_without_an_audited_rhythm_source() -> No
 def test_bundle_branch_objectives_expose_the_reviewed_qrs_measurement_subskill() -> None:
     assert "measure" in OBJECTIVES["right_bundle_branch_block"].allowed_subskills
     assert "measure" in OBJECTIVES["left_bundle_branch_block"].allowed_subskills
+
+
+def test_student_facing_objective_labels_preserve_clinical_acronyms() -> None:
+    assert OBJECTIVES["normal_ecg"].label == "Normal ECG"
+    assert OBJECTIVES["av_block_first_degree"].label == "AV Block First Degree"
+    assert OBJECTIVES["st_depression"].label == "ST Depression"

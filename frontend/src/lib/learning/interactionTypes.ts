@@ -347,9 +347,26 @@ export type TutorSceneContract = {
 export type CrossModeHandoff = {
   mode: "train" | "rapid" | "clinical";
   label: string;
+  /** The Guided objective this scene taught; retained for source traceability. */
   concept: string;
   subskill: LearningSubskill;
   supportLevel: "guided" | "faded" | "independent";
+  /**
+   * Exact executable contract at the destination. Broad Guided objectives do
+   * not automatically equal a case-bank concept or an assessable receipt.
+   * Rapid and Clinical handoffs must therefore name the task they can really
+   * serve instead of relying on a best-effort alias after navigation.
+   */
+  destination?: {
+    focus: string;
+    subskill: LearningSubskill;
+    receiptConcept?: string;
+    secondaryConcept?: string;
+    suggestedLength?: 5 | 10 | 25 | 50;
+    pace?: "untimed" | "ward" | "emergency";
+    lane?: "clinic" | "ward" | "ed";
+    length?: 5 | 10;
+  };
 };
 
 export type ProductionScene = {

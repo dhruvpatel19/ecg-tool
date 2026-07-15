@@ -65,6 +65,42 @@ def independent_subskill_index(
     return indexed
 
 
+def formative_application_index(
+    profile: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Project exact formative ``apply_in_context`` history by concept.
+
+    Clinical decisions are useful longitudinal teaching evidence, but they are
+    not independent ECG-recognition evidence.  Return only the fields needed to
+    prioritize another application case so a caller cannot accidentally use
+    ``independentMastery`` (or a legacy objective aggregate) as an application
+    score.  The source row remains the exact concept x subskill cell.
+    """
+
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in profile.get("subskillMastery", []):
+        if row.get("subskill") != "apply_in_context":
+            continue
+        attempts = max(0, int(row.get("attempts") or 0))
+        concept = str(row.get("concept") or "")
+        if not concept or attempts <= 0:
+            continue
+        indexed[concept] = {
+            "concept": concept,
+            "subskill": "apply_in_context",
+            "formativeScore": max(
+                0.0, min(1.0, float(row.get("formativeScore") or 0.0))
+            ),
+            "attempts": attempts,
+            "correct": max(0, int(row.get("correct") or 0)),
+            "highConfidenceWrong": max(
+                0, int(row.get("highConfidenceWrong") or 0)
+            ),
+            "lastPracticedAt": row.get("lastPracticedAt"),
+        }
+    return indexed
+
+
 def priority_exact_row(
     rows: list[dict[str, Any]],
     *,
@@ -202,7 +238,14 @@ def next_case(
 ) -> dict[str, Any]:
     schedule_time = (as_of or datetime.now(UTC)).astimezone(UTC)
     profile = store.ensure_profile(learner_id)
-    recent = set(store.recent_case_ids(learner_id)) | set(exclude_case_ids or set())
+    protected_exposures = set(
+        store.protected_case_ids(learner_id, as_of=schedule_time)
+    )
+    recent = (
+        set(store.recent_case_ids(learner_id))
+        | protected_exposures
+        | set(exclude_case_ids or set())
+    )
     mastery = {row["objective"]: row for row in profile["mastery"]}
     subskill_mastery = {
         (row["concept"], row["subskill"]): row
@@ -309,6 +352,22 @@ def next_case(
             "targetObjectives": [],
             "requestedConceptUnavailable": requested_unavailable,
         }
+    unexposed_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate["case_id"] not in protected_exposures
+    ]
+    if not unexposed_candidates:
+        return {
+            "case": None,
+            "reason": (
+                "No ECG is currently eligible as an unseen assessment. "
+                "Previously revealed tracings become available again after the reassessment interval."
+            ),
+            "targetObjectives": [],
+            "requestedConceptUnavailable": requested_unavailable,
+        }
+    candidates = unexposed_candidates
     retention_row = {}
     if target_objective and subskill_id:
         retention_row = subskill_mastery.get((target_objective, subskill_id), {})

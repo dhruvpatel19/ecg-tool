@@ -1,5 +1,7 @@
 # Mode 3 clerkship audit — Rapid ECG rounds
 
+> **Historical audit snapshot.** This report records the build and date named below; it is retained as defect-discovery evidence, not current product status. See [the remediation ledger](../PRODUCT_REMEDIATION_LEDGER.md) for reconciled fixes, verification, and remaining gates.
+
 **Persona:** core-clerkship student using ECGs on ward rounds and during ED shifts  
 **Audit target:** live production app at `http://127.0.0.1:3110/rapid`  
 **Audit date:** 2026-07-12/13 (America/New_York)  

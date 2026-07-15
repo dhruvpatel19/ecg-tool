@@ -83,7 +83,8 @@ def grade_attempt(case: dict[str, Any], attempt: AttemptRequest) -> dict[str, An
         # incidental rate/sinus/QT labels must not create false high-confidence
         # errors or negative mastery updates.
         expected = expected[:1]
-    answer_concepts = set(attempt.structuredAnswer.selectedConcepts)
+    selected_concepts = set(attempt.structuredAnswer.selectedConcepts)
+    answer_concepts = set(selected_concepts)
     answer_concepts.update(_concepts_from_answer(attempt.structuredAnswer, attempt.freeTextAnswer))
 
     # Rate is a measurement competency, not a keyword competency. A previous
@@ -100,11 +101,18 @@ def grade_attempt(case: dict[str, Any], attempt: AttemptRequest) -> dict[str, An
 
     correct = sorted(set(expected) & answer_concepts)
     missed = sorted(set(expected) - answer_concepts)
-    overcalled = sorted(
+    confidence = case.get("concept_confidence") or {}
+    supported_ab = {
         concept
-        for concept in answer_concepts
-        if concept not in expected and (case["concept_confidence"].get(concept) or {}).get("tier") in {"C", "D"}
-    )
+        for concept, evidence in confidence.items()
+        if (evidence or {}).get("tier") in {"A", "B"}
+    }
+    # Only explicit finding selections are calibrated as overcalls. Narrative
+    # keyword extraction can help deterministic recall grading, but it must not
+    # turn an incidental phrase into a clinical overcall. Conversely, every
+    # selected label without A/B packet support counts, including unknown or
+    # weakly supported labels—not only entries explicitly tagged C/D.
+    overcalled = sorted(selected_concepts - supported_ab)
 
     if expected:
         score = len(correct) / len(expected)

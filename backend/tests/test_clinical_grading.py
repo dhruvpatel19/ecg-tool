@@ -10,6 +10,10 @@ from app.clinical.schemas import (
     DisplaySpec,
     EvidenceClaim,
     EvidenceManifest,
+    FillInTask,
+    MatchingChoice,
+    MatchingRow,
+    MatchingTask,
     Option,
     StemChips,
 )
@@ -29,7 +33,8 @@ def test_ideal_option_high_credit_and_correct():
     )
     assert grade["answerClass"] == "ideal"
     assert grade["score"] == 1.0
-    assert grade["correctObjectives"]  # mastery credited
+    assert grade["correctObjectives"]  # preserved for feedback/reporting
+    assert grade["masteryDelta"] == {}  # formative bank never mutates mastery
 
 
 def test_confidence_upside_cap_lowers_correct_credit():
@@ -84,6 +89,188 @@ def test_click_periodic_match_correct_and_wrong():
     assert wrong["score"] == 0.0
 
 
+def test_numeric_fillin_grades_the_grounded_packet_measurement_with_tolerance() -> None:
+    item = ClinicalCaseItem(
+        item_id="numeric-qt",
+        ecg_id="real-qt",
+        situation="clinic",
+        question_type="fillin",
+        acuity_tier="moderate",
+        stem="A QT interval requires manual verification.",
+        prompt="Estimate QT in milliseconds.",
+        fill_in_task=FillInTask(
+            response_label="Estimated QT interval",
+            unit="ms",
+            objective_id="qtc_prolongation",
+            expected_feature="qt_ms",
+            tolerance=40,
+            min_value=200,
+            max_value=800,
+            step=10,
+        ),
+        evidence_manifest=EvidenceManifest(
+            ecg_supports=[EvidenceClaim(objective_id="qtc_prolongation")],
+            action_rationale="Verify QT before applying a rate-correction formula.",
+        ),
+    )
+    packet = {
+        "supported_objectives": ["qtc_prolongation"],
+        "ptbxl_plus": {"features": {"qt_ms": 508.0}, "fiducials": {"rois": []}},
+    }
+
+    correct = grade_clinical_answer(
+        item, packet, _ans(fill_in_value=500, confidence=5)
+    )
+    near_miss = grade_clinical_answer(
+        item, packet, _ans(fill_in_value=440, confidence=3)
+    )
+    wrong = grade_clinical_answer(
+        item, packet, _ans(fill_in_value=350, confidence=5)
+    )
+
+    assert correct["score"] == 1.0
+    assert correct["correctObjectives"] == ["qtc_prolongation"]
+    assert correct["axisScores"] == {"measurement_accuracy": 1.0}
+    assert "508 ms" in correct["feedback"]
+    assert near_miss["score"] == 0.5
+    assert near_miss["missedObjectives"] == ["qtc_prolongation"]
+    assert wrong["score"] == 0.0
+    assert wrong["calibrationEvent"]["highConfidenceWrong"] is True
+
+
+def _matching_item() -> ClinicalCaseItem:
+    return ClinicalCaseItem(
+        item_id="matching-evidence-boundaries",
+        ecg_id="real-lvh",
+        situation="clinic",
+        question_type="matching",
+        acuity_tier="low",
+        stem="A student reviews a tracing during an outpatient follow-up.",
+        chips=StemChips(age=55, setting="outpatient follow-up", symptom="none"),
+        prompt="Match each clause to its strongest evidence boundary.",
+        matching_task=MatchingTask(
+            choices=[
+                MatchingChoice(id="context", label="Provided only by the authored vignette"),
+                MatchingChoice(id="unsupported", label="Not established by this ECG or vignette"),
+                MatchingChoice(id="ecg", label="Supported by this ECG packet"),
+            ],
+            rows=[
+                MatchingRow(
+                    id="context-row",
+                    clause="Encounter setting: outpatient follow-up",
+                    source_type="authored_context",
+                    correct_choice_id="context",
+                    source_reference="authored setting: outpatient follow-up",
+                ),
+                MatchingRow(
+                    id="unsupported-row",
+                    clause="Claim: acute hypertensive emergency",
+                    source_type="unsupported_claim",
+                    correct_choice_id="unsupported",
+                    source_reference="acute hypertensive emergency",
+                ),
+                MatchingRow(
+                    id="ecg-row",
+                    clause="Left ventricular hypertrophy",
+                    source_type="ecg_support",
+                    correct_choice_id="ecg",
+                    source_reference="left_ventricular_hypertrophy",
+                    objective_id="left_ventricular_hypertrophy",
+                ),
+            ],
+        ),
+        evidence_manifest=EvidenceManifest(
+            ecg_supports=[EvidenceClaim(objective_id="left_ventricular_hypertrophy")],
+            stem_adds=["authored setting: outpatient follow-up"],
+            forbidden_claims=["acute hypertensive emergency"],
+            action_rationale="Separate ECG evidence from supplied context before acting.",
+        ),
+    )
+
+
+def test_matching_grades_every_row_deterministically_without_pathology_receipt() -> None:
+    item = _matching_item()
+    packet = {"supported_objectives": ["left_ventricular_hypertrophy"]}
+    correct = grade_clinical_answer(
+        item,
+        packet,
+        _ans(
+            matches={
+                "context-row": "context",
+                "unsupported-row": "unsupported",
+                "ecg-row": "ecg",
+            },
+            confidence=5,
+        ),
+    )
+    partial = grade_clinical_answer(
+        item,
+        packet,
+        _ans(
+            matches={
+                "context-row": "ecg",
+                "unsupported-row": "unsupported",
+                "ecg-row": "context",
+            },
+            confidence=5,
+        ),
+    )
+    duplicate = grade_clinical_answer(
+        item,
+        packet,
+        _ans(
+            matches={
+                "context-row": "ecg",
+                "unsupported-row": "ecg",
+                "ecg-row": "ecg",
+            },
+            confidence=3,
+        ),
+    )
+
+    assert correct["score"] == 1.0
+    assert correct["matchingCorrect"] is True
+    assert all(result["correct"] for result in correct["matchingResults"])
+    assert correct["correctObjectives"] == []
+    assert correct["missedObjectives"] == []
+    assert correct["masteryDelta"] == {}
+    assert correct["axisScores"] == {
+        "authored_context_boundary": 1.0,
+        "unsupported_claim_boundary": 1.0,
+        "ecg_evidence": 1.0,
+        "evidence_source_matching": 1.0,
+    }
+    assert partial["score"] == 0.333
+    assert partial["matchingCorrect"] is False
+    assert partial["calibrationEvent"]["highConfidenceWrong"] is True
+    assert [result["correct"] for result in partial["matchingResults"]] == [False, True, False]
+    assert duplicate["score"] == 0.0
+    assert duplicate["calibrationEvent"]["matchingComplete"] is False
+
+
+def test_matching_timeout_cannot_credit_prefilled_mapping() -> None:
+    item = _matching_item()
+    packet = {"supported_objectives": ["left_ventricular_hypertrophy"]}
+    grade = grade_clinical_answer(
+        item,
+        packet,
+        _ans(
+            matches={
+                "context-row": "context",
+                "unsupported-row": "unsupported",
+                "ecg-row": "ecg",
+            },
+            confidence=5,
+            timed_out=True,
+        ),
+    )
+
+    assert grade["timedOut"] is True
+    assert grade["score"] == 0.0
+    assert grade["matchingCorrect"] is False
+    assert not any(result["correct"] for result in grade["matchingResults"])
+
+
 def test_timeout_is_kind_but_scored_zero():
     grade = grade_clinical_answer(CASE_T, packet_for(CASE_T), _ans(timed_out=True, confidence=3))
     assert grade["timedOut"] is True
@@ -104,7 +291,7 @@ def test_stepwise_timeout_cannot_regrade_prefilled_correct_steps() -> None:
     assert grade["timedOut"] is True
     assert grade["score"] == 0.0
     assert grade["correctObjectives"] == []
-    assert all(delta <= 0 for delta in grade["masteryDelta"].values())
+    assert grade["masteryDelta"] == {}
     assert grade["stepResults"] == [False, False]
     assert grade["axisScores"]["ecg_sequence"] == 0.0
 

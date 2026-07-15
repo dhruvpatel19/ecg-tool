@@ -12,25 +12,42 @@ import {
   Clock3,
   FlaskConical,
   Link2,
+  ListTree,
   MessageCircleQuestion,
   RotateCcw,
   SkipForward,
   Sparkles,
   Target,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ECGViewer } from "@/components/ECGViewer";
 import { TutorChat } from "@/components/TutorChat";
 import { LearningInteractionRenderer } from "@/components/learning/LearningInteractionRenderer";
+import {
+  DisclosureArea,
+  LearningWorkspaceShell,
+  ResponseRail,
+  SessionBar,
+  TutorDrawer,
+  WaveformPane,
+  WorkspaceBody,
+  WorkspaceNotices,
+} from "@/components/layout/LearningWorkspaceShell";
 import { api, type PathwayProgressItem } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { guidedHandoffHref } from "@/lib/learning/handoffTargets";
 import type { InteractionEvidence, LearningInteraction, ProductionModule, ProductionScene } from "@/lib/learning/interactionTypes";
 import type { CasePacket, CaseSummary, ViewerAction, ViewerTaskEvidence, ViewerTaskSpec } from "@/lib/types";
 import type { ECGPoint } from "@/lib/coordinates";
 import { PRODUCTION_PATHWAY_ID } from "@/lib/pathways";
+import { useLearningPreferences } from "@/lib/useLearningPreferences";
+import styles from "./ProductionModuleExperience.module.css";
 
 type SceneStatus = "not-started" | "viewed" | "attempted" | "needs-review" | "complete" | "skipped";
+
+type GuidedSaveStatus = "saving" | "practice_saved" | "progress_updated" | "local_only";
 
 type SceneRuntime = {
   status: SceneStatus;
@@ -43,31 +60,10 @@ type SceneRuntime = {
 
 type RuntimeState = Record<string, Record<string, SceneRuntime>>;
 
-const STORAGE_KEY = "trace-production-curriculum-v1";
 const PATHWAY_ID = PRODUCTION_PATHWAY_ID;
-const IMPORT_MARKER_PREFIX = "trace-production-guest-imported";
 
 function emptyRuntime(): SceneRuntime {
   return { status: "not-started", activeInteractionIndex: 0, revealedMechanismCount: 1, evidence: {}, equivalentRetryCount: 0, assistedInteractionIds: [] };
-}
-
-function loadRuntime(): RuntimeState {
-  if (typeof window === "undefined") return {};
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}");
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveRuntime(runtime: RuntimeState) {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(runtime));
-    window.dispatchEvent(new Event("trace-production-progress"));
-  } catch {
-    // The session remains usable in memory when storage is unavailable.
-  }
 }
 
 function runtimeToProgressItems(runtime: RuntimeState): PathwayProgressItem[] {
@@ -104,10 +100,14 @@ function progressItemsToRuntime(items: PathwayProgressItem[]): RuntimeState {
   return runtime;
 }
 
-function hasGuestProgress(runtime: RuntimeState) {
-  return Object.values(runtime).some((scenes) => Object.values(scenes).some((scene) =>
-    scene.status !== "not-started" || Object.keys(scene.evidence).length > 0,
-  ));
+function newestResumableScene(items: PathwayProgressItem[], moduleId: string): string | null {
+  return items
+    .filter((item) => item.moduleId === moduleId && !["not-started", "complete", "skipped"].includes(item.status))
+    .sort((left, right) => (
+      (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "")
+      || (right.createdAt ?? "").localeCompare(left.createdAt ?? "")
+      || left.sceneId.localeCompare(right.sceneId)
+    ))[0]?.sceneId ?? null;
 }
 
 function statusLabel(status: SceneStatus) {
@@ -119,8 +119,24 @@ function statusLabel(status: SceneStatus) {
   return "Not started";
 }
 
-function compactSceneId(sceneId: string) {
-  return sceneId.split(/[.-]/).at(-1)?.toUpperCase() ?? sceneId;
+function skillLabel(value: string) {
+  const labels: Record<string, string> = {
+    apply_in_context: "use in context",
+    calibrate_confidence: "calibrate confidence",
+    discriminate: "tell apart",
+    explain_mechanism: "explain",
+    localize: "locate",
+    measure: "measure",
+    recognize: "identify",
+    synthesize: "complete interpretation",
+  };
+  return labels[value] ?? value.replaceAll("_", " ");
+}
+
+function supportLabel(value: string) {
+  if (value === "independent") return "solo check";
+  if (value === "faded") return "light support";
+  return "guided practice";
 }
 
 function taskForInteraction(interaction: LearningInteraction): ViewerTaskSpec | undefined {
@@ -144,30 +160,58 @@ type Eligibility = {
   mode: "target" | "contrast" | "simulation" | "locked";
 };
 
-function caseEligibility(scene: ProductionScene, packet: CasePacket | null, requestedUnavailable: boolean): Eligibility {
+type GuidedEligibilityResult = {
+  eligible: boolean;
+  missingRequirementCount: number;
+  message: string;
+};
+
+function guidedEligibilityRequest(scene: ProductionScene) {
+  const measurements = new Set<string>();
+  const rois = new Set<string>();
+  const leads = new Set(scene.caseContract?.requiredLeads ?? []);
+  for (const evidence of scene.caseContract?.requiredEvidence ?? []) {
+    if (evidence.startsWith("measurement:")) measurements.add(evidence.slice("measurement:".length));
+    if (evidence.startsWith("roi:")) rois.add(evidence.slice("roi:".length));
+  }
+  for (const interaction of scene.interactions) {
+    if (interaction.kind === "point" || interaction.kind === "region") {
+      rois.add(interaction.concept);
+      interaction.allowedLeads?.forEach((lead) => leads.add(lead));
+    }
+    if ((interaction.kind === "caliper" || interaction.kind === "numeric_entry")
+      && interaction.target.source === "packet_measurement"
+      && interaction.target.measurementKey) {
+      measurements.add(interaction.target.measurementKey);
+    }
+    if (interaction.kind === "caliper") {
+      if (interaction.target.lead) leads.add(interaction.target.lead);
+      const roi = caliperRoiConcept(interaction.measurement);
+      if (roi) rois.add(roi);
+    }
+  }
+  return {
+    minimumTier: scene.caseContract?.minimumTier ?? "B",
+    requiredLeads: [...leads],
+    requiredMeasurements: [...measurements],
+    requiredRois: [...rois],
+    requiresPerBeatLandmarks: scene.interactions.some((interaction) => interaction.kind === "march"),
+  };
+}
+
+function caseEligibility(
+  scene: ProductionScene,
+  packet: CasePacket | null,
+  requestedUnavailable: boolean,
+  serverEligibility: GuidedEligibilityResult | null,
+): Eligibility {
   const contract = scene.caseContract;
   if (!contract) return { eligible: true, reasons: [], mode: "simulation" };
   const reasons: string[] = [];
   if (!packet) reasons.push("No case packet is loaded.");
   if (requestedUnavailable) reasons.push(`No eligible ${contract.requestedConcept.replaceAll("_", " ")} exemplar is available.`);
-  if (packet && !["A", "B"].includes(packet.teaching_tier)) reasons.push(`Teaching tier ${packet.teaching_tier} is below the ${contract.minimumTier} requirement.`);
-  if (packet && contract.minimumTier === "A" && packet.teaching_tier !== "A") reasons.push("This scene requires a Tier A exemplar.");
-  if (packet && !packet.supported_objectives?.includes(contract.requestedConcept)) reasons.push("The case packet does not support the requested objective.");
-  for (const lead of contract.requiredLeads ?? []) {
-    if (packet && !packet.waveform.leads.includes(lead)) reasons.push(`Required lead ${lead} is missing.`);
-  }
-  for (const evidence of contract.requiredEvidence) {
-    if (!packet) continue;
-    if (evidence.startsWith("measurement:")) {
-      const key = evidence.slice("measurement:".length);
-      if (packet.ptbxl_plus.measurements[key] === undefined) reasons.push(`Required measurement ${key} is unavailable.`);
-    }
-    if (evidence.startsWith("roi:")) {
-      const concept = evidence.slice("roi:".length);
-      const rois = packet.ptbxl_plus.fiducials.rois ?? [];
-      if (!rois.some((roi) => roi.concept === concept)) reasons.push(`Required ${concept.replaceAll("_", " ")} geometry is unavailable.`);
-    }
-  }
+  if (packet && !serverEligibility) reasons.push("This scene cannot yet verify the ECG evidence needed for an independent assessment.");
+  if (serverEligibility && !serverEligibility.eligible) reasons.push(serverEligibility.message);
   const uniqueReasons = Array.from(new Set(reasons));
   if (!uniqueReasons.length) return { eligible: true, reasons: [], mode: "target" };
   return {
@@ -177,50 +221,10 @@ function caseEligibility(scene: ProductionScene, packet: CasePacket | null, requ
   };
 }
 
-function interactionCaseEligibility(
-  scene: ProductionScene,
-  base: Eligibility,
-  interaction: LearningInteraction | undefined,
-  packet: CasePacket | null,
-): Eligibility {
-  if (!base.eligible || !interaction || !packet) return base;
-  const reasons: string[] = [];
-  if (interaction.kind === "point" || interaction.kind === "region") {
-    const matching = (packet.ptbxl_plus.fiducials.rois ?? []).filter((roi) =>
-      roi.concept === interaction.concept && (!interaction.allowedLeads?.length || interaction.allowedLeads.includes(roi.lead)));
-    if (!matching.length) reasons.push(`No reviewed ${interaction.concept.replaceAll("_", " ")} geometry exists in the permitted leads.`);
-  }
-  if (interaction.kind === "caliper" && interaction.target.source === "packet_measurement") {
-    const key = interaction.target.measurementKey;
-    if (!key || packet.ptbxl_plus.measurements[key] === undefined) reasons.push(`The grounded ${key ?? interaction.measurement} measurement is unavailable.`);
-    const roiConcept = caliperRoiConcept(interaction.measurement);
-    if (roiConcept) {
-      const matching = (packet.ptbxl_plus.fiducials.rois ?? []).some((roi) => roi.concept === roiConcept
-        && (!interaction.target.lead || roi.lead === interaction.target.lead));
-      if (!matching) reasons.push(`Reviewed ${roiConcept.replaceAll("_", " ")} boundaries are unavailable in the required lead.`);
-    }
-  }
-  if (interaction.kind === "march") {
-    const perBeatLandmarks = (packet.ptbxl_plus.fiducials as Record<string, unknown>).per_beat_landmarks;
-    const irregularObjectives = new Set([
-      "atrial_fibrillation",
-      "atrial_flutter",
-      "premature_atrial_complex",
-      "premature_ventricular_complex",
-      "av_block_second_degree_mobitz_i",
-      "av_block_second_degree_mobitz_ii",
-      "av_block_third_degree",
-    ]);
-    const irregular = packet.supported_objectives?.some((objective) => irregularObjectives.has(objective));
-    if (irregular && !Array.isArray(perBeatLandmarks)) reasons.push("This irregular tracing lacks reviewed per-beat landmarks for a scored march.");
-  }
-  if (!reasons.length) return base;
-  const fallback = scene.caseContract?.fallback ?? "lock_scene";
-  return {
-    eligible: false,
-    reasons,
-    mode: fallback === "contrast_only" ? "contrast" : fallback === "authored_simulation" ? "simulation" : "locked",
-  };
+function eligibilityMessage(eligibility: Eligibility) {
+  if (eligibility.mode === "contrast") return "This ECG is useful for comparison, but it cannot score the target finding.";
+  if (eligibility.mode === "simulation") return "This authored exercise teaches the reasoning, but it is not a scored ECG check.";
+  return "A suitable real ECG is not available for this check right now. You can continue the lesson without changing progress for this skill.";
 }
 
 type ModuleNavigationReference = Pick<ProductionModule, "id" | "shortTitle">;
@@ -232,15 +236,17 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
   nextModule?: ModuleNavigationReference;
 }) {
   const { user, loading: authLoading } = useAuth();
+  const { preferences: learningPreferences } = useLearningPreferences();
+  const authenticatedUserId = user?.userId;
   const [sceneIndex, setSceneIndex] = useState(0);
   const [runtime, setRuntime] = useState<RuntimeState>({});
   const [runtimeReady, setRuntimeReady] = useState(false);
   const [pathwaySyncError, setPathwaySyncError] = useState<string | null>(null);
-  const [guestImportAvailable, setGuestImportAvailable] = useState(false);
-  const [importingGuest, setImportingGuest] = useState(false);
   const [sceneMapOpen, setSceneMapOpen] = useState(false);
   const [caseSummary, setCaseSummary] = useState<CaseSummary | null>(null);
   const [packet, setPacket] = useState<CasePacket | null>(null);
+  const [guidedContext, setGuidedContext] = useState<string | null>(null);
+  const [guidedEligibility, setGuidedEligibility] = useState<GuidedEligibilityResult | null>(null);
   const [caseError, setCaseError] = useState<string | null>(null);
   const [loadingCase, setLoadingCase] = useState(true);
   const [requestedUnavailable, setRequestedUnavailable] = useState(false);
@@ -249,9 +255,19 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
   const [viewerActions, setViewerActions] = useState<ViewerAction[]>([]);
   const [selectedPoint, setSelectedPoint] = useState<ECGPoint | null>(null);
   const [masteryReceipt, setMasteryReceipt] = useState<string | null>(null);
+  const [guidedSaveStatus, setGuidedSaveStatus] = useState<GuidedSaveStatus | null>(null);
   const pendingDeepLinkedScene = useRef<string | null>(null);
   const pathwaySaveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const guidedReceiptSequence = useRef(0);
+  const sceneMapTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const sceneMapCloseRef = useRef<HTMLButtonElement | null>(null);
   const scene = module.scenes[sceneIndex];
+
+  useEffect(() => {
+    if (!sceneMapOpen) return;
+    const frame = window.requestAnimationFrame(() => sceneMapCloseRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [sceneMapOpen]);
 
   useEffect(() => {
     const requestedScene = new URLSearchParams(window.location.search).get("scene");
@@ -269,74 +285,66 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
     let cancelled = false;
     setRuntimeReady(false);
     setPathwaySyncError(null);
-    if (!user) {
-      const guestRuntime = loadRuntime();
-      setRuntime(guestRuntime);
-      if (!pendingDeepLinkedScene.current) {
-        const resumable = module.scenes.findIndex((item) => {
-          const status = guestRuntime[module.id]?.[item.id]?.status;
-          return status && status !== "not-started" && status !== "complete";
-        });
-        if (resumable >= 0) setSceneIndex(resumable);
-      }
-      setGuestImportAvailable(false);
-      setRuntimeReady(true);
+    if (!authenticatedUserId) {
+      setRuntime({});
+      setRuntimeReady(false);
       return () => { cancelled = true; };
     }
 
-    const guestRuntime = loadRuntime();
-    const importMarker = `${IMPORT_MARKER_PREFIX}:${user.userId}`;
-    setGuestImportAvailable(hasGuestProgress(guestRuntime) && window.localStorage.getItem(importMarker) !== "true");
-    api.pathwayProgress(user.userId, PATHWAY_ID)
+    api.pathwayProgress(authenticatedUserId, PATHWAY_ID)
       .then((response) => {
         if (!cancelled) {
-          setRuntime(progressItemsToRuntime(response.items));
+          const serverRuntime = progressItemsToRuntime(response.items);
+          setRuntime(serverRuntime);
           if (!pendingDeepLinkedScene.current) {
-            const resumableIds = new Set(response.items
-              .filter((item) => item.moduleId === module.id && item.status !== "not-started" && item.status !== "complete")
-              .map((item) => item.sceneId));
-            const resumable = module.scenes.findIndex((item) => resumableIds.has(item.id));
+            const resumableSceneId = newestResumableScene(response.items, module.id);
+            const resumable = module.scenes.findIndex((item) => item.id === resumableSceneId);
             if (resumable >= 0) setSceneIndex(resumable);
           }
         }
       })
-      .catch((error: Error) => {
+      .catch(() => {
         if (!cancelled) {
           setRuntime({});
-          setPathwaySyncError(`Private pathway progress could not be loaded. ${error.message}`);
+          setPathwaySyncError("Your lesson progress could not be loaded. Check your connection and try again.");
         }
       })
       .finally(() => {
         if (!cancelled) setRuntimeReady(true);
       });
     return () => { cancelled = true; };
-  }, [authLoading, module.id, module.scenes, user?.userId]);
+  }, [authLoading, authenticatedUserId, module.id, module.scenes]);
 
   useEffect(() => {
     if (pendingDeepLinkedScene.current !== scene.id) return;
     pendingDeepLinkedScene.current = null;
     const timer = window.setTimeout(() => {
-      const target = document.getElementById("production-scene-title");
-      target?.scrollIntoView({ behavior: "auto", block: "start" });
+      // Case scenes are deliberately ECG-first below the single-column
+      // breakpoint. Focusing the semantically earlier lesson heading there
+      // leaves keyboard focus off-screen because CSS places that frame after
+      // the trace and active question. Keep entry focus visible without
+      // sacrificing the ECG-first reading order.
+      const compactCaseLayout = Boolean(scene.caseContract)
+        && window.matchMedia("(max-width: 840px)").matches;
+      const target = document.getElementById(
+        compactCaseLayout ? "main-content" : "production-scene-title",
+      );
       target?.focus({ preventScroll: true });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [scene.id]);
+  }, [scene.caseContract, scene.id]);
 
   const updateSceneRuntime = useCallback((sceneId: string, updater: (current: SceneRuntime) => SceneRuntime) => {
+    if (!user) return;
     setRuntime((current) => {
       const nextScene = updater(current[module.id]?.[sceneId] ?? emptyRuntime());
       const next = { ...current, [module.id]: { ...(current[module.id] ?? {}), [sceneId]: nextScene } };
-      if (user) {
-        const item = runtimeToProgressItems({ [module.id]: { [sceneId]: nextScene } });
-        pathwaySaveChain.current = pathwaySaveChain.current
-          .catch(() => undefined)
-          .then(() => api.savePathwayProgress(user.userId, item, "server"))
-          .then(() => setPathwaySyncError(null))
-          .catch((error: Error) => setPathwaySyncError(`Your work is still open, but server sync failed. ${error.message}`));
-      } else {
-        saveRuntime(next);
-      }
+      const item = runtimeToProgressItems({ [module.id]: { [sceneId]: nextScene } });
+      pathwaySaveChain.current = pathwaySaveChain.current
+        .catch(() => undefined)
+        .then(() => api.savePathwayProgress(user.userId, item, "server"))
+        .then(() => setPathwaySyncError(null))
+        .catch(() => setPathwaySyncError("Your work is still open, but it could not be synced. Check your connection and try again."));
       return next;
     });
   }, [module.id, user]);
@@ -347,38 +355,19 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
     if (current.status === "not-started") updateSceneRuntime(scene.id, (value) => ({ ...value, status: "viewed" }));
   }, [module.id, runtime, runtimeReady, scene.id, updateSceneRuntime]);
 
-  async function importGuestProgress() {
-    if (!user || importingGuest) return;
-    const guestRuntime = loadRuntime();
-    const items = runtimeToProgressItems(guestRuntime);
-    if (!items.length) {
-      setGuestImportAvailable(false);
-      return;
-    }
-    setImportingGuest(true);
-    setPathwaySyncError(null);
-    try {
-      const response = await api.savePathwayProgress(user.userId, items, "guest_import");
-      const hydrated = await api.pathwayProgress(user.userId, PATHWAY_ID);
-      setRuntime(progressItemsToRuntime(hydrated.items.length ? hydrated.items : response.items));
-      window.localStorage.setItem(`${IMPORT_MARKER_PREFIX}:${user.userId}`, "true");
-      setGuestImportAvailable(false);
-    } catch (error) {
-      setPathwaySyncError(`Guest progress was not imported. ${error instanceof Error ? error.message : "Try again."}`);
-    } finally {
-      setImportingGuest(false);
-    }
-  }
-
   useEffect(() => {
     setCaseSummary(null);
     setPacket(null);
+    setGuidedContext(null);
+    setGuidedEligibility(null);
     setCaseError(null);
     setRequestedUnavailable(false);
     setViewerTaskEvidence(null);
     setViewerActions([]);
     setSelectedPoint(null);
     setMasteryReceipt(null);
+    setGuidedSaveStatus(null);
+    guidedReceiptSequence.current += 1;
     const contract = scene.caseContract;
     if (!contract) {
       setLoadingCase(false);
@@ -386,13 +375,19 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
     }
     let cancelled = false;
     setLoadingCase(true);
-    api.tutorial(contract.selectorLessonId, contract.requestedConcept, excludedCaseId)
+    api.tutorial(
+      contract.selectorLessonId,
+      contract.requestedConcept,
+      excludedCaseId,
+      guidedEligibilityRequest(scene),
+    )
       .then(async (result) => {
         if (cancelled) return;
         setRequestedUnavailable(Boolean(result.selection?.requestedConceptUnavailable));
         setCaseSummary(result.recommendedCase);
-        const nextPacket = await api.packet(result.recommendedCase.caseId);
-        if (!cancelled) setPacket(nextPacket);
+        setPacket(result.recommendedPacket);
+        setGuidedContext(result.guidedContext);
+        setGuidedEligibility(result.guidedEligibility);
       })
       .catch((error: Error) => {
         if (!cancelled) setCaseError(error.message);
@@ -404,11 +399,25 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
   }, [excludedCaseId, scene]);
 
   const sceneRuntime = runtime[module.id]?.[scene.id] ?? emptyRuntime();
+  const mechanismGuidanceOffset = learningPreferences?.guidanceLevel === "step_by_step"
+    ? 1
+    : learningPreferences?.guidanceLevel === "minimal"
+      ? -1
+      : 0;
+  const visibleMechanismCount = Math.max(
+    0,
+    Math.min(
+      scene.copy.mechanismNarration.length,
+      sceneRuntime.revealedMechanismCount + mechanismGuidanceOffset,
+    ),
+  );
   const activeInteractionIndex = Math.min(sceneRuntime.activeInteractionIndex, Math.max(0, scene.interactions.length - 1));
   const activeInteraction = scene.interactions[activeInteractionIndex];
   const activeEvidence = activeInteraction ? sceneRuntime.evidence[activeInteraction.id] : undefined;
-  const baseEligibility = useMemo(() => caseEligibility(scene, packet, requestedUnavailable), [packet, requestedUnavailable, scene]);
-  const eligibility = useMemo(() => interactionCaseEligibility(scene, baseEligibility, activeInteraction, packet), [activeInteraction, baseEligibility, packet, scene]);
+  const eligibility = useMemo(
+    () => caseEligibility(scene, packet, requestedUnavailable, guidedEligibility),
+    [guidedEligibility, packet, requestedUnavailable, scene],
+  );
   const waveformInteraction = activeInteraction && ["point", "region", "caliper", "march"].includes(activeInteraction.kind);
   const requiresGroundedCase = Boolean(activeInteraction?.subskills.some((subskill) => ["recognize", "localize", "measure", "discriminate", "synthesize", "apply_in_context"].includes(subskill)));
   const caseResolutionComplete = !loadingCase && Boolean(packet || caseError);
@@ -421,10 +430,13 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
   const progressPercent = Math.round((completedCount / module.scenes.length) * 100);
   const totalMinutes = module.scenes.reduce((sum, item) => sum + item.minutes, 0);
   const parts = Array.from(new Set(module.scenes.map((item) => item.partId)));
-  const returnTo = encodeURIComponent(`/learn/${module.id}?scene=${scene.id}`);
   const waypoint = `${module.shortTitle} · ${scene.id} ${scene.copy.title} · action ${activeInteractionIndex + 1}`;
 
   function recordEvidence(evidence: InteractionEvidence) {
+    if (!authenticatedUserId) {
+      setPathwaySyncError("Your account session could not be verified. Sign in again before saving this step.");
+      return;
+    }
     const recordedEvidence = sceneRuntime.assistedInteractionIds.includes(evidence.interactionId)
       ? { ...evidence, assistance: "scaffolded" as const, hintsUsed: Math.max(1, evidence.hintsUsed) }
       : evidence;
@@ -447,7 +459,11 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
         status: complete ? "complete" : recordedEvidence.correct ? "attempted" : "needs-review",
       };
     });
-    const concept = scene.caseContract?.requestedConcept ?? scene.handoffs[0]?.concept ?? "curriculum_foundation";
+    const receiptHandoff = scene.handoffs.find((handoff) => activeInteraction?.subskills.includes(handoff.subskill));
+    const concept = receiptHandoff?.concept
+      ?? scene.handoffs[0]?.concept
+      ?? scene.caseContract?.requestedConcept
+      ?? "curriculum_foundation";
     const isFinalRequired = scene.completionRule.requiredInteractionIds.every((id) => id === recordedEvidence.interactionId || sceneRuntime.evidence[id]?.correct);
     const evidenceLevel = isFinalRequired && scene.completionRule.requireIndependentAttempt ? "independent_transfer" : "guided";
     const caseProvenance = !scene.caseContract
@@ -457,13 +473,18 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
         : eligibility.mode === "contrast"
           ? "contrast_only"
           : "authored_simulation";
+    const receiptSequence = ++guidedReceiptSequence.current;
+    setGuidedSaveStatus("saving");
     void api.recordGuidedEvent({
-      learnerId: "demo",
+      learnerId: authenticatedUserId,
       moduleId: module.id,
       sceneId: scene.id,
       interactionId: recordedEvidence.interactionId,
       concept,
-      subskills: activeInteraction?.subskills ?? ["recognize"],
+      // A Guided receipt is one registered objective cell, not every skill the
+      // interaction happens to exercise. Sending unrelated interaction skills
+      // under this concept makes the server correctly reject the whole event.
+      subskills: receiptHandoff ? [receiptHandoff.subskill] : (activeInteraction?.subskills.slice(0, 1) ?? ["recognize"]),
       score: recordedEvidence.score,
       correct: recordedEvidence.correct,
       attempts: recordedEvidence.attempts,
@@ -471,15 +492,27 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
       hintsUsed: recordedEvidence.hintsUsed,
       evidenceLevel,
       caseId: caseSummary?.caseId ?? null,
+      guidedContext,
       caseProvenance,
       caseEligible: eligibility.eligible,
       misconceptions: recordedEvidence.misconceptions,
     }).then((receipt) => {
-      const independent = receipt.receipts.filter((item) => item.evidenceLevel === "independent_transfer");
-      setMasteryReceipt(independent.length
-        ? `Independent evidence recorded for ${independent.map((item) => item.subskill.replaceAll("_", " ")).join(", ")}.`
-        : "Formative evidence recorded; independent mastery is unchanged until an eligible transfer.");
-    }).catch(() => setMasteryReceipt("The lesson result is saved locally; the server receipt is temporarily unavailable."));
+      if (receiptSequence !== guidedReceiptSequence.current) return;
+      const independent = receipt.effectiveEvidenceLevel === "independent_transfer"
+        ? receipt.receipts.filter((item) => item.evidenceLevel === "independent_transfer")
+        : [];
+      if (independent.length) {
+        setGuidedSaveStatus("progress_updated");
+        setMasteryReceipt(`Progress updated for ${independent.map((item) => skillLabel(item.subskill)).join(", ")}.`);
+        return;
+      }
+      setGuidedSaveStatus("practice_saved");
+      setMasteryReceipt("Lesson practice saved. Try the skill on a fresh mixed ECG before your mastery estimate changes.");
+    }).catch(() => {
+      if (receiptSequence !== guidedReceiptSequence.current) return;
+      setGuidedSaveStatus("local_only");
+      setMasteryReceipt("This lesson step is saved on this device. Account sync is temporarily unavailable.");
+    });
   }
 
   function recordTutorAssistance() {
@@ -490,7 +523,7 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
         ? current.assistedInteractionIds
         : [...current.assistedInteractionIds, activeInteraction.id],
     }));
-    setMasteryReceipt("Tutor assistance recorded for this action; the next success is formative until an equivalent independent retry.");
+    setMasteryReceipt("Tutor help noted. Try the next equivalent ECG without help to update your mastery estimate.");
   }
 
   function advanceInteraction() {
@@ -540,10 +573,23 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
     const next = module.scenes[index];
     window.history.replaceState(null, "", `/learn/${module.id}?scene=${encodeURIComponent(next.id)}`);
     window.setTimeout(() => {
-      const target = document.getElementById("production-scene-title");
-      target?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+      const compactCaseLayout = Boolean(next.caseContract)
+        && window.matchMedia("(max-width: 840px)").matches;
+      const target = document.getElementById(
+        compactCaseLayout ? "main-content" : "production-scene-title",
+      );
+      if (compactCaseLayout) {
+        window.scrollTo({ top: 0, behavior: "auto" });
+      } else {
+        target?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+      }
       target?.focus({ preventScroll: true });
     }, 0);
+  }
+
+  function closeSceneMap() {
+    setSceneMapOpen(false);
+    window.requestAnimationFrame(() => sceneMapTriggerRef.current?.focus());
   }
 
   function skipScene() {
@@ -551,153 +597,176 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
     if (sceneIndex < module.scenes.length - 1) goToScene(sceneIndex + 1);
   }
 
-  const requiredEvidenceForScene = scene.completionRule.requiredInteractionIds.map((id) => sceneRuntime.evidence[id]).filter(Boolean);
-  const visualSubskills = new Set(["recognize", "localize", "measure", "discriminate", "synthesize"]);
-  const hasIndependentlyEligibleRealCase = Boolean(scene.caseContract && baseEligibility.eligible && caseSummary?.source !== "fixture");
-  const sceneHasIndependentEvidence = requiredEvidenceForScene.length === scene.completionRule.requiredInteractionIds.length
-    && requiredEvidenceForScene.every((item) => {
-      const interaction = scene.interactions.find((candidate) => candidate.id === item.interactionId);
-      const subskillsEligible = interaction?.subskills.every((subskill) => {
-        if (subskill === "apply_in_context") return false;
-        if (visualSubskills.has(subskill)) return hasIndependentlyEligibleRealCase;
-        return true;
-      });
-      return item.correct && item.assistance === "independent" && item.feedbackBranch !== "not_assessable" && Boolean(subskillsEligible);
-    });
+  const completionReceiptLabel = guidedSaveStatus === "progress_updated"
+    ? "progress updated"
+    : guidedSaveStatus === "practice_saved"
+      ? "practice saved"
+      : guidedSaveStatus === "local_only"
+        ? "lesson saved on this device"
+        : guidedSaveStatus === "saving"
+          ? "saving practice"
+          : "lesson complete";
   const needsIndependentRetry = scene.completionRule.requireIndependentAttempt
     && Object.values(sceneRuntime.evidence).some((item) => item.correct && item.assistance === "scaffolded" && item.feedbackBranch !== "not_assessable")
     && !sceneComplete;
 
-  return (
-    <div className="page guided-module production-module" style={{ "--module-accent": module.accent } as React.CSSProperties}>
-      <header className="guided-module-header">
-        <div className="guided-module-heading">
-          <Link className="button subtle small" href="/learn"><ArrowLeft size={15} /> Curriculum</Link>
-          <p className="eyebrow">Module {module.order} of {totalModules} · Production guided pathway</p>
-          <h1>{module.title}</h1>
-          <p>{module.outcome}</p>
-          <div className="guided-module-meta">
-            <span><Clock3 size={15} /> About {totalMinutes} min total · resume anytime</span>
-            <span><Target size={15} /> {module.scenes.length} scenes · {parts.length} chapters</span>
-            <details className="guided-source-map">
-              <summary><Link2 size={15} /> Source map · {module.sourceRequirementIds.length} requirements</summary>
-              <div>{module.sourceRequirementIds.map((sourceId) => <code key={sourceId}>{sourceId}</code>)}</div>
-            </details>
-          </div>
-        </div>
-        <div className="guided-progress-card" aria-label={`${completedCount} of ${module.scenes.length} scenes complete`}>
-          <div><strong>{progressPercent}%</strong><span>scene completion</span></div>
-          <div className="guided-progress-track"><i style={{ width: `${progressPercent}%` }} /></div>
-          <p><CheckCircle2 size={14} /> {completedCount} complete · {skippedCount} skipped</p>
-          <small>Independent transfer—not time spent or revealed copy—advances competency.</small>
-        </div>
-      </header>
-
-      <div className={`selection-note production-pathway-sync${pathwaySyncError ? " warning" : ""}`} role={pathwaySyncError ? "alert" : "status"}>
-        <div>
-          <strong>{authLoading || !runtimeReady ? "Loading pathway progress…" : user ? "Private pathway sync" : "Guest pathway"}</strong>
-          <span>{pathwaySyncError ?? (user
-            ? "Scene position and completed actions are saved to your account and can resume on another device."
-            : "Scene progress is stored only on this device. Sign in when you want private cross-device progress.")}</span>
-        </div>
-        {user && guestImportAvailable ? (
-          <button className="button subtle small" type="button" disabled={importingGuest} onClick={() => void importGuestProgress()}>
-            {importingGuest ? "Importing…" : "Import this device’s guest progress"}
-          </button>
-        ) : null}
+  const workspacePhase = sceneComplete ? "complete" : activeEvidence ? "feedback" : "task";
+  const activeTaskContent = (
+    <div id="production-active-interaction" className={`guided-production-checkpoint ${styles.checkpoint}`} tabIndex={-1}>
+      <div className={`production-action-progress ${styles.actionProgress}`}>
+        <span>Action {activeInteractionIndex + 1} of {scene.interactions.length}</span>
+        <div>{scene.interactions.map((interaction, index) => <i key={interaction.id} className={sceneRuntime.evidence[interaction.id]?.correct ? "complete" : index === activeInteractionIndex ? "active" : ""} />)}</div>
       </div>
+      {scene.caseContract && loadingCase ? <section className={`panel pad guided-loading ${styles.taskLoading}`} role="status" aria-live="polite" aria-busy="true">Checking this tracing before the question appears…</section> : activeInteraction && evidenceBoundaryActive ? (
+        <section className="learning-interaction production-not-assessable" aria-labelledby={`${activeInteraction.id}-unavailable-title`}>
+          <header className="learning-interaction-head"><div><p className="eyebrow"><CircleAlert size={14} /> Practice boundary</p><h3 id={`${activeInteraction.id}-unavailable-title`}>{activeInteraction.prompt}</h3><p>{activeInteraction.instructions}</p></div><span>Practice step</span></header>
+          <div className="learning-interaction-body"><div className="learning-branch partial" role="status"><CircleAlert size={19} /><span><strong>This ECG check is not available right now.</strong>{eligibilityMessage(eligibility)}</span></div></div>
+          <footer className="learning-interaction-actions"><span className="muted">The lesson can continue; this skill will wait for a suitable ECG.</span><button className="button" type="button" onClick={acknowledgeUnavailableEvidence} disabled={activeEvidence?.feedbackBranch === "not_assessable"}>Continue without scoring</button></footer>
+        </section>
+      ) : activeInteraction ? <LearningInteractionRenderer
+        key={`${scene.id}-${activeInteraction.id}-${sceneRuntime.equivalentRetryCount}`}
+        interaction={activeInteraction}
+        viewerEvidence={viewerTask ? viewerTaskEvidence : null}
+        savedEvidence={activeEvidence}
+        gradePacketMeasurement={caseSummary && guidedContext ? (request) => api.gradeGuidedMeasurement(caseSummary.caseId, { ...request, guidedContext }) : undefined}
+        onEvidence={recordEvidence}
+      /> : null}
+      {activeEvidence?.correct && activeInteractionIndex < scene.interactions.length - 1 ? <div className={`production-continue ${styles.continue}`}><p>Keep this evidence. The next action removes one layer of support.</p><button className="button primary" type="button" onClick={advanceInteraction}>Continue to the next action <ArrowRight size={15} /></button></div> : null}
+      {masteryReceipt && !sceneComplete ? <p className="production-mastery-receipt" role="status" aria-live="polite"><CheckCircle2 size={15} /> {masteryReceipt}</p> : null}
+      {needsIndependentRetry ? <div className={`production-retry ${styles.retry}`}><CircleAlert size={18} /><span><strong>Nice work with support.</strong>Try a fresh tracing on your own to add this skill to Progress.</span><button className="button" type="button" onClick={startEquivalentRetry}><RotateCcw size={15} /> Try a fresh tracing</button></div> : null}
+    </div>
+  );
 
-      <section className="guided-context-strip" aria-label="Learning connections">
-        <div><ChevronLeft size={16} /><span><small>Recall from</small><strong>{scene.connections.recallFrom}</strong></span></div>
-        <div className="current"><BrainCircuit size={17} /><span><small>Now</small><strong>{scene.connections.changesNow}</strong></span></div>
-        <div><ChevronRight size={16} /><span><small>Reuse next</small><strong>{scene.connections.reuseNext}</strong></span></div>
-      </section>
+  const completionAndNavigation = (
+    <>
+      {sceneComplete ? <section className={`guided-handoff ${styles.handoff}`} aria-label="Completion and transfer">
+        <div><p className="eyebrow">Scene complete · {completionReceiptLabel}</p><h2>{scene.copy.completionHeading}</h2><p>{scene.copy.completionBody}</p>{guidedSaveStatus !== "progress_updated" ? <p className={`selection-note ${styles.evidenceNote}`}>You finished this lesson step. A fresh mixed ECG check is still needed before this skill changes in Progress.</p> : null}{masteryReceipt ? <p className="production-mastery-receipt"><CheckCircle2 size={15} /> {masteryReceipt}</p> : null}</div>
+        <div className={`guided-handoff-grid ${styles.handoffGrid}`}>{scene.handoffs.map((handoff) => {
+          const href = guidedHandoffHref(handoff, { moduleId: module.id, sceneId: scene.id });
+          const Icon = handoff.mode === "train" ? Target : handoff.mode === "rapid" ? Clock3 : FlaskConical;
+          const destinationSubskill = handoff.destination?.subskill ?? handoff.subskill;
+          return <Link key={`${handoff.mode}-${destinationSubskill}-${handoff.destination?.focus ?? handoff.concept}`} href={href}><Icon size={18} /><span><strong>{handoff.label}</strong><small>{skillLabel(destinationSubskill)} · {supportLabel(handoff.supportLevel)}</small></span><ArrowRight size={16} /></Link>;
+        })}</div>
+      </section> : null}
+      <div className={`guided-scene-nav ${styles.sceneNav}`}>
+        <button className="button subtle" type="button" onClick={() => goToScene(sceneIndex - 1)} disabled={sceneIndex === 0} aria-label="Previous scene"><ChevronLeft size={16} /> Previous</button>
+        <span>{statusLabel(sceneRuntime.status)}</span>
+        {sceneIndex < module.scenes.length - 1 ? <button className="button primary" type="button" onClick={() => goToScene(sceneIndex + 1)} disabled={!sceneComplete}>Next scene <ChevronRight size={16} /></button> : nextModule ? <Link className="button primary" href={`/learn/${nextModule.id}`}>Next module <ChevronRight size={16} /></Link> : <Link className="button primary" href="/rapid">Mixed transfer <ArrowRight size={16} /></Link>}
+      </div>
+    </>
+  );
 
-      <div className="guided-workspace production-workspace">
-        <nav className="guided-scene-rail" aria-label="Module scenes">
-          <div className="guided-rail-title"><span>Scene map · {sceneIndex + 1}/{module.scenes.length}</span><button className="button subtle small guided-rail-toggle" type="button" aria-expanded={sceneMapOpen} onClick={() => setSceneMapOpen((open) => !open)}>{sceneMapOpen ? "Hide scenes" : "Choose scene"}</button><small>Skipped and scaffolded remain visible; neither means mastered.</small></div>
-          <div className={`guided-scene-list${sceneMapOpen ? " open" : ""}`}>{parts.map((part) => <div className="guided-part" key={part}>
-            <p>{part}</p>
-            {module.scenes.map((item, index) => {
-              if (item.partId !== part) return null;
-              const status = runtime[module.id]?.[item.id]?.status ?? "not-started";
-              return <button className={`guided-scene-link${index === sceneIndex ? " active" : ""} ${status}`} key={item.id} type="button" onClick={() => goToScene(index)} aria-current={index === sceneIndex ? "step" : undefined}>
-                <span title={item.id}>{status === "complete" ? <Check size={13} /> : compactSceneId(item.id)}</span>
-                <span><strong>{item.copy.title}</strong><small>{statusLabel(status)} · {item.minutes} min</small></span>
-              </button>;
-            })}
-          </div>)}</div>
-        </nav>
+  return (
+    <div className={`page production-module ${styles.host}`} style={{ "--module-accent": module.accent } as React.CSSProperties}>
+      <LearningWorkspaceShell className={`guided-module ${styles.shell}`} phase={workspacePhase} tutorResetKey={`${module.id}-${scene.id}-${caseSummary?.caseId ?? "simulation"}-${sceneRuntime.equivalentRetryCount}`}>
+      <SessionBar className={styles.sessionBar} tutorAvailable tutorLabel="Open tutor">
+        <Link aria-label="Back to Guided curriculum" className={`button subtle small ${styles.curriculumLink}`} href="/learn"><ArrowLeft size={15} /><span>Curriculum</span></Link>
+        <div className={styles.sessionIdentity}>
+          <span>Module {module.order}/{totalModules}</span>
+          <strong>{module.shortTitle}</strong>
+          <small>Scene {sceneIndex + 1}/{module.scenes.length}</small>
+        </div>
+        <div className={styles.sessionProgress} aria-label={`${completedCount} of ${module.scenes.length} scenes complete`}>
+          <progress value={completedCount} max={module.scenes.length} aria-label={`${completedCount} of ${module.scenes.length} scenes complete`} />
+          <span>{progressPercent}%</span>
+        </div>
+        <button ref={sceneMapTriggerRef} className="button subtle small" type="button" aria-controls="production-scene-map" aria-expanded={sceneMapOpen} aria-haspopup="dialog" onClick={() => sceneMapOpen ? closeSceneMap() : setSceneMapOpen(true)}><ListTree size={15} /> Scene map</button>
+      </SessionBar>
 
-        <main className="guided-stage">
-          <section className="guided-scene-card production-scene-card">
-            <header className="guided-scene-head">
-              <div><p className="eyebrow">{scene.copy.eyebrow} · Scene {sceneIndex + 1}/{module.scenes.length}</p><h2 id="production-scene-title" tabIndex={-1}>{scene.copy.title}</h2><p>{scene.copy.objective}</p></div>
-              <button className="button subtle small" type="button" onClick={skipScene}><SkipForward size={15} /> Skip & review later</button>
-            </header>
-            <div className="production-copy-stage">
-              {scene.copy.setup.map((paragraph) => <p key={paragraph}>{paragraph}</p>)}
-              <div className="production-mechanism" aria-label="Mechanism narration">
-                <p className="eyebrow"><BrainCircuit size={15} /> Build the mechanism</p>
-                {scene.copy.mechanismNarration.slice(0, sceneRuntime.revealedMechanismCount).map((beat, index) => <div key={beat}><i>{index + 1}</i><span>{beat}</span></div>)}
-                {sceneRuntime.revealedMechanismCount < scene.copy.mechanismNarration.length ? <button className="button subtle small" type="button" onClick={() => updateSceneRuntime(scene.id, (current) => ({ ...current, revealedMechanismCount: current.revealedMechanismCount + 1 }))}>Reveal the next consequence <ArrowRight size={14} /></button> : null}
+      {pathwaySyncError ? <WorkspaceNotices>
+        <div className="selection-note warning" role="alert">
+          <div><strong>Progress sync needs attention</strong><span>{pathwaySyncError}</span></div>
+        </div>
+      </WorkspaceNotices> : null}
+
+      <WorkspaceBody className={`${styles.workspace}${scene.caseContract ? ` ${styles.ecgWorkspace}` : ""}`}>
+        <WaveformPane className={styles.waveformPane} label={scene.caseContract ? "ECG and lesson context" : "Interactive lesson workspace"}>
+          <section className={styles.sceneFrame}>
+            <header className={styles.sceneHeader}>
+              <div>
+                <p className="eyebrow">{scene.copy.eyebrow}</p>
+                <h1 id="production-scene-title" tabIndex={-1}>{scene.copy.title}</h1>
+                <p>{scene.copy.objective}</p>
               </div>
-              <div className="guided-clinical-bridge"><Sparkles size={16} /><span><strong>{scene.copy.clinicalConnectionHeading}</strong>{scene.copy.clinicalConnectionBody}</span></div>
-              <p className="production-transition">{scene.copy.transitionIntoTask}</p>
-              <details className="production-source-note"><summary>Why this scene is here</summary><p>{scene.source.map((source) => `${source.document} § ${source.section}: ${source.requirementIds.join(", ")}`).join(" · ")}</p></details>
+              <button className={`button subtle small ${styles.skipButton}`} type="button" onClick={skipScene}><SkipForward size={15} /> Review later</button>
+            </header>
+
+            <div className={styles.lessonBrief}>
+              {scene.copy.setup[0] ? <p className={styles.setupLead}>{scene.copy.setup[0]}</p> : null}
+              <div className={`production-mechanism ${styles.mechanism}`} aria-label="Mechanism narration">
+                <p className="eyebrow"><BrainCircuit size={15} /> Build the mechanism</p>
+                {scene.copy.mechanismNarration.slice(0, visibleMechanismCount).map((beat, index) => <div key={beat}><i>{index + 1}</i><span>{beat}</span></div>)}
+                {visibleMechanismCount < scene.copy.mechanismNarration.length ? <button className="button subtle small" type="button" onClick={() => updateSceneRuntime(scene.id, (current) => ({ ...current, revealedMechanismCount: current.revealedMechanismCount + 1 }))}>{visibleMechanismCount === 0 ? "Show first link" : "Reveal next link"} <ArrowRight size={14} /></button> : null}
+              </div>
+              <details className={styles.contextDetails} open={learningPreferences?.guidanceLevel === "step_by_step" || undefined}>
+                <summary>More context & clinical connection</summary>
+                <div>{scene.copy.setup.slice(1).map((paragraph) => <p key={paragraph}>{paragraph}</p>)}</div>
+                <div className={`guided-clinical-bridge ${styles.clinicalBridge}`}><Sparkles size={16} /><span><strong>{scene.copy.clinicalConnectionHeading}</strong>{scene.copy.clinicalConnectionBody}</span></div>
+              </details>
+              <p className={`production-transition ${styles.transition}`}>{scene.copy.transitionIntoTask}</p>
             </div>
           </section>
 
-          {scene.caseContract ? <section className="guided-viewer-wrap" aria-label="Grounded ECG workspace">
-            <div className="guided-viewer-label"><div><p className="eyebrow">Grounded ECG workspace</p><strong>{caseSummary?.displayId ?? "Selecting an eligible tracing…"}</strong></div>{packet ? <span>Tier {packet.teaching_tier} · {packet.waveform.sampling_frequency} Hz · {eligibility.mode}</span> : null}</div>
-            {loadingCase ? <div className="panel pad guided-loading">Checking the case contract and loading the tracing…</div> : null}
-            {caseError ? <div className="warning">The tracing could not load: {caseError}</div> : null}
-            {!loadingCase && (packet || caseError) && eligibility.reasons.length ? <div className={`selection-note production-eligibility ${eligibility.mode}`}><strong>{eligibility.mode === "locked" ? "Scene locked for this case" : eligibility.mode === "contrast" ? "Contrast-only tracing" : "Authored mechanism task"}</strong><span>{eligibility.reasons.join(" ")}</span></div> : null}
-            {caseSummary && packet ? <ECGViewer caseId={caseSummary.caseId} actions={viewerActions} groundedRois={sceneComplete ? packet.ptbxl_plus.fiducials.rois ?? [] : []} gradingRois={packet.ptbxl_plus.fiducials.rois ?? []} onCoordinate={setSelectedPoint} medianBeats={packet.ptbxl_plus.median_beats} task={viewerTask} onTaskEvidence={setViewerTaskEvidence} /> : null}
-          </section> : null}
+          {scene.caseContract ? <section className={`guided-viewer-wrap ${styles.viewerWrap}`} aria-label="ECG workspace" data-guided-region="ecg">
+            <div className={`guided-viewer-label ${styles.viewerLabel}`}><div><p className="eyebrow">ECG</p><strong>{caseSummary ? "Grounded teaching ECG" : "Finding a suitable tracing…"}</strong></div>{packet ? <span>Real 12-lead ECG</span> : null}</div>
+            {loadingCase ? <div className={`panel pad guided-loading ${styles.viewerLoading}`}>Loading ECG…</div> : null}
+            {caseError ? <div className="warning mode-recovery-notice" role="alert"><span>This ECG could not load. You can retry or continue the lesson without scoring this step.</span><button className="button subtle small" type="button" onClick={() => setExcludedCaseId(caseSummary?.caseId ?? `retry-${Date.now()}`)}><RotateCcw size={15} aria-hidden="true" /> Retry ECG</button></div> : null}
+            {!loadingCase && (packet || caseError) && eligibility.reasons.length ? <details className={`${styles.eligibility} production-eligibility ${eligibility.mode}`}><summary>About this ECG check</summary><p>{eligibilityMessage(eligibility)}</p></details> : null}
+            {caseSummary && packet ? <ECGViewer ecgRef={caseSummary.caseId} waveformScope={{ kind: "guided", lessonId: scene.caseContract.selectorLessonId }} actions={viewerActions} onCoordinate={setSelectedPoint} medianBeats={packet.ptbxl_plus.median_beats} task={viewerTask} onTaskEvidence={setViewerTaskEvidence} guidedContext={guidedContext} /> : null}
+          </section> : <section className={styles.mainTask} data-guided-region="task">{activeTaskContent}</section>}
+        </WaveformPane>
 
-          <div id="production-active-interaction" className="guided-production-checkpoint" tabIndex={-1}>
-            <div className="production-action-progress"><span>Action {activeInteractionIndex + 1} of {scene.interactions.length}</span><div>{scene.interactions.map((interaction, index) => <i key={interaction.id} className={sceneRuntime.evidence[interaction.id]?.correct ? "complete" : index === activeInteractionIndex ? "active" : ""} />)}</div></div>
-            {scene.caseContract && loadingCase ? <section className="panel pad guided-loading">The active interaction will appear after its case contract is checked.</section> : activeInteraction && evidenceBoundaryActive ? (
-              <section className="learning-interaction production-not-assessable" aria-labelledby={`${activeInteraction.id}-unavailable-title`}>
-                <header className="learning-interaction-head"><div><p className="eyebrow"><CircleAlert size={14} /> Evidence boundary</p><h3 id={`${activeInteraction.id}-unavailable-title`}>{activeInteraction.prompt}</h3><p>{activeInteraction.instructions}</p></div><span>Not independently assessable</span></header>
-                <div className="learning-interaction-body"><div className="learning-branch partial" role="status"><CircleAlert size={19} /><span><strong>The required exemplar is unavailable.</strong>{eligibility.reasons.join(" ")} The mechanism teaching remains available, but this tracing cannot prove {activeInteraction.subskills.map((skill) => skill.replaceAll("_", " ")).join(" or ")}.</span></div></div>
-                <footer className="learning-interaction-actions"><span className="muted">This records formative coverage only; independent mastery is unchanged.</span><button className="button" type="button" onClick={acknowledgeUnavailableEvidence} disabled={activeEvidence?.feedbackBranch === "not_assessable"}>Acknowledge evidence limit & continue</button></footer>
-              </section>
-            ) : activeInteraction ? <LearningInteractionRenderer key={`${scene.id}-${activeInteraction.id}-${sceneRuntime.equivalentRetryCount}`} interaction={activeInteraction} packetMeasurements={packet?.ptbxl_plus.measurements} viewerEvidence={viewerTask ? viewerTaskEvidence : null} savedEvidence={activeEvidence} onEvidence={recordEvidence} /> : null}
-            {activeEvidence?.correct && activeInteractionIndex < scene.interactions.length - 1 ? <div className="production-continue"><p>Keep the evidence you just established. The next action removes one layer of support.</p><button className="button primary" type="button" onClick={advanceInteraction}>Continue to the next action <ArrowRight size={15} /></button></div> : null}
-            {masteryReceipt && !sceneComplete ? <p className="production-mastery-receipt" role="status" aria-live="polite"><CheckCircle2 size={15} /> {masteryReceipt}</p> : null}
-            {needsIndependentRetry ? <div className="production-retry"><CircleAlert size={18} /><span><strong>Understanding shown; independent evidence still needed.</strong>This success followed the hint ladder. Use an equivalent tracing before completion can count as independent.</span><button className="button" type="button" onClick={startEquivalentRetry}><RotateCcw size={15} /> Load equivalent retry</button></div> : null}
-          </div>
+        <ResponseRail className={styles.responseRail} label={scene.caseContract ? "Current ECG question" : "Scene progress and transfer"} phase={workspacePhase}>
+          <section className={`panel ${styles.responsePanel}`}>
+            {scene.caseContract ? activeTaskContent : <div className={styles.sceneGuide}>
+              <p className="eyebrow">Scene guide</p>
+              <h2>One task at a time</h2>
+              <p>Complete the active interaction in the main workspace. Feedback appears there immediately.</p>
+              <dl>
+                <div><dt>Recall</dt><dd>{scene.connections.recallFrom}</dd></div>
+                <div><dt>Now</dt><dd>{scene.connections.changesNow}</dd></div>
+                <div><dt>Reuse</dt><dd>{scene.connections.reuseNext}</dd></div>
+              </dl>
+            </div>}
+            {completionAndNavigation}
+          </section>
+        </ResponseRail>
+      </WorkspaceBody>
 
-          {sceneComplete ? <section className="guided-handoff panel pad" aria-label="Completion and transfer">
-            <div><p className="eyebrow">Scene complete · {sceneHasIndependentEvidence ? "independent evidence recorded" : "formative evidence recorded"}</p><h2>{scene.copy.completionHeading}</h2><p>{scene.copy.completionBody}</p>{!sceneHasIndependentEvidence ? <p className="selection-note">The content path is complete, but the unavailable case contract means this scene did not establish independent visual competence. Use the linked Training or Rapid task when an eligible tracing is available.</p> : null}{masteryReceipt ? <p className="production-mastery-receipt"><CheckCircle2 size={15} /> {masteryReceipt}</p> : null}</div>
-            <div className="guided-handoff-grid">{scene.handoffs.map((handoff) => {
-              const params = new URLSearchParams({ focus: handoff.concept, subskill: handoff.subskill, support: handoff.supportLevel, origin: `${module.id}:${scene.id}`, returnTo: decodeURIComponent(returnTo) });
-              const href = handoff.mode === "train" ? `/train?${params}` : handoff.mode === "rapid" ? `/rapid?${params}` : `/practice?${params}`;
-              const Icon = handoff.mode === "train" ? Target : handoff.mode === "rapid" ? Clock3 : FlaskConical;
-              return <Link key={`${handoff.mode}-${handoff.subskill}`} href={href}><Icon size={18} /><span><strong>{handoff.label}</strong><small>{handoff.subskill.replaceAll("_", " ")} · {handoff.supportLevel}</small></span><ArrowRight size={16} /></Link>;
-            })}</div>
-          </section> : null}
+      <DisclosureArea className={styles.disclosure}>
+        <span role="status"><CheckCircle2 size={14} /> {authLoading || !runtimeReady ? "Loading progress…" : "Private progress synced to your account"}</span>
+        <span>{completedCount}/{module.scenes.length} complete · {skippedCount} review later</span>
+        <details><summary><Link2 size={14} /> About this check</summary><div><p>Your mastery estimate changes only after you complete the required task on a suitable ECG without revealed answers.</p><p>Lesson references: {scene.source.map((source) => `${source.document} · ${source.section}`).join(" · ")}</p></div></details>
+      </DisclosureArea>
 
-          <div className="guided-scene-nav">
-            <button className="button" type="button" onClick={() => goToScene(sceneIndex - 1)} disabled={sceneIndex === 0}><ChevronLeft size={16} /> Previous</button>
-            <span>{statusLabel(sceneRuntime.status)} · {scene.minutes} min</span>
-            {sceneIndex < module.scenes.length - 1 ? <button className="button primary" type="button" onClick={() => goToScene(sceneIndex + 1)} disabled={!sceneComplete}>Next scene <ChevronRight size={16} /></button> : nextModule ? <Link className="button primary" href={`/learn/${nextModule.id}`}>Next module <ChevronRight size={16} /></Link> : <Link className="button primary" href="/rapid">Begin mixed transfer <ArrowRight size={16} /></Link>}
-          </div>
-        </main>
+      <TutorDrawer title={`${module.shortTitle} tutor`}>
+        <section className={styles.tutorIntro}><h3><MessageCircleQuestion size={16} /> Ask about this step</h3><p>{scene.tutor.tangentBridge}</p><small><strong>Return point:</strong> {scene.tutor.returnPrompt}</small></section>
+        <TutorChat mode="tutorial" caseId={caseSummary?.caseId ?? null} lessonId={scene.caseContract?.selectorLessonId ?? null} threadScope={`${module.id}:${scene.id}`} openingPrompt={`${scene.copy.openingTutorMessage}${eligibility.reasons.length && !loadingCase ? ` ${scene.tutor.caseUnavailablePrompt}` : ""}`} lessonReturnPrompt={scene.tutor.returnPrompt} lessonReturnLabel={scene.copy.returnLabel} waypointLabel={waypoint} collapsedByDefault={false} onReturnToLesson={() => { const target = document.getElementById("production-active-interaction"); target?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); target?.focus({ preventScroll: true }); }} viewerState={{ moduleId: module.id, moduleOrder: module.order, sceneId: scene.id, interactionId: activeInteraction?.id, interactionKind: activeInteraction?.kind, interactionPrompt: activeInteraction?.prompt, allowedLeads: activeInteraction && "allowedLeads" in activeInteraction ? activeInteraction.allowedLeads : undefined, measurement: activeInteraction?.kind === "caliper" ? activeInteraction.measurement : undefined, objective: scene.copy.objective, evidence: sceneRuntime.evidence, selectedPoint, caseEligibility: eligibility, pausedWaypoint: scene.tutor.returnPrompt, layoutContract: scene.layout, returnLabel: scene.copy.returnLabel }} onViewerActions={setViewerActions} onAssistance={recordTutorAssistance} resetKey={`${module.id}-${scene.id}-${caseSummary?.caseId ?? "simulation"}-${sceneRuntime.equivalentRetryCount}`} />
+      </TutorDrawer>
 
-        <aside className="guided-tutor-dock">
-          <TutorChat mode="tutorial" caseId={caseSummary?.caseId ?? null} lessonId={scene.caseContract?.selectorLessonId ?? null} openingPrompt={`${scene.copy.openingTutorMessage}${eligibility.reasons.length && !loadingCase ? ` ${scene.tutor.caseUnavailablePrompt}` : ""}`} lessonReturnPrompt={scene.tutor.returnPrompt} lessonReturnLabel={scene.copy.returnLabel} waypointLabel={waypoint} collapsedByDefault={["m06-s11", "m10-s11"].includes(scene.id.toLowerCase())} onReturnToLesson={() => { const target = document.getElementById("production-active-interaction"); target?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" }); target?.focus({ preventScroll: true }); }} viewerState={{ moduleId: module.id, moduleOrder: module.order, sceneId: scene.id, interactionId: activeInteraction?.id, interactionKind: activeInteraction?.kind, interactionPrompt: activeInteraction?.prompt, allowedLeads: activeInteraction && "allowedLeads" in activeInteraction ? activeInteraction.allowedLeads : undefined, measurement: activeInteraction?.kind === "caliper" ? activeInteraction.measurement : undefined, objective: scene.copy.objective, evidence: sceneRuntime.evidence, selectedPoint, caseEligibility: eligibility, pausedWaypoint: scene.tutor.returnPrompt, layoutContract: scene.layout, returnLabel: scene.copy.returnLabel }} onViewerActions={setViewerActions} onAssistance={recordTutorAssistance} resetKey={`${module.id}-${scene.id}-${caseSummary?.caseId ?? "simulation"}-${sceneRuntime.equivalentRetryCount}`} />
-          <section className="panel pad guided-tutor-note"><h3><MessageCircleQuestion size={16} /> Ask the tangent</h3><p>{scene.tutor.tangentBridge}</p><p><strong>Return:</strong> {scene.tutor.returnPrompt}</p></section>
+      {sceneMapOpen ? <div className={styles.sceneMapLayer}>
+        <button className={styles.sceneMapBackdrop} type="button" tabIndex={-1} aria-label="Close scene map" onClick={closeSceneMap} />
+        <aside id="production-scene-map" className={styles.sceneMap} role="dialog" aria-modal="true" aria-labelledby="production-scene-map-title" onKeyDown={(event) => {
+          if (event.key === "Escape") { event.preventDefault(); closeSceneMap(); return; }
+          if (event.key !== "Tab") return;
+          const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+          const first = focusable[0];
+          const last = focusable.at(-1);
+          if (!first || !last) return;
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        }}>
+          <header><div><p className="eyebrow">Module {module.order} of {totalModules}</p><h2 id="production-scene-map-title">{module.title}</h2><p>{module.outcome}</p></div><button ref={sceneMapCloseRef} className="button subtle small" type="button" onClick={closeSceneMap}><X size={16} /> Close</button></header>
+          <div className={styles.sceneMapMeta}><span><Clock3 size={14} /> About {totalMinutes} min</span><span><Target size={14} /> {parts.length} chapters</span><span><CheckCircle2 size={14} /> {completedCount}/{module.scenes.length} complete</span></div>
+          <nav className={`guided-scene-list open ${styles.sceneList}`} aria-label="Module scenes">{parts.map((part) => <div className="guided-part" key={part}><p>{part}</p>{module.scenes.map((item, index) => {
+            if (item.partId !== part) return null;
+            const status = runtime[module.id]?.[item.id]?.status ?? "not-started";
+            return <button className={`guided-scene-link${index === sceneIndex ? " active" : ""} ${status}`} key={item.id} type="button" onClick={() => goToScene(index)} aria-current={index === sceneIndex ? "step" : undefined}><span>{status === "complete" ? <Check size={13} /> : index + 1}</span><span><strong>{item.copy.title}</strong><small>{statusLabel(status)} · {item.minutes} min</small></span></button>;
+          })}</div>)}</nav>
+          <footer>{priorModule ? <Link href={`/learn/${priorModule.id}`}><ArrowLeft size={15} /> {priorModule.shortTitle}</Link> : <Link href="/learn/foundations"><ArrowLeft size={15} /> Foundations</Link>}<span>Module {module.order}/{totalModules}</span>{nextModule ? <Link href={`/learn/${nextModule.id}`}>{nextModule.shortTitle} <ArrowRight size={15} /></Link> : <Link href="/rapid">Mixed transfer <ArrowRight size={15} /></Link>}</footer>
         </aside>
-      </div>
-
-      <footer className="guided-module-footer">
-        {priorModule ? <Link href={`/learn/${priorModule.id}`}><ArrowLeft size={15} /> {priorModule.shortTitle}</Link> : <Link href="/learn/foundations"><ArrowLeft size={15} /> Foundations</Link>}
-        <span>Module {module.order}/{totalModules} · {completedCount}/{module.scenes.length} complete · {skippedCount} review later</span>
-        {nextModule ? <Link href={`/learn/${nextModule.id}`}>{nextModule.shortTitle} <ArrowRight size={15} /></Link> : <Link href="/rapid">Mixed transfer <ArrowRight size={15} /></Link>}
-      </footer>
+      </div> : null}
+      </LearningWorkspaceShell>
     </div>
   );
 }
