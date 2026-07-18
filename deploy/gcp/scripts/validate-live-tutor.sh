@@ -47,6 +47,9 @@ printf '%s' "${RESPONSE}" | jq -e \
     and .remoteCall.status == "success"
     and .schemaError == null
     and ((.tutorMessage | type) == "string")
-    and (.tutorMessage | test("\\S"))' >/dev/null \
+    and ((.tutorMessage | gsub("^\\s+|\\s+$"; "") | length) >= 20)
+    and ([.tutorMessage, .socraticQuestion]
+      | map(select(type == "string") | gsub("^\\s+|\\s+$"; ""))
+      | any(test("\\?")))' >/dev/null \
   || die "tutor did not prove a live openai-compatible provider call"
 log "live tutor provider smoke test passed"
