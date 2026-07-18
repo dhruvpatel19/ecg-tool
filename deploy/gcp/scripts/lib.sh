@@ -78,6 +78,72 @@ sha256_file() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+sqlite_immutable_readonly() {
+  [[ $# -eq 2 ]] || die "sqlite_immutable_readonly requires DATABASE SQL"
+  local database="$1" sql="$2" resolved
+  [[ -f "${database}" && ! -L "${database}" ]] \
+    || die "immutable SQLite database is missing or unsafe"
+  [[ "${database}" == /* \
+    && "${database}" != *'%'* \
+    && "${database}" != *'?'* \
+    && "${database}" != *'#'* \
+    && "${database}" != *$'\r'* \
+    && "${database}" != *$'\n'* ]] \
+    || die "immutable SQLite database path is not URI-safe"
+  resolved="$(realpath -e -- "${database}")"
+  [[ "${resolved}" != *'%'* \
+    && "${resolved}" != *'?'* \
+    && "${resolved}" != *'#'* \
+    && "${resolved}" != *$'\r'* \
+    && "${resolved}" != *$'\n'* ]] \
+    || die "resolved immutable SQLite database path is not URI-safe"
+
+  # `sqlite3 -readonly PATH` can still create WAL/SHM sidecars when PATH uses
+  # WAL journaling. Corpus releases are already checkpointed and hash-pinned,
+  # so immutable URI mode is the correct serving/validation contract: it reads
+  # the database image without consulting or creating mutable sidecar files.
+  sqlite3 -readonly "file:${resolved}?immutable=1" "${sql}"
+}
+
+resolve_direct_corpus_release() {
+  [[ $# -eq 2 ]] || die "resolve_direct_corpus_release requires RELEASES_ROOT CANDIDATE"
+  local releases_root="$1" candidate="$2" releases_real target parent release
+  [[ -d "${releases_root}" && ! -L "${releases_root}" ]] \
+    || die "corpus releases root is missing or unsafe"
+  releases_real="$(realpath -e -- "${releases_root}")"
+  target="$(realpath -e -- "${candidate}")"
+  [[ -d "${target}" && ! -L "${target}" ]] \
+    || die "corpus release target is missing or unsafe"
+  parent="$(dirname -- "${target}")"
+  [[ "${parent}" == "${releases_real}" ]] \
+    || die "corpus release target must be a direct child of the releases root"
+  release="$(basename -- "${target}")"
+  require_safe_release "${release}"
+  printf '%s\n' "${target}"
+}
+
+activate_corpus_release_pointer() {
+  [[ $# -eq 2 ]] || die "activate_corpus_release_pointer requires CORPUS_ROOT RELEASE_TARGET"
+  local corpus_root="$1" release_target="$2" root_real target release pointer temporary
+  [[ -d "${corpus_root}" && ! -L "${corpus_root}" ]] \
+    || die "corpus root is missing or unsafe"
+  root_real="$(realpath -e -- "${corpus_root}")"
+  if ! target="$(resolve_direct_corpus_release \
+    "${root_real}/releases" "${release_target}")"; then
+    return 1
+  fi
+  release="$(basename -- "${target}")"
+  pointer="${root_real}/current"
+  temporary="${root_real}/.current-next.${BASHPID}"
+  [[ ! -e "${temporary}" && ! -L "${temporary}" ]] \
+    || die "temporary corpus pointer already exists"
+  ln -s "releases/${release}" "${temporary}"
+  if ! mv -Tf "${temporary}" "${pointer}"; then
+    rm -f -- "${temporary}"
+    die "failed to activate verified corpus release"
+  fi
+}
+
 validate_corpus_tree() {
   local root="$1"
   [[ -f "${root}/manifest.json" ]] || die "corpus manifest.json is missing"
@@ -89,10 +155,10 @@ validate_corpus_tree() {
     || die "corpus manifest is not marked complete"
 
   local integrity case_count expected_count waveform_count student_count manifest_sha audited_manifest_sha
-  integrity="$(sqlite3 -readonly "${root}/corpus.db" 'PRAGMA integrity_check;')"
+  integrity="$(sqlite_immutable_readonly "${root}/corpus.db" 'PRAGMA integrity_check;')"
   [[ "${integrity}" == "ok" ]] || die "corpus.db integrity check failed"
-  case_count="$(sqlite3 -readonly "${root}/corpus.db" 'SELECT COUNT(*) FROM cases;')"
-  student_count="$(sqlite3 -readonly "${root}/corpus.db" \
+  case_count="$(sqlite_immutable_readonly "${root}/corpus.db" 'SELECT COUNT(*) FROM cases;')"
+  student_count="$(sqlite_immutable_readonly "${root}/corpus.db" \
     "SELECT COUNT(*) FROM cases WHERE teaching_tier IN ('A','B');")"
   expected_count="$(jq -r '.totalCases // .built // 0' "${root}/manifest.json")"
   [[ "${case_count}" =~ ^[0-9]+$ && "${case_count}" -gt 0 ]] || die "corpus contains no cases"
@@ -147,11 +213,11 @@ validate_corpus_tree() {
     [[ -z "$(find "${rhythm_root}/waveforms" -type f ! -name '*.npy' -print -quit)" ]] \
       || die "rapid rhythm waveform tree contains a non-NPY artifact"
 
-    rhythm_integrity="$(sqlite3 -readonly "${rhythm_root}/rhythm_streams.db" \
+    rhythm_integrity="$(sqlite_immutable_readonly "${rhythm_root}/rhythm_streams.db" \
       'PRAGMA integrity_check;')"
     [[ "${rhythm_integrity}" == "ok" ]] \
       || die "rapid rhythm database integrity check failed"
-    rhythm_count="$(sqlite3 -readonly "${rhythm_root}/rhythm_streams.db" \
+    rhythm_count="$(sqlite_immutable_readonly "${rhythm_root}/rhythm_streams.db" \
       'SELECT COUNT(*) FROM rhythm_windows;')"
     [[ "${rhythm_count}" =~ ^[0-9]+$ && "${rhythm_count}" -gt 0 ]] \
       || die "rapid rhythm supplement contains no fragments"

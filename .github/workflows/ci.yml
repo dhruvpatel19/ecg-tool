@@ -169,6 +169,8 @@ jobs:
         run: find deploy/gcp/scripts deploy/gcp/tests -type f -name "*.sh" -print0 | xargs -0 -r shellcheck --severity=warning
       - name: Exercise SQLite backup and restore
         run: sudo bash deploy/gcp/tests/backup_restore_regression.sh
+      - name: Verify corpus validation is immutable
+        run: bash deploy/gcp/tests/corpus_immutable_read_regression.sh
       - name: Build backend image
         run: |
           docker build \

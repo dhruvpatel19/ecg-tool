@@ -164,7 +164,30 @@ else
     || die "authenticated retention policy reference cannot be set before acknowledgement"
 fi
 
-CORPUS_RELEASE="release-${CORPUS_SHA:0:16}"
+# The local hydration layout is versioned independently from the immutable
+# archive hash.  Bump this suffix only when extraction/validation semantics
+# change; doing so preserves prior release directories as rollback evidence
+# while a corrected hydrator builds a fresh, separately verified tree.
+CORPUS_RELEASE="release-${CORPUS_SHA:0:16}-h2"
+CORPUS_CURRENT="${DATA_MOUNT%/}/corpus/current"
+CORPUS_RELEASES="${DATA_MOUNT%/}/corpus/releases"
+PREVIOUS_CORPUS_TARGET=""
+if [[ -e "${CORPUS_CURRENT}" || -L "${CORPUS_CURRENT}" ]]; then
+  [[ -L "${CORPUS_CURRENT}" ]] || die "active corpus pointer is not a symlink"
+  PREVIOUS_CORPUS_TARGET="$(resolve_direct_corpus_release \
+    "${CORPUS_RELEASES}" "${CORPUS_CURRENT}")"
+fi
+
+INSTALLED_BACKEND_IMAGE=""
+if [[ -r /etc/ecg/image.env ]]; then
+  # shellcheck disable=SC1091
+  source /etc/ecg/image.env
+  INSTALLED_BACKEND_IMAGE="${ECG_BACKEND_IMAGE:-}"
+  [[ "${INSTALLED_BACKEND_IMAGE}" =~ ^[a-z0-9.-]+-docker\.pkg\.dev/[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$ ]] \
+    || die "the installed backend image is not an immutable digest"
+  [[ "${INSTALLED_BACKEND_IMAGE}" == "${BACKEND_IMAGE}" ]] \
+    || die "backend image changes require the backup-aware install-release workflow"
+fi
 umask 077
 mkdir -p "$(dirname "${CONFIG_PATH}")" /etc/ecg
 CONFIG_NEW="$(mktemp "$(dirname "${CONFIG_PATH}")/deployment.env.XXXXXX")"
@@ -246,8 +269,26 @@ REGISTRY_HOST="${BACKEND_IMAGE%%/*}"
 retry 8 2 gcloud auth configure-docker "${REGISTRY_HOST}" --quiet
 /bin/bash /usr/local/lib/ecg-deploy/ensure-metadata-firewall.sh
 /bin/bash /usr/local/lib/ecg-deploy/render-runtime-env.sh
-/bin/bash /usr/local/lib/ecg-deploy/hydrate-corpus.sh \
-  "${CORPUS_URI}" "${CORPUS_RELEASE}" "${CORPUS_SHA}" "${DATA_MOUNT}"
+if ! /bin/bash /usr/local/lib/ecg-deploy/hydrate-corpus.sh \
+  "${CORPUS_URI}" "${CORPUS_RELEASE}" "${CORPUS_SHA}" "${DATA_MOUNT}"; then
+  log "candidate corpus hydration failed before application cutover"
+  PREVIOUS_POINTER_RESTORED=false
+  if [[ -n "${PREVIOUS_CORPUS_TARGET}" ]] \
+    && activate_corpus_release_pointer \
+      "${DATA_MOUNT%/}/corpus" "${PREVIOUS_CORPUS_TARGET}"; then
+    PREVIOUS_POINTER_RESTORED=true
+  fi
+  if systemctl is-active --quiet ecg-backend.service && wait_ready 30; then
+    die "candidate corpus hydration failed; the unchanged backend remains ready"
+  fi
+  if [[ "${PREVIOUS_POINTER_RESTORED}" == "true" \
+    && -n "${INSTALLED_BACKEND_IMAGE}" ]] \
+    && systemctl restart ecg-backend.service \
+    && wait_ready 240; then
+    die "candidate corpus hydration failed; the previous backend was recovered"
+  fi
+  die "candidate corpus hydration failed and the previous backend could not be recovered"
+fi
 
 printf 'ECG_BACKEND_IMAGE=%s\n' "${BACKEND_IMAGE}" >/etc/ecg/image.env
 chmod 0600 /etc/ecg/image.env
@@ -255,11 +296,29 @@ ECG_BACKEND_DOMAIN="${BACKEND_DOMAIN}" ECG_ACME_EMAIL="${ACME_EMAIL}" \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl daemon-reload
 systemctl enable ecg-backend.service caddy.service ecg-metadata-firewall.timer ecg-sqlite-backup.timer
-systemctl restart ecg-backend.service
 systemctl restart caddy.service
-systemctl start ecg-sqlite-backup.service
-systemctl start ecg-metadata-firewall.timer ecg-sqlite-backup.timer
-
-wait_ready 240 || die "backend failed the post-install readiness gate"
+if systemctl restart ecg-backend.service && wait_ready 240; then
+  systemctl start ecg-sqlite-backup.service
+  systemctl start ecg-metadata-firewall.timer ecg-sqlite-backup.timer
+else
+  FAILED_CORPUS_TARGET=""
+  if ! FAILED_CORPUS_TARGET="$(resolve_direct_corpus_release \
+    "${CORPUS_RELEASES}" "${CORPUS_CURRENT}" 2>/dev/null)"; then
+    FAILED_CORPUS_TARGET=""
+  fi
+  if [[ -n "${PREVIOUS_CORPUS_TARGET}" \
+    && "${PREVIOUS_CORPUS_TARGET}" != "${FAILED_CORPUS_TARGET}" ]]; then
+    PREVIOUS_CORPUS_TARGET="$(resolve_direct_corpus_release \
+      "${CORPUS_RELEASES}" "${PREVIOUS_CORPUS_TARGET}")"
+    log "post-install readiness failed; restoring the previous verified corpus pointer"
+    systemctl stop ecg-backend.service || true
+    activate_corpus_release_pointer "${DATA_MOUNT%/}/corpus" "${PREVIOUS_CORPUS_TARGET}"
+    if systemctl restart ecg-backend.service && wait_ready 240; then
+      die "post-install readiness failed; the previous verified corpus was restored"
+    fi
+    die "post-install readiness failed and the previous corpus did not recover"
+  fi
+  die "backend failed the post-install readiness gate and no distinct corpus rollback was available"
+fi
 prune_docker_cache 720h
 log "host installation complete"

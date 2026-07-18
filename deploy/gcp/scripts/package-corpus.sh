@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-""":"
-Package a complete corpus into an immutable, checksum-pinned artifact.
-
-Usage:
-  package-corpus.sh CORPUS_ROOT RELEASE OUTPUT_DIR [gs://BUCKET/releases] [--upload]
-
-Uploading is opt-in. The generation-match precondition prevents accidentally
-replacing an existing release object.
-":"""
+# Package a complete corpus into an immutable, checksum-pinned artifact.
+#
+# Usage:
+#   package-corpus.sh CORPUS_ROOT RELEASE OUTPUT_DIR [gs://BUCKET/releases] [--upload]
+#
+# Uploading is opt-in. The generation-match precondition prevents accidentally
+# replacing an existing release object.
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
