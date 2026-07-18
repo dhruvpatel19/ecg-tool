@@ -17,6 +17,39 @@ from app.main import app, clinical_item_store, clinical_packet, store
 client = TestClient(app)
 
 
+@pytest.fixture
+def fresh_clinical_student():
+    with TestClient(app) as student:
+        registered = student.post(
+            "/auth/register",
+            json={
+                "username": f"clinical_integrity_{uuid.uuid4().hex[:10]}",
+                "password": "test-password",
+            },
+        )
+        assert registered.status_code == 200, registered.text
+        yield student
+
+
+def _session_item(session_id: str):
+    session = store.get_shift_session(session_id)
+    assert session is not None
+    durable_item_id = session.get("pendingItemId") or session.get("feedbackItemId")
+    assert durable_item_id
+    item = clinical_item_store.get_item(str(durable_item_id))
+    assert item is not None
+    return item
+
+
+def _public_option_id(public_item: dict, authored_item, internal_option_id: str) -> str:
+    option_index = next(
+        index
+        for index, option in enumerate(authored_item.options)
+        if option.id == internal_option_id
+    )
+    return str(public_item["options"][option_index]["id"])
+
+
 def _answer(
     session_id: str,
     item_id: str,
@@ -39,6 +72,11 @@ def _answer(
         headers=headers or {},
     ).json()
     revealed_item = revealed.get("item") or {}
+    test_client.post(
+        f"/clinical/shift/{session_id}/phase",
+        json={"itemId": item_id, "phase": "decide"},
+        headers=headers or {},
+    )
     while revealed_item.get("stepwise_state", {}).get("active"):
         active_step = revealed_item["stepwise_state"]["active"]
         committed = test_client.post(
@@ -92,7 +130,7 @@ def test_bank_seeded_with_automated_screened_items():
     assert status["counts"].get("vetted", 0) == 0
     assert status["tracingSources"] == ["ptbxl"]
     assert status["tracingSourceCounts"] == {
-        "ptbxl": status["counts"]["harness_pass"]
+        "ptbxl": status["distinctRealEcgs"]
     }
     assert status["tracingLabel"] == "real de-identified ECG"
     assert status["vignetteProvenance"] == "authored simulation"
@@ -100,20 +138,23 @@ def test_bank_seeded_with_automated_screened_items():
     assert status["reviewStatus"] == "pending_named_clinician_signoff"
     assert status["provenanceGate"] == "passed"
     assert status["servingItemCount"] == 103
-    assert status["distinctRealEcgs"] == 103
+    assert status["distinctRealEcgs"] == 106
+    assert status["longitudinalEpisodeCount"] == 3
+    assert status["authenticatedComparisonEcgs"] == 3
+    assert status["longitudinalPairRegistrySize"] == 3
     assert status["countsBySituation"] == {"clinic": 35, "ed": 34, "ward": 34}
     assert status["countsByQuestionType"] == {
-        "click": 16,
+        "click": 15,
         "fillin": 3,
         "matching": 12,
         "mcq": 17,
         "spoterror": 18,
-        "stepwise": 18,
-        "triage": 19,
+        "stepwise": 20,
+        "triage": 18,
     }
     assert status["countsBySituationAndQuestionType"] == {
-        "clinic": {"click": 16, "fillin": 3, "matching": 4, "mcq": 4, "triage": 8},
-        "ed": {"matching": 4, "mcq": 5, "spoterror": 4, "stepwise": 10, "triage": 11},
+        "clinic": {"click": 15, "fillin": 3, "matching": 4, "mcq": 4, "stepwise": 1, "triage": 8},
+        "ed": {"matching": 4, "mcq": 5, "spoterror": 4, "stepwise": 11, "triage": 10},
         "ward": {"matching": 4, "mcq": 8, "spoterror": 14, "stepwise": 8},
     }
     assert status["distinctAuthoredSettings"] >= 90
@@ -140,7 +181,17 @@ def test_shift_flow_serves_grades_and_reports():
         assert "acuity_tier" not in item
         for opt in item.get("options", []):
             assert "answer_class" not in opt
-        assert "stem" not in item and "options" not in item
+        assert item["stem"]
+        assert isinstance(item["chips"], dict)
+        for response_field in (
+            "prompt",
+            "options",
+            "steps",
+            "machine_read",
+            "fill_in_task",
+            "matching_task",
+        ):
+            assert response_field not in item
         activated = client.post(
             f"/clinical/shift/{session_id}/phase",
             json={"itemId": item_id, "phase": "orient"},
@@ -150,6 +201,10 @@ def test_shift_flow_serves_grades_and_reports():
             f"/clinical/shift/{session_id}/context",
             json={"itemId": item_id, "answer": {"firstLookFinding": "uncertain", "firstLookConfidence": 3}},
         ).json()
+        assert client.post(
+            f"/clinical/shift/{session_id}/phase",
+            json={"itemId": item_id, "phase": "decide"},
+        ).status_code == 200
         item = revealed["item"]
         # Answer with the first available option (correctness is irrelevant here).
         option_id = item["options"][0]["id"] if item.get("options") else None
@@ -169,6 +224,155 @@ def test_shift_flow_serves_grades_and_reports():
 def test_learn_tier_is_untimed():
     start = client.post("/clinical/shift/start", json={"lane": "clinic", "tier": "learn", "length": 1}).json()
     assert start["next"]["clock"]["untimed"] is True
+
+
+def test_timed_decision_clock_waits_for_explicit_post_reveal_readiness(
+    fresh_clinical_student,
+):
+    client = fresh_clinical_student
+    start = client.post(
+        "/clinical/shift/start",
+        json={"lane": "clinic", "tier": "shift", "length": 1, "focus": "normal_ecg"},
+    ).json()
+    session_id = start["session"]["sessionId"]
+    item_id = start["next"]["itemId"]
+    authored = _session_item(session_id)
+
+    assert start["next"]["clock"]["decideStartedAt"] is None
+    assert client.post(
+        f"/clinical/shift/{session_id}/phase",
+        json={"itemId": item_id, "phase": "orient"},
+    ).status_code == 200
+    revealed_response = client.post(
+        f"/clinical/shift/{session_id}/context",
+        json={
+            "itemId": item_id,
+            "answer": {
+                "firstLookFinding": "normal_or_no_dominant_abnormality",
+                "firstLookConfidence": 3,
+            },
+        },
+    )
+    assert revealed_response.status_code == 200, revealed_response.text
+    revealed = revealed_response.json()
+    assert revealed["clock"]["activePhase"] == "decide"
+    assert revealed["clock"]["decideStartedAt"] is None
+    assert revealed["clock"]["decideDeadlineAt"] is None
+    public_option_ids = {option["id"] for option in revealed["item"]["options"]}
+    authored_option_ids = {option.id for option in authored.options}
+    assert public_option_ids
+    assert all(option_id.startswith("co_") for option_id in public_option_ids)
+    assert public_option_ids.isdisjoint(authored_option_ids)
+    durable = store.get_shift_session(session_id)
+    assert durable["decideStartedAt"] is None
+    assert durable["decideDeadlineAt"] is None
+
+    selected_option = revealed["item"]["options"][0]["id"]
+    too_early = client.post(
+        f"/clinical/shift/{session_id}/answer",
+        json={
+            "itemId": item_id,
+            "answer": {"selectedOptionId": selected_option, "confidence": 3},
+        },
+    )
+    assert too_early.status_code == 409
+    assert too_early.json()["detail"]["code"] == "clinical_decide_not_activated"
+
+    ready = client.post(
+        f"/clinical/shift/{session_id}/phase",
+        json={"itemId": item_id, "phase": "decide"},
+    )
+    assert ready.status_code == 200, ready.text
+    assert ready.json()["clock"]["decideStartedAt"] is not None
+    assert ready.json()["clock"]["decideDeadlineAt"] is not None
+    assert client.post(
+        f"/clinical/shift/{session_id}/answer",
+        json={
+            "itemId": item_id,
+            "answer": {
+                "selectedOptionId": _public_option_id(
+                    ready.json()["item"], authored, authored.options[0].id
+                ),
+                "confidence": 3,
+            },
+        },
+    ).status_code == 200
+
+
+def test_orient_timeout_is_propagated_and_excluded_from_first_look_metrics(
+    fresh_clinical_student,
+):
+    client = fresh_clinical_student
+    start = client.post(
+        "/clinical/shift/start",
+        json={"lane": "clinic", "tier": "shift", "length": 1, "focus": "normal_ecg"},
+    ).json()
+    session_id = start["session"]["sessionId"]
+    item_id = start["next"]["itemId"]
+    _session_item(session_id)
+    assert client.post(
+        f"/clinical/shift/{session_id}/phase",
+        json={"itemId": item_id, "phase": "orient"},
+    ).status_code == 200
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE clinical_shift_sessions SET pending_orient_deadline_at = ? "
+            "WHERE session_id = ?",
+            ("2026-01-01T00:00:00+00:00", session_id),
+        )
+
+    revealed_response = client.post(
+        f"/clinical/shift/{session_id}/context",
+        json={
+            "itemId": item_id,
+            "answer": {
+                "firstLookFinding": "normal_or_no_dominant_abnormality",
+                "firstLookConfidence": 5,
+            },
+        },
+    )
+    assert revealed_response.status_code == 200, revealed_response.text
+    revealed = revealed_response.json()
+    assert revealed["firstLook"]["orientTimedOut"] is True
+    assert client.post(
+        f"/clinical/shift/{session_id}/phase",
+        json={"itemId": item_id, "phase": "decide"},
+    ).status_code == 200
+    public_item = revealed["item"]
+    while public_item.get("stepwise_state", {}).get("active"):
+        active_step = public_item["stepwise_state"]["active"]
+        committed = client.post(
+            f"/clinical/shift/{session_id}/step",
+            json={
+                "itemId": item_id,
+                "stepIndex": active_step["stepIndex"],
+                "answerIndex": 0,
+            },
+        )
+        assert committed.status_code == 200, committed.text
+        public_item = committed.json()["item"]
+    decision_answer = {"confidence": 5}
+    if public_item.get("options"):
+        decision_answer["selectedOptionId"] = public_item["options"][0]["id"]
+    graded_response = client.post(
+        f"/clinical/shift/{session_id}/answer",
+        json={
+            "itemId": item_id,
+            "answer": decision_answer,
+        },
+    )
+    assert graded_response.status_code == 200, graded_response.text
+    assessment = graded_response.json()["grade"]["firstLookAssessment"]
+    assert assessment["timedOut"] is True
+    assert assessment["agreement"] is None
+
+    assert client.post(f"/clinical/shift/{session_id}/next").status_code == 200
+    report = client.get(f"/clinical/shift/{session_id}/report").json()
+    assert report["performanceDomains"]["ecgRecognitionFirstLook"]["broadCategory"] == {
+        "assessed": 0,
+        "matched": 0,
+        "score": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -261,6 +465,8 @@ def test_revealed_click_item_exposes_neutral_viewer_roi_not_pathology_key():
         item,
         clinical_packet,
         {
+            "sessionId": "test-neutral-roi-session",
+            "learnerId": "test-neutral-roi-owner",
             "contextRevealed": True,
             "position": 0,
             "length": 1,
@@ -284,7 +490,7 @@ def test_authored_stepwise_simulation_reveals_after_first_look_and_grades_once()
     ).json()
     session_id = start["session"]["sessionId"]
     first = start["next"]
-    selected = clinical_item_store.get_item(first["itemId"])
+    selected = _session_item(session_id)
     assert selected is not None
     correct_steps = [
         next(index for index, option in enumerate(step.options) if option.correct)
@@ -295,7 +501,9 @@ def test_authored_stepwise_simulation_reveals_after_first_look_and_grades_once()
         support.objective_id for support in selected.evidence_manifest.ecg_supports
     }
     assert first["contextRevealed"] is False
-    assert "stem" not in first["item"] and "steps" not in first["item"]
+    assert first["item"]["stem"] == selected.stem
+    assert first["item"]["chips"] == selected.chips.model_dump()
+    assert "prompt" not in first["item"] and "steps" not in first["item"]
     assert first["item"]["learning_evidence"] == "formative_only"
     assert "real de-identified ECG" in first["item"]["content_label"]
     assert first["item"]["tracing_provenance"] == "real_deidentified_ecg"
@@ -371,7 +579,9 @@ def test_authored_stepwise_simulation_reveals_after_first_look_and_grades_once()
         "itemId": first["itemId"],
         # The client copy is deliberately forged. Durable step commitments win.
         "answer": {
-            "selectedOptionId": ideal_option.id,
+            "selectedOptionId": _public_option_id(
+                final_item, selected, ideal_option.id
+            ),
             "stepAnswers": [1 - correct_steps[0], 1 - correct_steps[1]],
             "answerTimeMs": 3400,
         },
@@ -422,7 +632,7 @@ def test_formative_clinical_submission_never_mutates_legacy_mastery(
         ).json()
         session_id = started["session"]["sessionId"]
         item_id = started["next"]["itemId"]
-        item = clinical_item_store.get_item(item_id)
+        item = _session_item(session_id)
         assert item is not None
         assert item.validation_status == "harness_pass"
         assert item.application_objectives == ["normal_ecg"]
@@ -446,6 +656,10 @@ def test_formative_clinical_submission_never_mutates_legacy_mastery(
             },
         )
         assert revealed.status_code == 200, revealed.text
+        assert student.post(
+            f"/clinical/shift/{session_id}/phase",
+            json={"itemId": item_id, "phase": "decide"},
+        ).status_code == 200
         if outcome == "timeout":
             with store.connect() as conn:
                 conn.execute(
@@ -464,7 +678,9 @@ def test_formative_clinical_submission_never_mutates_legacy_mastery(
             json={
                 "itemId": item_id,
                 "answer": {
-                    "selectedOptionId": selected.id,
+                    "selectedOptionId": _public_option_id(
+                        revealed.json()["item"], item, selected.id
+                    ),
                     "confidence": 5,
                 },
             },
@@ -605,7 +821,11 @@ def test_shift_selector_ignores_legacy_and_formative_scores_without_independent_
         store, clinical_item_store, clinical_packet, polluted_session
     )
 
-    assert polluted_next["itemId"] == baseline_next["itemId"]
+    assert polluted_next["itemId"] != baseline_next["itemId"]
+    assert (
+        store.get_shift_session(polluted_session)["pendingItemId"]
+        == store.get_shift_session(baseline_session)["pendingItemId"]
+    )
 
 
 def test_shift_prefers_training_rapid_exact_mastery_over_conflicting_legacy_row():
@@ -626,7 +846,7 @@ def test_shift_prefers_training_rapid_exact_mastery_over_conflicting_legacy_row(
         )
     session_id = store.create_shift_session(learner, "clinic", "shift", 3)
     nxt = shift.next_shift_item(store, clinical_item_store, clinical_packet, session_id)
-    item = clinical_item_store.get_item(nxt["itemId"])
+    item = _session_item(session_id)
     targets = [c.objective_id for c in item.evidence_manifest.ecg_supports]
     assert "qtc_prolongation" in targets
 
@@ -638,7 +858,7 @@ def test_guided_handoff_focus_selects_a_compatible_first_clinical_item():
     ).json()
 
     assert start["session"]["focusObjective"] == "qtc_prolongation"
-    first = clinical_item_store.get_item(start["next"]["itemId"])
+    first = _session_item(start["session"]["sessionId"])
     targets = [support.objective_id for support in first.evidence_manifest.ecg_supports]
     assert "qtc_prolongation" in targets
 
@@ -669,7 +889,7 @@ def test_guided_handoff_subskill_selects_only_an_exact_server_graded_cell():
                 "subskill": "apply_in_context",
             },
         ).json()
-        application_item = clinical_item_store.get_item(application["next"]["itemId"])
+        application_item = _session_item(application["session"]["sessionId"])
         assert application["session"]["focusSubskill"] == "apply_in_context"
         assert "qtc_prolongation" in application_item.application_objectives
         assert application_item.question_type == "mcq"
@@ -684,7 +904,7 @@ def test_guided_handoff_subskill_selects_only_an_exact_server_graded_cell():
                 "subskill": "localize",
             },
         ).json()
-        localization_item = clinical_item_store.get_item(localization["next"]["itemId"])
+        localization_item = _session_item(localization["session"]["sessionId"])
         assert localization_item.question_type == "click"
         assert localization_item.roi_target.concept == "qtc_prolongation"
 
@@ -763,7 +983,8 @@ def test_duplicate_answer_is_exactly_once_and_replays_stored_grade():
     ).json()
     session_id = start["session"]["sessionId"]
     item_id = start["next"]["itemId"]
-    ecg_id = clinical_item_store.get_item(item_id).ecg_id
+    durable_item_id = store.get_shift_session(session_id)["pendingItemId"]
+    ecg_id = _session_item(session_id).ecg_id
 
     first = _answer(session_id, item_id, answer_time_ms=3210)
     assert first.status_code == 200
@@ -774,7 +995,7 @@ def test_duplicate_answer_is_exactly_once_and_replays_stored_grade():
         # answerId and attemptId are separate sequences; use the ledger's explicit link.
         ledger = conn.execute(
             "SELECT attempt_id FROM clinical_shift_answers WHERE session_id = ? AND item_id = ?",
-            (session_id, item_id),
+            (session_id, durable_item_id),
         ).fetchone()
         attempt = conn.execute(
             "SELECT case_id FROM attempts WHERE id = ?", (ledger["attempt_id"],)
@@ -823,7 +1044,7 @@ def test_clinical_application_receipt_is_exact_formative_and_exactly_once():
         ).json()
         session_id = started["session"]["sessionId"]
         item_id = started["next"]["itemId"]
-        item = clinical_item_store.get_item(item_id)
+        item = _session_item(session_id)
         assert item is not None and item.application_objectives == ["normal_ecg"]
         ideal = next(option for option in item.options if option.answer_class == "ideal")
 
@@ -831,7 +1052,7 @@ def test_clinical_application_receipt_is_exact_formative_and_exactly_once():
             f"/clinical/shift/{session_id}/phase",
             json={"itemId": item_id, "phase": "orient"},
         ).status_code == 200
-        assert student.post(
+        revealed = student.post(
             f"/clinical/shift/{session_id}/context",
             json={
                 "itemId": item_id,
@@ -840,10 +1061,16 @@ def test_clinical_application_receipt_is_exact_formative_and_exactly_once():
                     "firstLookConfidence": 5,
                 },
             },
-        ).status_code == 200
+        )
+        assert revealed.status_code == 200
         payload = {
             "itemId": item_id,
-            "answer": {"selectedOptionId": ideal.id, "confidence": 5},
+            "answer": {
+                "selectedOptionId": _public_option_id(
+                    revealed.json()["item"], item, ideal.id
+                ),
+                "confidence": 5,
+            },
         }
         first = student.post(f"/clinical/shift/{session_id}/answer", json=payload).json()
         receipts = first["grade"]["competencyReceipts"]
@@ -878,7 +1105,7 @@ def test_clinical_application_receipt_is_exact_formative_and_exactly_once():
             answer_row = conn.execute(
                 "SELECT receipts_json FROM clinical_shift_answers "
                 "WHERE session_id = ? AND item_id = ?",
-                (session_id, item_id),
+                (session_id, item.item_id),
             ).fetchone()
         assert row is not None
         assert row["attempts"] == 1
@@ -906,7 +1133,7 @@ def test_server_matched_clinical_click_records_localize_but_not_application():
         ).json()
         session_id = started["session"]["sessionId"]
         item_id = started["next"]["itemId"]
-        item = clinical_item_store.get_item(item_id)
+        item = _session_item(session_id)
         assert item is not None and item.question_type == "click"
         assert item.application_objectives == []
         packet = clinical_packet(item.ecg_id)
@@ -985,7 +1212,7 @@ def test_grounded_fillin_is_key_safe_and_records_formative_measurement() -> None
         started = started_response.json()
         session_id = started["session"]["sessionId"]
         item_id = started["next"]["itemId"]
-        item = clinical_item_store.get_item(item_id)
+        item = _session_item(session_id)
         assert item is not None and item.question_type == "fillin"
         assert "fill_in_task" not in started["next"]["item"]
 
@@ -1102,8 +1329,13 @@ def test_matching_lifecycle_is_blinded_replay_stable_and_formative_only() -> Non
         for hidden in ("source_type", "correct_choice_id", "source_reference", "objective_id"):
             assert hidden not in serialized
 
-        item = clinical_item_store.get_item(item_id)
+        item = _session_item(session_id)
         assert item is not None and item.question_type == "matching"
+        decide = student.post(
+            f"/clinical/shift/{session_id}/phase",
+            json={"itemId": item_id, "phase": "decide"},
+        )
+        assert decide.status_code == 200, decide.text
         correct_matches = {
             row.id: row.correct_choice_id for row in item.matching_task.rows
         }
@@ -1151,7 +1383,7 @@ def test_matching_lifecycle_is_blinded_replay_stable_and_formative_only() -> Non
             answer_rows = conn.execute(
                 "SELECT COUNT(*) AS n FROM clinical_shift_answers "
                 "WHERE session_id = ? AND item_id = ?",
-                (session_id, item_id),
+                (session_id, item.item_id),
             ).fetchone()
         assert competency_rows["n"] == 0
         assert answer_rows["n"] == 1
@@ -1190,6 +1422,7 @@ def test_first_look_category_is_formative_persisted_and_replay_stable():
     ).json()
     session_id = start["session"]["sessionId"]
     item_id = start["next"]["itemId"]
+    durable_item_id = store.get_shift_session(session_id)["pendingItemId"]
     payload = {
         "itemId": item_id,
         "answer": {
@@ -1215,7 +1448,7 @@ def test_first_look_category_is_formative_persisted_and_replay_stable():
     assert assessment["formativeOnly"] is True
     assert assessment["exactPathologyMasterySuppressed"] is True
 
-    stored = store.get_shift_answer(session_id, item_id)
+    stored = store.get_shift_answer(session_id, durable_item_id)
     assert stored["response"]["first_look_finding"] == "uncertain"
     assert stored["response"]["first_look_confidence"] == 3
 
@@ -1231,7 +1464,7 @@ def test_first_look_category_is_formative_persisted_and_replay_stable():
     assert replay.status_code == 200
     assert replay.json()["replay"] is True
     assert replay.json()["grade"] == first.json()["grade"]
-    assert store.get_shift_answer(session_id, item_id)["response"] == stored["response"]
+    assert store.get_shift_answer(session_id, durable_item_id)["response"] == stored["response"]
 
 
 def test_only_the_current_pending_item_can_be_answered():
@@ -1360,7 +1593,7 @@ def test_requested_length_is_capped_to_distinct_lane_ecgs_and_never_repeats_ecg(
         ecgs = []
         current = start["next"]
         while not current["done"]:
-            item = clinical_item_store.get_item(current["itemId"])
+            item = _session_item(session["sessionId"])
             ecgs.append(item.ecg_id)
             response = _answer(
                 session["sessionId"], current["itemId"], test_client=fresh_student
@@ -1459,14 +1692,19 @@ def test_owner_idempotently_abandons_large_shift_preserves_evidence_and_restarts
             },
         )
         assert revealed.status_code == 200, revealed.text
-        authored = clinical_item_store.get_item(item_id)
+        authored = _session_item(session_id)
         assert authored is not None
         ideal = next(option for option in authored.options if option.answer_class == "ideal")
         answered = owner.post(
             f"/clinical/shift/{session_id}/answer",
             json={
                 "itemId": item_id,
-                "answer": {"selectedOptionId": ideal.id, "confidence": 3},
+                "answer": {
+                    "selectedOptionId": _public_option_id(
+                        revealed.json()["item"], authored, ideal.id
+                    ),
+                    "confidence": 3,
+                },
             },
         )
         assert answered.status_code == 200, answered.text

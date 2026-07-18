@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-""":"
-Package a complete corpus into an immutable, checksum-pinned artifact.
-
-Usage:
-  package-corpus.sh CORPUS_ROOT RELEASE OUTPUT_DIR [gs://BUCKET/releases] [--upload]
-
-Uploading is opt-in. The generation-match precondition prevents accidentally
-replacing an existing release object.
-":"""
+# Package a complete corpus into an immutable, checksum-pinned artifact.
+#
+# Usage:
+#   package-corpus.sh CORPUS_ROOT RELEASE OUTPUT_DIR [gs://BUCKET/releases] [--upload]
+#
+# Uploading is opt-in. The generation-match precondition prevents accidentally
+# replacing an existing release object.
 
 set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +25,20 @@ require_command sqlite3
 require_command sha256sum
 require_command tar
 require_command zstd
+[[ -f "${CORPUS_ROOT}/manifest.json" ]] || die "corpus manifest.json is missing"
+CORPUS_MEMBERS=(manifest.json release-audit.json corpus.db waveforms)
+if jq -e '.rapidRhythmSupplement != null' "${CORPUS_ROOT}/manifest.json" >/dev/null; then
+  SUPPLEMENT_PATH="$(jq -er '.rapidRhythmSupplement.path' "${CORPUS_ROOT}/manifest.json")"
+  [[ "${SUPPLEMENT_PATH}" == "rapid_rhythm_supplement" ]] \
+    || die "rapid rhythm supplement path is outside the reviewed release contract"
+  [[ -f "${CORPUS_ROOT}/${SUPPLEMENT_PATH}/rhythm_streams.db" ]] \
+    || die "referenced rapid rhythm supplement database is missing"
+  sqlite3 "${CORPUS_ROOT}/${SUPPLEMENT_PATH}/rhythm_streams.db" \
+    'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null
+  [[ ! -s "${CORPUS_ROOT}/${SUPPLEMENT_PATH}/rhythm_streams.db-wal" ]] \
+    || die "rapid rhythm supplement WAL is not empty; stop corpus writers before packaging"
+  CORPUS_MEMBERS+=("${SUPPLEMENT_PATH}")
+fi
 sqlite3 "${CORPUS_ROOT}/corpus.db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null
 [[ ! -s "${CORPUS_ROOT}/corpus.db-wal" ]] \
   || die "corpus WAL is not empty; stop corpus writers before packaging"
@@ -45,7 +57,8 @@ log "creating deterministic corpus artifact"
 tar --directory "${CORPUS_ROOT}" \
   --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
   --exclude='corpus.db-wal' --exclude='corpus.db-shm' \
-  --zstd -cf "${ARTIFACT}" manifest.json release-audit.json corpus.db waveforms
+  --exclude='rhythm_streams.db-wal' --exclude='rhythm_streams.db-shm' \
+  --zstd -cf "${ARTIFACT}" "${CORPUS_MEMBERS[@]}"
 SHA256="$(sha256_file "${ARTIFACT}")"
 printf '%s  %s\n' "${SHA256}" "$(basename "${ARTIFACT}")" >"${CHECKSUM}"
 log "artifact: ${ARTIFACT}"

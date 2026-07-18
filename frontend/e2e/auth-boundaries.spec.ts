@@ -6,6 +6,17 @@ async function mockSignedOut(page: Page) {
   await page.route("**/api/backend/auth/me", (route) => route.fulfill({ json: signedOut }));
 }
 
+async function waitForSignInHydration(page: Page) {
+  const password = page.locator("#auth-password");
+  const toggle = page.getByRole("button", { name: "Show password" });
+  await expect(async () => {
+    await toggle.click();
+    await expect(password).toHaveAttribute("type", "text", { timeout: 750 });
+  }).toPass({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Hide password" }).click();
+  await expect(password).toHaveAttribute("type", "password");
+}
+
 test.describe("account-required route boundary", () => {
   test("keeps the landing and sign-in pages usable while session verification is pending", async ({ page }) => {
     const guestRequests: string[] = [];
@@ -31,7 +42,11 @@ test.describe("account-required route boundary", () => {
       await expect.poll(() => sessionChecks).toBe(1);
       await expect(page.getByRole("heading", { name: entry.heading })).toBeVisible({ timeout: 2_000 });
       if (entry.path.startsWith("/login")) {
-        await expect(page.getByRole("button", { name: "Create account", exact: true })).toBeEnabled();
+        const createAccount = page.getByRole("button", { name: "Create account", exact: true });
+        const credentialForm = createAccount.locator("xpath=ancestor::form");
+        await expect(credentialForm).toHaveAttribute("method", "post");
+        await expect(credentialForm).toHaveAttribute("action", "/login");
+        await expect(createAccount).toBeEnabled();
       }
 
       releaseSessionCheck();
@@ -58,10 +73,13 @@ test.describe("account-required route boundary", () => {
       { requested: "/train?concept=atrial_fibrillation", next: "/train?concept=atrial_fibrillation" },
       { requested: "/rapid", next: "/rapid" },
       { requested: "/practice", next: "/practice" },
+      // The default destination is intentionally omitted from the query.
+      { requested: "/home", next: null },
+      { requested: "/home/review/lsr1_boundary_test", next: "/home/review/lsr1_boundary_test" },
+      // The legacy profile shell is guarded before its page-level redirect.
       { requested: "/profile?tab=plan", next: "/profile?tab=plan" },
       { requested: "/account", next: "/account" },
-      // Legacy study-plan routes canonicalize before the client guard runs.
-      { requested: "/review", next: "/profile?tab=plan" },
+      { requested: "/review", next: "/home?panel=plan" },
     ];
 
     for (const destination of destinations) {
@@ -126,11 +144,12 @@ test.describe("account-required route boundary", () => {
     const hostile = encodeURIComponent("/\\\\attacker.example/private");
     await page.goto(`/login?next=${hostile}`);
     await expect(page.getByText(/continue as guest|guest work|guest learner/i)).toHaveCount(0);
+    await waitForSignInHydration(page);
     await page.locator("#auth-email-signin").fill("boundary@example.test");
     await page.locator("#auth-password").fill("correct horse battery staple");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
-    await expect(page).toHaveURL((url) => url.pathname === "/dashboard" && url.hostname === "localhost");
+    await expect(page).toHaveURL((url) => url.pathname === "/home" && url.hostname === "localhost");
   });
 
   test("an explicit sign-in wins over a slower stale session check", async ({ page }) => {
@@ -149,15 +168,16 @@ test.describe("account-required route boundary", () => {
 
     await page.goto("/login?next=%2Fprofile", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeEnabled();
+    await waitForSignInHydration(page);
     await page.locator("#auth-email-signin").fill("slow-check@example.test");
     await page.locator("#auth-password").fill("correct horse battery staple");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
 
-    await expect(page).toHaveURL((url) => url.pathname === "/profile");
+    await expect(page).toHaveURL((url) => url.pathname === "/home");
     await expect(page.locator(".nav-account-name")).toContainText("Verified Learner");
     releaseSessionCheck();
     await page.waitForTimeout(100);
-    await expect(page).toHaveURL((url) => url.pathname === "/profile");
+    await expect(page).toHaveURL((url) => url.pathname === "/home");
     await expect(page.locator(".nav-account-name")).toContainText("Verified Learner");
   });
 });

@@ -10,7 +10,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/review",
-        destination: "/profile?tab=plan",
+        destination: "/home?panel=plan",
         permanent: false,
       },
     ];

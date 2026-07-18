@@ -61,7 +61,7 @@ function VerifyEmailScreen() {
     const linkProof = emailedLinkProof(window.location.search, window.location.hash);
     const captured = {
       ...linkProof,
-      next: safeAppPath(query.get("next"), "/dashboard"),
+      next: safeAppPath(query.get("next"), "/home"),
     };
     if (window.location.search || window.location.hash) {
       window.history.replaceState(window.history.state, "", "/verify-email");

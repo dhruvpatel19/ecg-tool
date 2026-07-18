@@ -508,7 +508,7 @@ def finalize_answer(
     response: dict[str, Any],
     grade: dict[str, Any],
     correct: bool,
-    confidence: int,
+    confidence: int | None,
     calibration_event: dict[str, Any] | None,
     competency_events: list[dict[str, Any]],
     lease_id: str,

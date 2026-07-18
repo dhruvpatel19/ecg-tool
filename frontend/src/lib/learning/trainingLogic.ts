@@ -14,7 +14,7 @@ const TRAINING_SUBSKILLS = new Set<LearningSubskill>([
 ]);
 
 export const TRAINING_SESSION_LENGTHS = [10, 25, 50, 100, 500, 1000, 5000] as const;
-const TRAINING_RETURN_SURFACES = ["lesson", "study_plan", "profile", "rapid", "clinical"] as const;
+const TRAINING_RETURN_SURFACES = ["lesson", "study_plan", "profile", "calendar", "rapid", "clinical", "session_review"] as const;
 
 export function trainingFeedbackHeading({
   correct,
@@ -122,7 +122,7 @@ export function trainingMasteryPresentation(
     return {
       state: "formative",
       label: "Practiced · not independently checked",
-      detail: "Guided practice is saved, but it is not a mastery estimate until you complete a fresh mixed ECG check.",
+      detail: "Formative practice is saved, but it is not a mastery estimate until you complete a fresh mixed ECG check.",
       value: null,
       recommendationLabel: "unassessed skill",
     };

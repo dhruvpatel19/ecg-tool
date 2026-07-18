@@ -17,6 +17,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from .learning_sessions import issue_learning_session_ref
+
 
 ACTIVITY_MODES = {"all", "guided", "training", "rapid", "clinical"}
 MAX_ACTIVITY_PAGE = 50
@@ -220,7 +222,17 @@ def _project_row(row: sqlite3.Row, *, secret: str, learner_id: str) -> dict[str,
     source = str(row["source"])
     mode = str(row["mode"])
     score: float | None = float(row["score"]) if row["score"] is not None else None
-    confidence = int(row["confidence"]) if row["confidence"] is not None else None
+    raw_confidence = int(row["confidence"]) if row["confidence"] is not None else None
+    # Confidence is not part of the current Clinical learner contract. Older
+    # shared-attempt rows may contain either a real legacy value or the zero
+    # sentinel; neither should reappear in the case activity UI.
+    confidence = (
+        raw_confidence
+        if mode != "clinical"
+        and raw_confidence is not None
+        and 1 <= raw_confidence <= 5
+        else None
+    )
     assistance = str(row["assistance"] or "unknown")
     if assistance not in {"unassisted", "assisted", "unknown"}:
         assistance = "unknown"
@@ -228,12 +240,30 @@ def _project_row(row: sqlite3.Row, *, secret: str, learner_id: str) -> dict[str,
     if source == "guided":
         objective = _safe_token(row["concept"])
         subskills = _json(row["subskills_json"], [])
-        subskill = _safe_token(subskills[0]) if isinstance(subskills, list) and subskills else None
+        projected_subskills: list[str] = []
+        seen_subskills: set[str] = set()
+        if isinstance(subskills, list):
+            for value in subskills:
+                projected_subskill = _safe_token(value)
+                if not projected_subskill or projected_subskill in seen_subskills:
+                    continue
+                seen_subskills.add(projected_subskill)
+                projected_subskills.append(projected_subskill)
+        # Keep the first exact skill as the compatibility summary while the
+        # grouped projection below preserves every skill checked by the task.
+        subskill = projected_subskills[0] if projected_subskills else None
         level = str(row["evidence_level"] or "guided")
         evidence = "independent" if level == "independent_transfer" else "formative"
         tested_competencies = (
-            [{"objectiveId": objective, "subskill": subskill, "evidence": evidence}]
-            if objective and subskill
+            [
+                {
+                    "objectiveId": objective,
+                    "subskill": projected_subskill,
+                    "evidence": evidence,
+                }
+                for projected_subskill in projected_subskills
+            ]
+            if objective
             else []
         )
         review_recommended = bool(row["correct"] == 0 or (score is not None and score < 0.7))
@@ -249,6 +279,37 @@ def _project_row(row: sqlite3.Row, *, secret: str, learner_id: str) -> dict[str,
 
     occurred_at = str(row["occurred_at"])
     source_id = int(row["source_id"])
+    review: dict[str, Any] | None = None
+    review_mode = str(row["review_mode"] or "")
+    review_session_id = str(row["review_session_id"] or "")
+    review_session_status = str(row["review_session_status"] or "")
+    try:
+        review_attempt_index = int(row["review_attempt_index"] or 0)
+    except (TypeError, ValueError):
+        review_attempt_index = 0
+    if (
+        source == "attempt"
+        and review_mode in {"training", "rapid", "clinical"}
+        and review_session_id
+        and review_attempt_index >= 1
+        and (
+            review_session_status == "complete"
+            or (
+                review_mode == "rapid"
+                and review_session_status == "abandoned"
+            )
+        )
+    ):
+        review = {
+            "sessionRef": issue_learning_session_ref(
+                secret=secret,
+                learner_id=learner_id,
+                mode=review_mode,
+                session_id=review_session_id,
+            ),
+            "attemptIndex": review_attempt_index,
+            "sessionStatus": review_session_status,
+        }
     return {
         "id": _opaque_event_id(
             secret=secret,
@@ -264,10 +325,11 @@ def _project_row(row: sqlite3.Row, *, secret: str, learner_id: str) -> dict[str,
         "subskill": subskill,
         "testedCompetencies": tested_competencies,
         "score": None if score is None else round(max(0.0, min(score, 1.0)), 3),
-        "confidence": confidence if confidence is None else max(1, min(confidence, 5)),
+        "confidence": confidence,
         "assistance": assistance,
         "evidence": evidence,
         "reviewRecommended": review_recommended,
+        "review": review,
     }
 
 
@@ -338,11 +400,97 @@ def get_learning_activity(
                     WHEN ra.id IS NOT NULL THEN ra.integrity_status
                     WHEN ca.id IS NOT NULL THEN 'atomic_v1'
                     ELSE 'legacy_incomplete'
-                END AS integrity_status
+                END AS integrity_status,
+                CASE
+                    WHEN ta.id IS NOT NULL
+                     AND ta.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND tc.status = 'complete'
+                    THEN 'training'
+                    WHEN ra.id IS NOT NULL
+                     AND ra.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND rr.status IN ('complete', 'abandoned')
+                    THEN 'rapid'
+                    WHEN ca.id IS NOT NULL AND cs.status = 'complete'
+                    THEN 'clinical'
+                    ELSE NULL
+                END AS review_mode,
+                CASE
+                    WHEN ta.id IS NOT NULL
+                     AND ta.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND tc.status = 'complete'
+                    THEN ta.campaign_id
+                    WHEN ra.id IS NOT NULL
+                     AND ra.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND rr.status IN ('complete', 'abandoned')
+                    THEN ra.round_id
+                    WHEN ca.id IS NOT NULL AND cs.status = 'complete'
+                    THEN ca.session_id
+                    ELSE NULL
+                END AS review_session_id,
+                CASE
+                    WHEN ta.id IS NOT NULL
+                     AND ta.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND tc.status = 'complete'
+                    THEN (
+                        SELECT COUNT(*)
+                        FROM training_campaign_answers AS review_answers
+                        WHERE review_answers.campaign_id = ta.campaign_id
+                          AND review_answers.integrity_status
+                              IN ('atomic_v1', 'atomic_v2')
+                          AND (
+                              review_answers.ordinal < ta.ordinal
+                              OR (
+                                  review_answers.ordinal = ta.ordinal
+                                  AND review_answers.id <= ta.id
+                              )
+                          )
+                    )
+                    WHEN ra.id IS NOT NULL
+                     AND ra.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND rr.status IN ('complete', 'abandoned')
+                    THEN (
+                        SELECT COUNT(*)
+                        FROM rapid_round_answers AS review_answers
+                        WHERE review_answers.round_id = ra.round_id
+                          AND review_answers.integrity_status
+                              IN ('atomic_v1', 'atomic_v2')
+                          AND review_answers.id <= ra.id
+                    )
+                    WHEN ca.id IS NOT NULL AND cs.status = 'complete'
+                    THEN (
+                        SELECT COUNT(*)
+                        FROM clinical_shift_answers AS review_answers
+                        WHERE review_answers.session_id = ca.session_id
+                          AND review_answers.id <= ca.id
+                    )
+                    ELSE NULL
+                END AS review_attempt_index,
+                CASE
+                    WHEN ta.id IS NOT NULL
+                     AND ta.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND tc.status = 'complete'
+                    THEN 'complete'
+                    WHEN ra.id IS NOT NULL
+                     AND ra.integrity_status IN ('atomic_v1', 'atomic_v2')
+                     AND rr.status IN ('complete', 'abandoned')
+                    THEN rr.status
+                    WHEN ca.id IS NOT NULL AND cs.status = 'complete'
+                    THEN 'complete'
+                    ELSE NULL
+                END AS review_session_status
             FROM attempts a
             LEFT JOIN training_campaign_answers ta ON ta.attempt_id = a.id
             LEFT JOIN rapid_round_answers ra ON ra.attempt_id = a.id
             LEFT JOIN clinical_shift_answers ca ON ca.attempt_id = a.id
+            LEFT JOIN training_campaigns tc
+              ON tc.campaign_id = ta.campaign_id
+             AND tc.learner_id = a.learner_id
+            LEFT JOIN rapid_rounds rr
+              ON rr.round_id = ra.round_id
+             AND rr.learner_id = a.learner_id
+            LEFT JOIN clinical_shift_sessions cs
+              ON cs.session_id = ca.session_id
+             AND cs.learner_id = a.learner_id
             WHERE a.learner_id = ?
               AND a.mode IN ('concept_practice', 'rapid_practice', 'clinical_decision')
 
@@ -366,7 +514,11 @@ def get_learning_activity(
                 g.effective_evidence_level AS evidence_level,
                 g.misconception_tags_json AS misconceptions_json,
                 NULL AS receipt_json,
-                'atomic_v1' AS integrity_status
+                'atomic_v1' AS integrity_status,
+                NULL AS review_mode,
+                NULL AS review_session_id,
+                NULL AS review_attempt_index,
+                NULL AS review_session_status
             FROM guided_learning_events g
             WHERE g.learner_id = ?
               AND g.module_id NOT IN ('train', 'rapid', 'clinical')

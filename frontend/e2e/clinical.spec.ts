@@ -31,7 +31,7 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     allowRecovery = true;
     await retry.click();
 
-    await expect(page.getByRole("button", { name: "Start learning set" })).toBeEnabled({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "Begin learning set" })).toBeEnabled({ timeout: 30_000 });
     await expect(recovery).toHaveCount(0);
     expect(activeChecks).toBeGreaterThanOrEqual(2);
   });
@@ -47,9 +47,9 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     });
 
     await page.goto("/practice");
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
+    await page.getByRole("button", { name: "Guided" }).click();
     const startResponse = page.waitForResponse((response) => response.url().endsWith("/api/backend/clinical/shift/start"));
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
     const started = await (await startResponse).json() as { session: { sessionId: string }; next: { item: { ecg_ref: string } } };
     const ecgRef = started.next.item.ecg_ref;
     expect(isOpaqueEcgCapability(ecgRef)).toBe(true);
@@ -68,27 +68,48 @@ test.describe("Mode 4 · Clinical Decisions", () => {
   });
 
   test("study-plan handoff is labeled accurately and an external return is discarded", async ({ page }) => {
-    await page.goto("/practice?focus=atrial_fibrillation&subskill=apply_in_context&returnTo=%2Fprofile%3Ftab%3Dplan");
-    await expect(page.getByRole("link", { name: "Return to study plan" })).toHaveAttribute("href", "/profile?tab=plan");
-    await expect(page.getByText(/From your study plan: apply/i)).toBeVisible();
+    await page.goto("/practice?focus=atrial_fibrillation&subskill=apply_in_context&lane=ed&returnTo=%2Fhome%3Fpanel%3Dplan");
+    await expect(page.getByRole("link", { name: "Return to study plan" })).toHaveAttribute("href", "/home?panel=plan");
+    const recommendation = page.getByRole("region", { name: "Recommended for you" });
+    await expect(recommendation).toContainText("Use a patient-care decision to strengthen Atrial fibrillation.");
+    await expect(recommendation).toContainText("Recommended from your study plan");
+    await expect(recommendation).toContainText("Focus: Atrial fibrillation");
 
     await page.goto("/practice?focus=atrial_fibrillation&subskill=apply_in_context&returnTo=https%3A%2F%2Fevil.test%2Fsteal");
     await expect(page.getByRole("link", { name: /^Return to/ })).toHaveCount(0);
+  });
+
+  test("does not silently replace a targeted application with unrelated saved Clinical work", async ({ page }) => {
+    const started = await page.request.post("/api/backend/clinical/shift/start", {
+      data: {
+        lane: "clinic",
+        tier: "learn",
+        length: 5,
+        focus: "normal_ecg",
+        subskill: "apply_in_context",
+      },
+    });
+    expect(started.ok()).toBeTruthy();
+
+    await page.goto("/practice?focus=atrial_fibrillation&subskill=apply_in_context&returnTo=%2Fhome%3Fpanel%3Dplan");
+    const conflict = page.getByRole("alert").filter({ hasText: "saved Clinical set for Normal ECG" });
+    await expect(conflict).toContainText("The recommended Atrial fibrillation application was not substituted into it.");
+    await expect(page.getByText(/From your study plan: apply Atrial fibrillation/i)).toHaveCount(0);
   });
 
   test("abandons a 10-case learning set with confirmation and restarts a shorter set", async ({ page }) => {
     const errors = collectConsoleErrors(page);
     await page.goto("/");
     await page.goto("/practice");
-    await expect(page.getByRole("heading", { name: /Use the ECG to make the next decision/ })).toBeVisible();
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
-    await page.getByRole("button", { name: "10 cases" }).click();
+    await expect(page.getByRole("heading", { name: "Practice decisions in realistic patient care" })).toBeVisible();
+    await page.getByRole("button", { name: "Guided" }).click();
+    await page.getByRole("button", { name: "10 patient cases" }).click();
     const largeStart = page.waitForRequest((request) => (
       new URL(request.url()).pathname === "/api/backend/clinical/shift/start"
     ));
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
     expect((await largeStart).postDataJSON()).toMatchObject({ lane: "clinic", tier: "learn", length: 10 });
-    await expect(page.getByText("Case 1 / 10", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Case 1 of 10", { exact: true })).toBeVisible({ timeout: 30_000 });
 
     await page.getByRole("button", { name: "Abandon learning set", exact: true }).click();
     const confirmation = page.getByRole("alertdialog", { name: "Abandon this Clinical learning set?" });
@@ -106,7 +127,7 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     await confirmation.getByRole("button", { name: "Keep working" }).click();
     await expect(confirmation).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Abandon learning set", exact: true })).toBeFocused();
-    await expect(page.getByText("Case 1 / 10", { exact: true })).toBeVisible();
+    await expect(page.getByText("Case 1 of 10", { exact: true })).toBeVisible();
 
     await page.getByRole("button", { name: "Abandon learning set", exact: true }).click();
     const abandonResponse = page.waitForResponse((response) => {
@@ -123,21 +144,21 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       feedbackItemId: null,
     });
 
-    await expect(page.getByRole("heading", { name: /Use the ECG to make the next decision/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Practice decisions in realistic patient care" })).toBeVisible();
     await expect(page.getByText(/Completed cases stay in your history/)).toBeVisible();
-    await expect(page.getByRole("button", { name: "Clinic", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByRole("button", { name: "Learn (untimed)" })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByRole("button", { name: "10 cases" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Outpatient clinic" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Guided" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "10 patient cases" })).toHaveAttribute("aria-pressed", "true");
     const activeAfterAbandon = await page.request.get("/api/backend/clinical/shift/active");
     expect((await activeAfterAbandon.json()).session).toBeNull();
 
-    await page.getByRole("button", { name: "5 cases" }).click();
+    await page.getByRole("button", { name: "5 patient cases" }).click();
     const shortStart = page.waitForRequest((request) => (
       new URL(request.url()).pathname === "/api/backend/clinical/shift/start"
     ));
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
     expect((await shortStart).postDataJSON()).toMatchObject({ lane: "clinic", tier: "learn", length: 5 });
-    await expect(page.getByText("Case 1 / 5", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Case 1 of 5", { exact: true })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole("button", { name: "Abandon learning set", exact: true })).toBeVisible();
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
@@ -147,15 +168,18 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     const errors = collectConsoleErrors(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/practice?focus=qtc_prolongation");
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Guided" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
 
     const shell = page.locator('[data-learning-workspace="true"]');
     const sessionBar = page.locator(".clinical-session-bar");
     const waveform = page.getByRole("region", { name: "Clinical ECG waveform" });
-    const disclosure = page.locator(".clinical-disclosure");
     await expect(shell).toHaveAttribute("data-phase", "orient", { timeout: 30_000 });
-    await expect(page.getByRole("complementary", { name: "Clinical first look" })).toHaveAttribute("data-response-phase", "orient");
+    const patientSnapshot = page.getByRole("region", { name: "Why this ECG was ordered" });
+    await expect(patientSnapshot).toBeVisible();
+    await expect(patientSnapshot).toContainText("Reason for ECG");
+    await expect(page.getByRole("navigation", { name: "Case 1 patient journey" })).toContainText("Presentation");
+    await expect(page.getByRole("complementary", { name: "Initial ECG interpretation" })).toHaveAttribute("data-response-phase", "orient");
 
     for (const viewport of [
       { width: 1440, height: 900 },
@@ -163,36 +187,32 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       { width: 1024, height: 768 },
     ]) {
       await page.setViewportSize(viewport);
-      const response = page.getByRole("complementary", { name: "Clinical first look" });
-      const [waveformBox, responseBox, disclosureBox] = await Promise.all([
+      const response = page.getByRole("complementary", { name: "Initial ECG interpretation" });
+      const [waveformBox, responseBox] = await Promise.all([
         waveform.boundingBox(),
         response.boundingBox(),
-        disclosure.boundingBox(),
       ]);
       expect(waveformBox).not.toBeNull();
       expect(responseBox).not.toBeNull();
-      expect(disclosureBox).not.toBeNull();
       expect(responseBox!.width).toBeGreaterThanOrEqual(350);
       expect(responseBox!.width).toBeLessThanOrEqual(365);
       expect(waveformBox!.width).toBeGreaterThan(responseBox!.width);
       expect(waveformBox!.x).toBeLessThan(responseBox!.x);
       expect(waveformBox!.y + waveformBox!.height).toBeLessThanOrEqual(viewport.height + 1);
       expect(responseBox!.y + responseBox!.height).toBeLessThanOrEqual(viewport.height + 1);
-      expect(disclosureBox!.height).toBeLessThanOrEqual(70);
       await expect(response).toHaveCSS("overflow-y", "auto");
       await expect(sessionBar).toHaveCSS("position", "sticky");
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
     }
 
     const orientWaveformBox = await waveform.boundingBox();
-    await page.getByLabel("Dominant finding").selectOption("uncertain");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByLabel("Dominant ECG pattern").selectOption("uncertain");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
     await expect(shell).toHaveAttribute("data-phase", "decide");
-    await expect(page.getByRole("complementary", { name: "Clinical first look" })).toHaveCount(0);
+    await expect(page.getByRole("complementary", { name: "Initial ECG interpretation" })).toHaveCount(0);
     const decisionRail = page.getByRole("complementary", { name: "Clinical context and decision" });
     await expect(decisionRail).toHaveAttribute("data-response-phase", "decide");
-    await expect(page.getByRole("region", { name: "Clinical context and decision prompt" })).toBeFocused();
+    await expect(page.getByRole("region", { name: "Clinical decision" })).toBeFocused();
     const decisionWaveformBox = await waveform.boundingBox();
     expect(decisionWaveformBox?.x).toBe(orientWaveformBox?.x);
     expect(decisionWaveformBox?.width).toBe(orientWaveformBox?.width);
@@ -207,8 +227,8 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     await expect(feedbackRail).toHaveAttribute("data-response-phase", "feedback");
 
     const tutorLayer = page.locator(".learning-tutor-layer");
-    const tutorTrigger = page.getByRole("button", { name: "Open tutor" });
-    const tutorDialog = page.getByRole("dialog", { name: "Case tutor" });
+    const tutorTrigger = page.getByRole("button", { name: "Ask Luna" });
+    const tutorDialog = page.getByRole("dialog", { name: "Ask Luna about this case" });
     await expect(tutorTrigger).toHaveAttribute("aria-expanded", "false");
     expect(await tutorLayer.boundingBox()).toBeNull();
     await tutorTrigger.click();
@@ -243,11 +263,11 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     const errors = collectConsoleErrors(page);
     await page.setViewportSize(viewports[0]);
     await page.goto("/practice");
-    await page.getByRole("button", { name: "Shift (timed)" }).click();
+    await page.getByRole("button", { name: "On shift" }).click();
     const startResponse = page.waitForResponse((response) => (
       response.url().endsWith("/api/backend/clinical/shift/start")
     ));
-    await page.getByRole("button", { name: "Start shift" }).click();
+    await page.getByRole("button", { name: "Start on-shift set" }).click();
     const startedResponse = await startResponse;
     expect(startedResponse.ok()).toBeTruthy();
     const started = await startedResponse.json() as {
@@ -261,10 +281,9 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     const clock = page.locator('.clinical-clock[data-clock-phase="orient"]');
     const waveform = page.getByRole("region", { name: "Clinical ECG waveform" });
     const stage = page.getByRole("region", { name: "Scrollable ECG tracing" });
-    const firstLook = page.getByRole("complementary", { name: "Clinical first look" });
-    const dominantFinding = page.getByLabel("Dominant finding");
-    const confidence = page.getByRole("group", { name: "First-look confidence" });
-    const commit = page.getByRole("button", { name: /Commit first look and reveal context/ });
+    const firstLook = page.getByRole("complementary", { name: "Initial ECG interpretation" });
+    const dominantFinding = page.getByLabel("Dominant ECG pattern");
+    const commit = page.getByRole("button", { name: "Continue to the clinical decision" });
 
     await expect(shell).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole("img", { name: /12-lead ECG/i })).toBeVisible();
@@ -279,7 +298,6 @@ test.describe("Mode 4 · Clinical Decisions", () => {
         waveform,
         firstLook,
         dominantFinding,
-        confidence,
         commit,
       })) {
         await expect(element, `${name} should be visible at ${viewport.width}x${viewport.height}`).toBeVisible();
@@ -317,10 +335,6 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       await dominantFinding.focus();
       await page.keyboard.press("ArrowDown");
       await expect(dominantFinding).not.toHaveValue("");
-      const medium = confidence.getByRole("button", { name: "Medium" });
-      await medium.focus();
-      await page.keyboard.press("Space");
-      await expect(medium).toHaveAttribute("aria-pressed", "true");
       await expect(commit).toBeEnabled();
       await commit.focus();
       await expect(commit).toBeFocused();
@@ -351,8 +365,9 @@ test.describe("Mode 4 · Clinical Decisions", () => {
 
     await page.goto("/practice");
     await expect(page.getByRole("img", { name: /12-lead ECG/i })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByText("Case 1 / 1", { exact: true })).toBeVisible();
-    await expect(page.locator(".clinical-context-mask")).toBeVisible();
+    await expect(page.getByText("Case 1 of 1", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Clinical decision" })).toHaveCount(0);
     await expect.poll(async () => {
       const response = await page.request.get("/api/backend/clinical/shift/active");
       const body = await response.json() as { current?: { clock?: { orientDeadlineAt?: string | null } } };
@@ -369,21 +384,29 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     ));
     await page.reload();
     expect((await resumedWaveform).ok()).toBeTruthy();
-    await expect(page.getByText("Case 1 / 1", { exact: true })).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(".clinical-context-mask")).toBeVisible();
+    await expect(page.getByText("Case 1 of 1", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Clinical decision" })).toHaveCount(0);
     const resumedOrient = await (await page.request.get("/api/backend/clinical/shift/active")).json() as { current: { item: { ecg_ref: string }; clock: { orientDeadlineAt: string } } };
     expect(resumedOrient.current.item.ecg_ref === started.next.item.ecg_ref).toBe(true);
     expect(resumedOrient.current.clock.orientDeadlineAt).toBe(orientDeadline);
-    await page.getByLabel("Dominant finding").selectOption("uncertain");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
-    await expect(page.locator(".clinical-stem")).toBeVisible();
+    await page.getByLabel("Dominant ECG pattern").selectOption("uncertain");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
+    await expect(page.getByRole("region", { name: "Clinical decision" })).toBeVisible();
+    // Context reveal intentionally does not start a timed decision phase. The
+    // viewer activates it only after the revealed response surface has painted
+    // and every required ECG has reported ready.
+    await expect.poll(async () => {
+      const response = await page.request.get("/api/backend/clinical/shift/active");
+      const body = await response.json() as { current?: { clock?: { decideDeadlineAt?: string | null } } };
+      return body.current?.clock?.decideDeadlineAt ?? null;
+    }).not.toBeNull();
     const contextState = await (await page.request.get("/api/backend/clinical/shift/active")).json() as { current: { clock: { decideDeadlineAt: string } } };
     const decideDeadline = contextState.current.clock.decideDeadlineAt;
     expect(decideDeadline).toBeTruthy();
 
     await page.reload();
-    await expect(page.locator(".clinical-stem")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("region", { name: "Clinical decision" })).toBeVisible({ timeout: 30_000 });
     const decideActive = await page.request.get("/api/backend/clinical/shift/active");
     const decideBody = await decideActive.json() as { state: string; current: { itemId: string; contextRevealed: boolean } };
     expect(decideBody.state).toBe("decide");
@@ -395,13 +418,12 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     const options = page.locator(".clinical-options").getByRole("button");
     await expect(options.first()).toBeVisible();
     await options.first().click();
-    await page.locator(".clinical-confidence").getByRole("button", { name: "Medium" }).click();
     await page.getByRole("button", { name: "Commit decision", exact: true }).click();
-    await expect(page.getByRole("heading", { name: /Good decision|Reconsider|Time/ })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("heading", { name: /Review your decision|Review the safest path/ })).toBeVisible({ timeout: 30_000 });
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: /Good decision|Reconsider|Time/ })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole("button", { name: "Finish shift" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /Review your decision|Review the safest path/ })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "Review shift" })).toBeVisible();
     const reportResponse = page.waitForResponse((response) => (
       /\/api\/backend\/clinical\/shift\/[^/]+\/report$/.test(new URL(response.url()).pathname)
       && response.ok()
@@ -411,10 +433,12 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       const body = request.postDataJSON() as { clinicalShiftContext?: unknown };
       return Boolean(body.clinicalShiftContext);
     });
-    await page.getByRole("button", { name: "Finish shift" }).click();
+    await page.getByRole("button", { name: "Review shift" }).click();
     const reportBody = await (await reportResponse).json() as {
       tutorContext: { contextId: string; sessionId: string; answerCount: number; version: string };
       performanceDomains: Record<string, unknown>;
+      reviewHref: string;
+      caseReviews: Array<{ reviewHref?: string; reviewAvailable: boolean }>;
       debrief: {
         clinicalEvidence: string;
         nextCaseProposal: { href: string; learningEvidence: string } | null;
@@ -432,20 +456,34 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     expect(debriefBody.viewerState).not.toHaveProperty("mastery");
     expect(reportBody.debrief.clinicalEvidence).toBe("formative_only");
     expect(reportBody.debrief.nextCaseProposal?.learningEvidence).toBe("formative_only");
-    expect(Object.keys(reportBody.performanceDomains).sort()).toEqual([
-      "clinicalApplicationDecision",
-      "confidenceCalibration",
-      "ecgRecognitionFirstLook",
-      "safety",
-    ]);
+    expect(reportBody.performanceDomains).toEqual(expect.objectContaining({
+      clinicalApplicationDecision: expect.any(Object),
+      ecgRecognitionFirstLook: expect.any(Object),
+      safety: expect.any(Object),
+    }));
     await expect(page.getByText("Shift complete", { exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "What this shift actually checked" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "ECG recognition / first look" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Clinical application / decision" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Safety", exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Confidence calibration" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Choose the next useful move" })).toBeVisible();
-    await expect(page.getByText(/Clinical cases remain formative|cross-concept claim is withheld/i)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review the reasoning behind your decisions" })).toBeVisible();
+    const setSummary = page.getByRole("region", { name: "Learning set summary" });
+    await expect(setSummary).toContainText("Cases completed");
+    await expect(setSummary).toContainText("Clinical decisions");
+    await expect(setSummary).toContainText("Safe decisions");
+    await expect(setSummary).toContainText("ECG reasoning");
+    await expect(page.getByRole("heading", { name: "Your cases" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "What to work on next" })).toBeVisible();
+    const aiCoach = page.getByRole("region", { name: "AI coach feedback" });
+    await expect(aiCoach).toBeVisible();
+    await expect(aiCoach.locator("dt")).toHaveCount(4);
+    await expect(aiCoach.locator("dl")).toContainText("Situation");
+    await expect(aiCoach.locator("dl")).toContainText("Behavior");
+    await expect(aiCoach.locator("dl")).toContainText("Impact");
+    await expect(aiCoach.locator("dl")).toContainText("Next step");
+    await expect(page.getByText(/These cases shape your personalized practice plan/i)).toBeVisible();
+    expect(reportBody.reviewHref).toBeTruthy();
+    await expect(page.getByRole("link", { name: "Review all ECGs and decisions" })).toHaveAttribute("href", reportBody.reviewHref);
+    const reviewableCase = reportBody.caseReviews.find((review) => review.reviewAvailable && review.reviewHref);
+    if (reviewableCase?.reviewHref) {
+      await expect(page.getByRole("link", { name: /Review case 1:/ })).toHaveAttribute("href", reviewableCase.reviewHref);
+    }
     if (reportBody.debrief.nextCaseProposal) {
       await expect(page.getByRole("link", { name: /Apply .* in a new case/ })).toHaveAttribute(
         "href",
@@ -455,7 +493,10 @@ test.describe("Mode 4 · Clinical Decisions", () => {
 
     await page.reload();
     await expect(page.getByText("Shift complete", { exact: true })).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(".clinical-report").getByText("1/1", { exact: true })).toBeVisible();
+    const completedMetric = page.getByRole("region", { name: "Learning set summary" })
+      .getByRole("article")
+      .filter({ hasText: "Cases completed" });
+    await expect(completedMetric.getByText("1/1", { exact: true })).toBeVisible();
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
 
@@ -463,19 +504,37 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     const errors = collectConsoleErrors(page);
     await page.goto("/practice?focus=qtc_prolongation");
 
-    await expect(page.getByRole("heading", { name: /Use the ECG to make the next decision/ })).toBeVisible();
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
+    await expect(page.getByRole("heading", { name: "Practice decisions in realistic patient care" })).toBeVisible();
+    await page.getByRole("button", { name: "Guided" }).click();
     const startResponse = page.waitForResponse((response) => response.url().endsWith("/api/backend/clinical/shift/start"));
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
     const started = await (await startResponse).json() as {
       session: { sessionId: string };
-      next: { itemId: string; item: { ecg_ref: string } };
+      next: {
+        itemId: string;
+        item: {
+          ecg_ref: string;
+          stem: string;
+          chips: Record<string, unknown>;
+          prompt?: unknown;
+          options?: unknown;
+          steps?: unknown;
+          machine_read?: unknown;
+        };
+      };
     };
     expect(isOpaqueEcgCapability(started.next.item.ecg_ref)).toBe(true);
+    expect(started.next.item.stem.trim().length).toBeGreaterThan(0);
+    expect(started.next.item.chips).toEqual(expect.objectContaining({ setting: expect.any(String) }));
+    for (const hidden of ["prompt", "options", "steps", "machine_read"]) {
+      expect(started.next.item).not.toHaveProperty(hidden);
+    }
     expect(await page.locator("body").evaluate((body, ecgRef) => body.innerHTML.includes(ecgRef), started.next.item.ecg_ref)).toBe(false);
 
     await expect(page.getByRole("img", { name: /12-lead ECG/i })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText("Learn — untimed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toContainText("Reason for ECG");
+    await expect(page.getByRole("region", { name: "Clinical decision" })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Conversational ECG tutor" })).toHaveCount(0);
 
     const precommitTutor = await page.request.post("/api/backend/tutor/message", {
@@ -495,9 +554,8 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     expect(precommitTutor.status()).toBe(409);
     expect((await precommitTutor.json()).detail.code).toBe("clinical_tutor_context_not_ready");
 
-    await page.getByLabel("Dominant finding").selectOption("uncertain");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByLabel("Dominant ECG pattern").selectOption("uncertain");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
 
     const options = page.locator(".clinical-options").getByRole("button");
     await expect(options.first()).toBeVisible();
@@ -518,14 +576,15 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       };
     };
 
-    await expect(page.getByRole("heading", { name: /Good decision|Reconsider/ })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole("button", { name: /Next case|Finish learning set/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review your decision" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("region", { name: "Decision review" })).toContainText("Best-supported answer");
+    await expect(page.getByRole("button", { name: /Continue to next case|Review learning set/ })).toBeVisible();
     await expect(page.locator(".clinical-clock")).toHaveAttribute("data-clock-phase", "feedback");
     await expect(page.locator(".clinical-clock")).toContainText("Decision submitted");
 
     const tutorRequest = page.waitForRequest((request) => request.url().endsWith("/api/backend/tutor/message"));
     const tutorResponse = page.waitForResponse((response) => response.url().endsWith("/api/backend/tutor/message"));
-    await page.getByRole("button", { name: "Open tutor" }).first().click();
+    await page.getByRole("button", { name: "Ask Luna" }).first().click();
     await page.getByLabel("Message the tutor").fill("Why was my decision graded this way?");
     await page.getByRole("button", { name: "Send" }).click();
     const groundedRequest = (await tutorRequest).postDataJSON() as Record<string, unknown> & {
@@ -570,52 +629,71 @@ test.describe("Mode 4 · Clinical Decisions", () => {
 
   test("ED Shift serves acute context and gives a fresh decision clock after first look", async ({ page }) => {
     const errors = collectConsoleErrors(page);
-    await page.goto("/practice");
-    await page.getByRole("button", { name: "Emergency dept" }).click();
-    await page.getByRole("button", { name: "Shift (timed)" }).click();
+    await page.goto("/practice?returnTo=%2Fhome%3Fpanel%3Dplan");
+    await page.getByRole("button", { name: "Emergency care" }).click();
+    await page.getByRole("button", { name: "On shift" }).click();
 
     const startResponse = page.waitForResponse((response) => response.url().endsWith("/api/backend/clinical/shift/start"));
-    await page.getByRole("button", { name: "Start shift" }).click();
+    await page.getByRole("button", { name: "Start on-shift set" }).click();
     const start = await (await startResponse).json() as { next: { clock: { orientSec: number; decideSec: number } } };
     const clock = page.locator(".clinical-clock");
     await expect(clock).toHaveAttribute("data-clock-phase", "orient", { timeout: 30_000 });
-    await expect(page.getByRole("heading", { name: /Good decision|Reconsider|Time/ })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: /Review your decision|Review the safest path/ })).toHaveCount(0);
 
-    await page.getByLabel("Dominant finding").selectOption("uncertain");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    const presentation = page.getByRole("region", { name: "Why this ECG was ordered" });
+    const initialVignette = ((await presentation.textContent()) ?? "").toLowerCase();
+    expect(initialVignette).not.toMatch(/pre-?operative|routine clearance|medication-review visit|clinic visit|outpatient/);
+    await page.getByLabel("Dominant ECG pattern").selectOption("uncertain");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
 
     await expect(clock).toHaveAttribute("data-clock-phase", "decide");
     const remaining = Number.parseInt((await clock.locator("span").last().textContent()) ?? "0", 10);
     expect(remaining).toBeGreaterThanOrEqual(start.next.clock.decideSec - 5);
     expect(remaining).toBeLessThanOrEqual(start.next.clock.decideSec);
-    const stem = ((await page.locator(".clinical-stem").textContent()) ?? "").toLowerCase();
-    expect(stem).not.toMatch(/pre-?operative|routine clearance|medication-review visit|clinic visit|outpatient/);
+    await expect(page.getByRole("region", { name: "Patient presentation" })).toBeVisible();
 
     const submit = page.getByRole("button", { name: "Commit decision", exact: true });
     await expect(submit).toBeDisabled();
     await expect(page.locator(".clinical-stepwise, .clinical-options, .clinical-fill-in").first()).toBeVisible();
-    await expect(page.getByRole("heading", { name: /Good decision|Reconsider|Time/ })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: /Review your decision|Review the safest path/ })).toHaveCount(0);
+
+    await expect(page.getByRole("link", { name: "Return to study plan" })).toHaveCount(0);
+    const returnButton = page.getByRole("button", { name: "Return to study plan" });
+    await returnButton.click();
+    const leaveConfirmation = page.getByRole("alertdialog", { name: "Leave this Clinical shift?" });
+    await expect(leaveConfirmation).toBeVisible();
+    await leaveConfirmation.getByRole("button", { name: "Keep working" }).click();
+    await expect(leaveConfirmation).toHaveCount(0);
+    await expect(returnButton).toBeFocused();
+
+    await returnButton.click();
+    const abandonResponse = page.waitForResponse((response) => (
+      /\/api\/backend\/clinical\/shift\/cs_[^/]+\/abandon$/.test(new URL(response.url()).pathname)
+    ));
+    await leaveConfirmation.getByRole("button", { name: "Return to study plan and abandon shift" }).click();
+    expect((await abandonResponse).ok()).toBeTruthy();
+    await expect(page).toHaveURL(/\/home\?panel=plan$/);
 
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
 
   test("timed decision clock decrements in epoch time and auto-submits at expiry", async ({ page }) => {
-    test.setTimeout(90_000);
+    // A longitudinal episode can intentionally carry a longer server-owned
+    // clock than a compact single-ECG decision.
+    test.setTimeout(240_000);
     const errors = collectConsoleErrors(page);
     // Clinical deadlines are absolute server timestamps, so this test waits for
     // the real authoritative deadline instead of forging expiry in the browser.
     await page.goto("/practice");
-    await page.getByRole("button", { name: "Emergency dept" }).click();
-    await page.getByRole("button", { name: "Shift (timed)" }).click();
+    await page.getByRole("button", { name: "Emergency care" }).click();
+    await page.getByRole("button", { name: "On shift" }).click();
 
     const startResponse = page.waitForResponse((response) => response.url().endsWith("/api/backend/clinical/shift/start"));
-    await page.getByRole("button", { name: "Start shift" }).click();
+    await page.getByRole("button", { name: "Start on-shift set" }).click();
     const start = await (await startResponse).json() as { next: { clock: { decideSec: number } } };
 
-    await page.getByLabel("Dominant finding").selectOption("uncertain");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByLabel("Dominant ECG pattern").selectOption("uncertain");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
 
     const clock = page.locator(".clinical-clock");
     await expect(clock).toHaveAttribute("data-clock-phase", "decide");
@@ -644,14 +722,15 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       if (response.status() === 409) conflicts.push(`${response.request().method()} ${new URL(response.url()).pathname}`);
     });
     await page.goto("/practice?focus=atrial_fibrillation&subskill=apply_in_context&support=independent&returnTo=/learn/tachyarrhythmias?scene=m06-s5");
-    await expect(page.locator(".selection-note").filter({ hasText: "From your lesson" })).toContainText(/use in context/i);
-    await page.getByRole("button", { name: "Emergency dept" }).click();
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Emergency care" }).click();
+    const recommendation = page.getByRole("region", { name: "Recommended for you" });
+    await expect(recommendation).toContainText("Use a patient-care decision to strengthen Atrial fibrillation.");
+    await expect(recommendation).toContainText("Recommended from your lesson");
+    await page.getByRole("button", { name: "Guided" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
 
-    await page.getByLabel("Dominant finding").selectOption("uncertain");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByLabel("Dominant ECG pattern").selectOption("uncertain");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
 
     const options = page.locator(".clinical-options").getByRole("button");
     await expect(options.first()).toBeVisible({ timeout: 30_000 });
@@ -689,19 +768,64 @@ test.describe("Mode 4 · Clinical Decisions", () => {
 
   test("runs a harness-checked PTB stepwise case through the first-look boundary", async ({ page }) => {
     const errors = collectConsoleErrors(page);
+    const stageMetadata = [
+      {
+        stage_kind: "ecg",
+        stage_title: "Initial rhythm assessment",
+        elapsed_label: "At presentation",
+        clinical_update: "The patient is placed on monitoring while the initial ECG is reviewed.",
+        data_points: [{ label: "Heart rate", value: "42 bpm", detail: "From the presenting assessment", trend: "stable", source: "source_metadata" }],
+      },
+      {
+        stage_kind: "reassessment",
+        stage_title: "Hemodynamic reassessment",
+        elapsed_label: "+20 minutes",
+        clinical_update: "Symptoms persist during observation, prompting a focused reassessment before handoff.",
+        data_points: [{ label: "Blood pressure", value: "92/58 mmHg", detail: "Repeat non-invasive measurement", trend: "down", source: "authored_simulation" }],
+      },
+    ] as const;
+    type WireStep = Record<string, unknown> & { stepIndex: number };
+    type WireNext = {
+      item?: {
+        stepwise_state?: {
+          committed: WireStep[];
+          active: WireStep | null;
+        };
+      };
+    };
+    type WirePayload = WireNext & { next?: WireNext };
+    await page.route(/\/api\/backend\/clinical\/shift\/(?:start|[^/]+\/(?:context|step))$/, async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as WirePayload;
+      const state = (payload.next ?? payload).item?.stepwise_state;
+      if (state) {
+        state.committed.forEach((step) => Object.assign(step, stageMetadata[step.stepIndex]));
+        if (state.active) Object.assign(state.active, stageMetadata[state.active.stepIndex]);
+      }
+      await route.fulfill({ response, json: payload });
+    });
     await page.goto("/practice?focus=av_block_third_degree");
-    await page.getByRole("button", { name: "Ward" }).click();
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Inpatient ward" }).click();
+    await page.getByRole("button", { name: "Guided" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
 
-    await expect(page.getByText("Real de-identified ECG · authored vignette", { exact: true })).toBeVisible();
-    await expect(page.getByText("Patient context authored for learning", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toContainText("Reason for ECG");
+    await expect(page.getByText("Real de-identified ECG · authored vignette", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Patient context authored for learning", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Ventricular rate?", { exact: true })).toHaveCount(0);
-    await page.getByLabel("Dominant finding").selectOption("conduction_or_interval");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByLabel("Dominant ECG pattern").selectOption("conduction_or_interval");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
 
     await expect(page.getByRole("group", { name: /Ventricular rate/ })).toBeVisible();
+    const journey = page.getByRole("navigation", { name: "Case 1 patient journey" });
+    const initialUpdate = page.getByRole("status", { name: "Initial rhythm assessment", exact: true });
+    await expect(initialUpdate).toBeVisible();
+    await expect(initialUpdate).toHaveAttribute("role", "status");
+    await expect(initialUpdate).toContainText("Heart rate");
+    await expect(initialUpdate).toContainText("42 bpm");
+    await expect(initialUpdate).toContainText("Source-verified comparison metadata");
+    await expect(journey.locator('[aria-current="step"]')).toContainText("ECG");
+    await expect(page.getByText("Hemodynamic reassessment", { exact: true })).toHaveCount(0);
     const stepGroups = page.locator(".clinical-stepwise fieldset");
     await expect(stepGroups).toHaveCount(1);
     await expect(page.getByText("P-wave to QRS relationship?", { exact: true })).toHaveCount(0);
@@ -713,6 +837,14 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     await expect(firstStepChoice).toBeDisabled();
     await expect(stepGroups).toHaveCount(2);
     await expect(page.getByRole("group", { name: /P-wave to QRS relationship/ })).toBeVisible();
+    const completedInitialUpdate = page.locator('.clinical-episode-update[data-status="committed"]', { hasText: "Initial rhythm assessment" });
+    const reassessmentUpdate = page.getByRole("status", { name: "Hemodynamic reassessment", exact: true });
+    await expect(completedInitialUpdate).toBeVisible();
+    await expect(completedInitialUpdate).not.toHaveAttribute("role", "status");
+    await expect(reassessmentUpdate).toBeVisible();
+    await expect(reassessmentUpdate).toContainText("92/58 mmHg");
+    await expect(reassessmentUpdate).toContainText("Authored simulation");
+    await expect(journey.locator('[aria-current="step"]')).toContainText("Reassessment");
     await expect(page.locator(".clinical-options")).toHaveCount(0);
     await stepGroups.nth(1).getByRole("button").first().click();
     await page.getByRole("button", { name: "Commit step and reveal clinical choices" }).click();
@@ -725,12 +857,12 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     });
     await page.getByRole("button", { name: "Commit decision", exact: true }).click();
 
-    await expect(page.getByText(/Mixed ECG checks update mastery separately/i)).toBeVisible();
-    await expect(page.getByRole("heading", { name: /Good decision/ })).toBeVisible();
-    const firstLookFeedback = page.getByRole("region", { name: "Your first look, before the vignette" });
+    await expect(page.getByRole("heading", { name: "Review your decision" })).toBeVisible();
+    const firstLookFeedback = page.getByRole("region", { name: "Your read after the ordering indication" });
     await expect(firstLookFeedback).toContainText("Conduction or interval abnormality");
-    await expect(firstLookFeedback).toContainText("Medium");
     await expect(firstLookFeedback).toContainText(/does not establish exact pathology recognition/i);
+    await page.getByText("How this case was assessed", { exact: true }).click();
+    await expect(page.getByText(/Real de-identified ECG.*Patient context authored for learning/i)).toBeVisible();
     expect(finalSubmissions).toBe(1);
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
@@ -757,13 +889,13 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     expect(started.next.item).not.toHaveProperty("fill_in_task");
 
     await page.goto("/practice");
-    await expect(page.getByText("Measure from the ECG", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
-    await page.getByLabel("Dominant finding").selectOption("conduction_or_interval");
-    await page.getByRole("button", { name: "Medium" }).click();
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Measure from the ECG", { exact: true })).toHaveCount(0);
+    await page.getByLabel("Dominant ECG pattern").selectOption("conduction_or_interval");
     const revealResponse = page.waitForResponse((response) => (
       /\/api\/backend\/clinical\/shift\/[^/]+\/context$/.test(new URL(response.url()).pathname)
     ));
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
     const revealed = await (await revealResponse).json() as {
       item: { fill_in_task: Record<string, unknown> };
     };
@@ -776,13 +908,13 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     });
     expect(revealed.item.fill_in_task).not.toHaveProperty("expected_feature");
     expect(revealed.item.fill_in_task).not.toHaveProperty("tolerance");
+    await expect(page.getByText("Measure from the ECG", { exact: true })).toBeVisible();
 
     const measurement = page.getByLabel("Estimated QT interval (ms)");
     await expect(measurement).toBeVisible();
     await measurement.fill("500");
     await expect(page.locator(".clinical-clock")).toHaveAttribute("data-clock-phase", "decide");
-    await expect(page.getByRole("button", { name: "Commit decision", exact: true })).toBeDisabled();
-    await page.locator(".clinical-confidence").getByRole("button", { name: "Medium" }).click();
+    await expect(page.getByRole("button", { name: "Commit decision", exact: true })).toBeEnabled();
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(measurement).toBeVisible();
     const measurementBox = await measurement.boundingBox();
@@ -812,7 +944,7 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       subskill: "measure",
       formativeOnly: true,
     }));
-    await expect(page.getByRole("heading", { name: /Good decision/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review your decision" })).toBeVisible();
     await expect(page.getByText(/Practice saved.*Prolonged QTc.*measure/i)).toBeVisible();
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
@@ -836,15 +968,13 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     expect(started.next.item).not.toHaveProperty("matching_task");
 
     await page.goto("/practice");
-    await expect(page.getByText("Match evidence to meaning", { exact: true })).toBeVisible({ timeout: 30_000 });
-    await page.getByLabel("Dominant finding").selectOption("chamber_or_voltage");
-    await page.getByRole("group", { name: "First-look confidence" })
-      .getByRole("button", { name: "High", exact: true })
-      .click();
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("Match evidence to meaning", { exact: true })).toHaveCount(0);
+    await page.getByLabel("Dominant ECG pattern").selectOption("chamber_or_voltage");
     const revealResponse = page.waitForResponse((response) => (
       /\/api\/backend\/clinical\/shift\/[^/]+\/context$/.test(new URL(response.url()).pathname)
     ));
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
     const revealed = await (await revealResponse).json() as {
       item: {
         matching_task: {
@@ -854,6 +984,7 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       };
     };
     const publicTask = revealed.item.matching_task;
+    await expect(page.getByText("Match evidence to meaning", { exact: true })).toBeVisible();
     expect(publicTask.choices).toHaveLength(3);
     expect(publicTask.rows).toHaveLength(3);
     for (const row of publicTask.rows) {
@@ -882,11 +1013,6 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       await expect(select).toHaveValue(target.id);
       matches[row.id] = target.id;
     }
-    await expect(submit).toBeDisabled();
-    const confidence = page.locator(".clinical-confidence").getByRole("button", { name: "Medium" });
-    await confidence.focus();
-    await page.keyboard.press("Space");
-    await expect(confidence).toHaveAttribute("aria-pressed", "true");
     await expect(submit).toBeEnabled();
 
     const answerRequest = page.waitForRequest((request) => (
@@ -896,9 +1022,9 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       /\/api\/backend\/clinical\/shift\/[^/]+\/answer$/.test(new URL(response.url()).pathname)
     ));
     await submit.click();
-    expect((await answerRequest).postDataJSON()).toMatchObject({
-      answer: { matches, confidence: 3 },
-    });
+    const submitted = (await answerRequest).postDataJSON() as { answer: Record<string, unknown> };
+    expect(submitted).toMatchObject({ answer: { matches } });
+    expect(submitted.answer).not.toHaveProperty("confidence");
     const graded = await (await answerResponse).json() as {
       grade: {
         score: number;
@@ -911,7 +1037,7 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     expect(graded.grade.matchingCorrect).toBe(true);
     expect(graded.grade.matchingResults.every((result) => result.correct)).toBe(true);
     expect(graded.grade.competencyReceipts).toEqual([]);
-    await expect(page.getByRole("heading", { name: /Evidence sorted/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review your decision" })).toBeVisible();
     const review = page.getByRole("region", { name: "Evidence boundary review" });
     await expect(review).toContainText("Supported by this ECG packet");
     await expect(review).toContainText("Provided only by the authored vignette");
@@ -927,11 +1053,12 @@ test.describe("Mode 4 · Clinical Decisions", () => {
         liveGradeRequests.push(request.url());
       }
     });
-    await page.goto("/practice?focus=right_bundle_branch_block");
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
+    await page.goto("/practice?focus=right_bundle_branch_block&subskill=localize");
+    await page.getByRole("button", { name: "Guided" }).click();
     const startResponse = page.waitForResponse((response) => response.url().endsWith("/api/backend/clinical/shift/start"));
-    await page.getByRole("button", { name: "Start learning set" }).click();
-    const started = await (await startResponse).json() as { session: { sessionId: string }; next: { item: { ecg_ref: string } } };
+    await page.getByRole("button", { name: "Begin learning set" }).click();
+    const started = await (await startResponse).json() as { session: { sessionId: string }; next: { item: { ecg_ref: string; question_type: string } } };
+    expect(started.next.item.question_type).toBe("click");
     expect(isOpaqueEcgCapability(started.next.item.ecg_ref)).toBe(true);
     expect(await page.locator("body").evaluate((body, ecgRef) => body.innerHTML.includes(ecgRef), started.next.item.ecg_ref)).toBe(false);
     const qrs = await strongestWaveformPoint(
@@ -943,9 +1070,8 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       { mode: "clinical", sessionId: started.session.sessionId },
     );
 
-    await page.getByLabel("Dominant finding").selectOption("conduction_or_interval");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByLabel("Dominant ECG pattern").selectOption("conduction_or_interval");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
     await page.getByText("Keyboard / precise-entry alternative").click();
     await page.getByLabel("Keyboard task lead").selectOption("V1");
     await page.getByLabel("Time cursor (seconds)").fill(qrs.timeSec.toFixed(3));
@@ -964,7 +1090,8 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     const submitted = (await answerRequest).postDataJSON() as { answer: { click: { lead: string; timeSec: number } } };
     expect(submitted.answer.click.lead).toBe("V1");
     expect(submitted.answer.click.timeSec).toBeGreaterThanOrEqual(0);
-    await expect(page.getByRole("heading", { name: /Good decision|Reconsider/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review your decision" })).toBeVisible();
+    await page.getByText("How this case was assessed", { exact: true }).click();
     await expect(page.locator(".clinical-axis-progress").first()).toBeVisible();
     await expect(page.locator(".clinical-axis .mastery-bar i")).toHaveCount(0);
 
@@ -976,41 +1103,42 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     await page.goto("/practice?focus=ectopy&subskill=apply_in_context&returnTo=/learn/rhythm-ectopy?scene=M03.S14");
 
     await expect(page.locator(".warning").filter({ hasText: "No eligible formative Clinical case in Clinic currently checks ectopy" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Start learning set" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Begin learning set" })).toBeDisabled();
     await expect(page.getByRole("link", { name: "Return to lesson" })).toHaveAttribute("href", "/learn/rhythm-ectopy?scene=M03.S14");
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
 
   test("guided handoff availability is derived from the live Clinical bank", async ({ page }) => {
     await page.goto("/practice?focus=supraventricular_tachycardia&subskill=apply_in_context&lane=ed");
-    const handoffNote = page.locator(".selection-note").filter({ hasText: "From your selected focus" });
+    const handoffNote = page.getByRole("region", { name: "Recommended for you" });
     await expect(handoffNote).toContainText(/supraventricular tachycardia/i);
-    await expect(handoffNote).toContainText("The first case focuses on");
+    await expect(handoffNote).toContainText(/selected focus.*first case will honor that focus/i);
     await expect(page.locator(".warning").filter({ hasText: "No eligible formative Clinical case" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Emergency dept" })).toHaveAttribute("aria-pressed", "true");
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
-    const start = page.getByRole("button", { name: "Start learning set" });
+    await expect(page.getByRole("button", { name: "Emergency care" })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "Guided" }).click();
+    const start = page.getByRole("button", { name: "Begin learning set" });
     await expect(start).toBeEnabled();
     await start.click();
-    await expect(page.getByText("Real de-identified ECG · authored vignette", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toContainText("Reason for ECG");
   });
 
   test("keeps the ECG first and the progressive case usable at 320px", async ({ page }) => {
     const errors = collectConsoleErrors(page);
     await page.setViewportSize({ width: 320, height: 780 });
     await page.goto("/practice?length=5");
-    await expect(page.getByRole("button", { name: "Learn (untimed)" })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByRole("button", { name: "5 cases" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Guided" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "5 patient cases" })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByRole("button", { name: /Critical care/ })).toHaveCount(0);
-    await expect(page.getByText(/Critical-care practice will open only after validated acute-rhythm ECGs/)).toBeVisible();
+    await expect(page.getByRole("button", { name: /Outpatient clinic|Inpatient ward|Emergency care/ })).toHaveCount(3);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
-    await page.getByRole("button", { name: "Start learning set" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
 
     const waveform = page.getByRole("region", { name: "Clinical ECG waveform" });
-    const firstLook = page.getByRole("complementary", { name: "Clinical first look" });
+    const firstLook = page.getByRole("complementary", { name: "Initial ECG interpretation" });
     await expect(waveform).toBeVisible({ timeout: 30_000 });
     await expect(firstLook).toBeVisible();
-    await expect(page.locator(".clinical-stem, .clinical-options")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Why this ECG was ordered" })).toContainText("Reason for ECG");
+    await expect(page.locator(".clinical-options")).toHaveCount(0);
     const [waveformBox, firstLookBox] = await Promise.all([
       waveform.boundingBox(),
       firstLook.boundingBox(),
@@ -1041,12 +1169,11 @@ test.describe("Mode 4 · Clinical Decisions", () => {
       targets: violation.nodes.map((node) => node.target),
     }))).toEqual([]);
 
-    await page.getByLabel("Dominant finding").selectOption("uncertain");
-    await page.getByRole("button", { name: "Medium" }).click();
-    await page.getByRole("button", { name: /Commit first look and reveal context/ }).click();
+    await page.getByLabel("Dominant ECG pattern").selectOption("uncertain");
+    await page.getByRole("button", { name: "Continue to the clinical decision" }).click();
     const decision = page.getByRole("complementary", { name: "Clinical context and decision" });
     await expect(decision).toBeVisible();
-    await expect(page.getByRole("region", { name: "Clinical context and decision prompt" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Clinical decision" })).toBeVisible();
     const decisionBox = await decision.boundingBox();
     expect(decisionBox).not.toBeNull();
     expect(decisionBox!.x + decisionBox!.width).toBeLessThanOrEqual(320);

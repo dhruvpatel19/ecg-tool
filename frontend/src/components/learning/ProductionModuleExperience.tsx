@@ -712,7 +712,7 @@ export function ProductionModuleExperience({ module, totalModules, priorModule, 
             {loadingCase ? <div className={`panel pad guided-loading ${styles.viewerLoading}`}>Loading ECG…</div> : null}
             {caseError ? <div className="warning mode-recovery-notice" role="alert"><span>This ECG could not load. You can retry or continue the lesson without scoring this step.</span><button className="button subtle small" type="button" onClick={() => setExcludedCaseId(caseSummary?.caseId ?? `retry-${Date.now()}`)}><RotateCcw size={15} aria-hidden="true" /> Retry ECG</button></div> : null}
             {!loadingCase && (packet || caseError) && eligibility.reasons.length ? <details className={`${styles.eligibility} production-eligibility ${eligibility.mode}`}><summary>About this ECG check</summary><p>{eligibilityMessage(eligibility)}</p></details> : null}
-            {caseSummary && packet ? <ECGViewer ecgRef={caseSummary.caseId} waveformScope={{ kind: "guided", lessonId: scene.caseContract.selectorLessonId }} actions={viewerActions} onCoordinate={setSelectedPoint} medianBeats={packet.ptbxl_plus.median_beats} task={viewerTask} onTaskEvidence={setViewerTaskEvidence} guidedContext={guidedContext} /> : null}
+            {caseSummary && packet ? <ECGViewer ecgRef={caseSummary.caseId} waveformScope={{ kind: "guided", lessonId: scene.caseContract.selectorLessonId }} actions={viewerActions} onCoordinate={setSelectedPoint} medianBeats={packet.ptbxl_plus.median_beats} task={viewerTask} onTaskEvidence={setViewerTaskEvidence} onTaskReset={() => setViewerTaskEvidence(null)} guidedContext={guidedContext} /> : null}
           </section> : <section className={styles.mainTask} data-guided-region="task">{activeTaskContent}</section>}
         </WaveformPane>
 

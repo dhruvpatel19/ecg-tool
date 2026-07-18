@@ -67,7 +67,7 @@ export default function LoginPage() {
 }
 
 export function safePostAuthPath(requested: string | null): string {
-  return safeAppPath(requested, "/dashboard");
+  return safeAppPath(requested, "/home");
 }
 
 function LoginScreen() {
@@ -98,6 +98,7 @@ function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [busy, setBusy] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const [challenge, setChallenge] = useState<PendingChallenge | null>(null);
   const [verificationCode, setVerificationCode] = useState("");
   const [correctingEmail, setCorrectingEmail] = useState(false);
@@ -118,13 +119,17 @@ function LoginScreen() {
   const verificationCodeRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
     setMode(requestedMode);
   }, [requestedMode]);
 
   useLayoutEffect(() => {
     if (!hasVerificationLink || typeof window === "undefined") return;
     const cleanParams = new URLSearchParams();
-    if (next !== "/dashboard") cleanParams.set("next", next);
+    if (next !== "/home") cleanParams.set("next", next);
     const cleanQuery = cleanParams.toString();
     window.history.replaceState(window.history.state, "", cleanQuery ? `/login?${cleanQuery}` : "/login");
   }, [hasVerificationLink, next]);
@@ -159,7 +164,7 @@ function LoginScreen() {
   function authHref(nextMode: AuthMode): string {
     const params = new URLSearchParams();
     if (nextMode === "register") params.set("mode", "register");
-    if (next !== "/dashboard") params.set("next", next);
+    if (next !== "/home") params.set("next", next);
     const query = params.toString();
     return query ? `/login?${query}` : "/login";
   }
@@ -607,7 +612,7 @@ function LoginScreen() {
             </div>
           </section>
         ) : challenge && correctingEmail && challenge.kind === "email_verification" ? (
-          <form className={styles.authForm} onSubmit={replacePendingEmail} noValidate>
+          <form className={styles.authForm} action="/login" method="post" onSubmit={replacePendingEmail} noValidate>
             <div className={styles.field}>
               <label htmlFor="auth-replacement-email">Replacement email</label>
               <input
@@ -652,7 +657,7 @@ function LoginScreen() {
               <small className={styles.fieldHint} id="auth-replacement-password-note">Enter the password you just chose.</small>
               {fieldErrors.password ? <small className={styles.fieldError} id="auth-replacement-password-error">{fieldErrors.password}</small> : null}
             </div>
-            <button className={styles.submitButton} type="submit" disabled={busy}>
+            <button className={styles.submitButton} type="submit" disabled={busy || !hydrated}>
               <MailCheck size={17} aria-hidden="true" /> {busy ? "Updating…" : "Update email and send code"}
             </button>
             <div className={styles.challengeActions}>
@@ -661,7 +666,7 @@ function LoginScreen() {
             </div>
           </form>
         ) : challenge ? (
-          <form className={styles.authForm} onSubmit={confirmChallenge} noValidate>
+          <form className={styles.authForm} action="/login" method="post" onSubmit={confirmChallenge} noValidate>
             <div className={styles.field}>
               <label htmlFor="auth-verification-code">
                 Six-digit verification code
@@ -717,7 +722,7 @@ function LoginScreen() {
                 <small className={styles.fieldHint} id="auth-verification-password-note">Re-enter your password to finish creating your account.</small>
                 {fieldErrors.password ? <small className={styles.fieldError} id="auth-verification-password-error">{fieldErrors.password}</small> : null}
             </div>
-            <button className={styles.submitButton} type="submit" disabled={busy}>
+            <button className={styles.submitButton} type="submit" disabled={busy || !hydrated}>
               <MailCheck size={17} aria-hidden="true" /> {busy ? "Verifying…" : "Verify email"}
             </button>
             <div className={styles.challengeActions}>
@@ -729,7 +734,7 @@ function LoginScreen() {
             </div>
           </form>
         ) : (
-          <form className={styles.authForm} id="auth-panel" role="tabpanel" aria-labelledby={`auth-tab-${mode}`} onSubmit={onSubmit} noValidate>
+          <form className={styles.authForm} id="auth-panel" role="tabpanel" aria-labelledby={`auth-tab-${mode}`} action="/login" method="post" onSubmit={onSubmit} noValidate>
             {mode === "login" ? <div className={styles.field}>
               <label htmlFor="auth-email-signin">Email</label>
               <input
@@ -834,7 +839,7 @@ function LoginScreen() {
               </>
             ) : null}
 
-            <button className={styles.submitButton} type="submit" disabled={busy}>
+            <button className={styles.submitButton} type="submit" disabled={busy || !hydrated}>
               {mode === "login" ? <LogIn size={17} aria-hidden="true" /> : <UserPlus size={17} aria-hidden="true" />}
               {busy ? "Please wait..." : mode === "login" ? "Sign in" : "Create account"}
             </button>

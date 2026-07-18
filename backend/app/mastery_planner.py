@@ -15,14 +15,17 @@ from urllib.parse import quote
 from .assessment_contracts import rapid_synthesis_contract_available
 from .objectives import OBJECTIVES, ObjectiveDefinition
 from .ontology import concept_label
+from .rapid_rhythm_supplement import RUNTIME_OBJECTIVE_IDS
 from .retention import DURABLE_DISTINCT_SUCCESSFUL_ECGS, competency_state
 from .subskill_tasks import training_independent_receipt_available
 
 
-_STUDY_PLAN_RETURN = quote("/profile?tab=plan", safe="")
+_STUDY_PLAN_RETURN = quote("/home?panel=plan", safe="")
 _TRAINING_STAGE_LENGTH = 25
 _RAPID_STAGE_LENGTH = 10
+_BASELINE_RAPID_STAGE_LENGTH = 5
 _RAPID_PACES = {"untimed", "ward", "emergency"}
+_EMERGENCY_RHYTHM_CONCEPTS = RUNTIME_OBJECTIVE_IDS
 
 
 # Each destination is an authored, routable scene in the production Guided
@@ -47,6 +50,10 @@ _GUIDED_REMEDIATION_DESTINATIONS: dict[str, tuple[str, str, str]] = {
     "atrial_flutter": ("tachyarrhythmias", "m06-s4", "Find flutter hidden behind 2:1 conduction"),
     "supraventricular_tachycardia": ("tachyarrhythmias", "m06-s2", "Separate sinus tachycardia from regular narrow SVT"),
     "wide_complex_tachycardia": ("tachyarrhythmias", "m06-s7", "Reason safely through regular wide-complex tachycardia"),
+    "ventricular_tachycardia": ("tachyarrhythmias", "m06-s7", "Reason safely through ventricular tachycardia"),
+    "polymorphic_ventricular_tachycardia": ("tachyarrhythmias", "m06-s7", "Distinguish polymorphic ventricular tachycardia from close mimics"),
+    "ventricular_flutter": ("tachyarrhythmias", "m06-s7", "Compare organized ventricular flutter with ventricular fibrillation"),
+    "ventricular_fibrillation": ("tachyarrhythmias", "m06-s7", "Recognize ventricular fibrillation and respect the patient-state boundary"),
     "qrs_duration": ("ventricular-conduction", "m05-s0", "Keep QRS width separate from morphology"),
     "right_bundle_branch_block": ("ventricular-conduction", "m05-s2", "Prove RBBB with paired-lead anchors"),
     "incomplete_right_bundle_branch_block": ("ventricular-conduction", "m05-s2", "Use width and paired-lead RBBB anchors"),
@@ -367,6 +374,24 @@ def _stage(
             "receiptSubskill": subskill,
             "evidenceKind": "independent_transfer",
         }
+    # The first Rapid stage is a bounded diagnostic, not a full study session.
+    # Keep it short and untimed so an evidence-free learner can establish a
+    # useful starting point without their longer-session or urgency preference
+    # turning onboarding into a high-pressure assessment. Once independent
+    # evidence exists, the learner's saved Rapid length and pace apply again.
+    effective_rapid_length = (
+        _BASELINE_RAPID_STAGE_LENGTH
+        if stage_kind == "baseline"
+        else rapid_length
+    )
+    effective_rapid_pace = (
+        "untimed"
+        if stage_kind == "baseline"
+        else "ward"
+        if subskill == "synthesize" and rapid_pace == "emergency"
+        else rapid_pace
+    )
+    emergency_rhythm = concept in _EMERGENCY_RHYTHM_CONCEPTS
     return {
         "order": order,
         "stageKind": stage_kind,
@@ -375,23 +400,26 @@ def _stage(
         "title": (
             f"Build {label} · complete-read synthesis"
             if subskill == "synthesize"
+            else f"Check {label} · emergency-rhythm recognition"
+            if emergency_rhythm
             else f"Check {label} · independent recognition"
         ),
         "purpose": (
             "Complete every step of the systematic read, commit an evidence-limited synthesis, and avoid unsupported calls on an unannounced real ECG."
             if subskill == "synthesize"
+            else "Name the rhythm on a new source-author-labelled single-lead fragment. Patient state and management remain separately contextualized and formative."
+            if emergency_rhythm
             else "Choose the finding on an unannounced real ECG. Both correct checks and focused misses shape what you practice next."
         ),
         "href": (
             f"/rapid?focus={quote(concept)}&receiptConcept={quote(objective)}"
-            f"&subskill={quote(subskill)}&suggestedLength={rapid_length}"
-            f"&pace={quote('ward' if subskill == 'synthesize' and rapid_pace == 'emergency' else rapid_pace)}"
+            f"&subskill={quote(subskill)}&suggestedLength={effective_rapid_length}"
+            f"&pace={quote(effective_rapid_pace)}"
+            f"{'&practiceMode=emergency' if emergency_rhythm else ''}"
             f"&returnTo={_STUDY_PLAN_RETURN}"
         ),
-        "suggestedLength": rapid_length,
-        "suggestedPace": (
-            "ward" if subskill == "synthesize" and rapid_pace == "emergency" else rapid_pace
-        ),
+        "suggestedLength": effective_rapid_length,
+        "suggestedPace": effective_rapid_pace,
         "receiptConcept": objective,
         "receiptSubskill": subskill,
         "evidenceKind": "independent_transfer",

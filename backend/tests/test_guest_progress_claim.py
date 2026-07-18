@@ -106,6 +106,27 @@ def _seed_every_mode(store: LearningStore, guest_id: str, user_id: str) -> dict[
     store.ensure_profile(guest_id, "Guest learner")
     store.update_learning_preferences(guest_id, {"guidanceLevel": "minimal"})
     with store.connect() as conn:
+        for owner, suffix in ((user_id, "account"), (guest_id, "guest")):
+            conn.execute(
+                "INSERT INTO learner_calendar_settings ("
+                "learner_id, time_zone, week_starts_on, created_at, updated_at"
+                ") VALUES (?, 'UTC', 0, ?, ?)",
+                (owner, _NOW, _NOW),
+            )
+            conn.execute(
+                "INSERT INTO study_calendar_items ("
+                "item_id, learner_id, source, title, notes, scheduled_date, "
+                "status, client_request_id, revision, created_at, updated_at"
+                ") VALUES (?, ?, 'manual', ?, '', '2026-07-20', 'scheduled', ?, 1, ?, ?)",
+                (
+                    str(uuid.uuid5(uuid.NAMESPACE_URL, f"calendar-{owner}")),
+                    owner,
+                    f"{suffix.title()} study block",
+                    f"calendar-{suffix}",
+                    _NOW,
+                    _NOW,
+                ),
+            )
         conn.execute(
             "UPDATE objective_mastery SET mastery=.70, attempts=2, correct=1, "
             "high_confidence_wrong=0, last_practiced_at=? "
@@ -294,6 +315,8 @@ def _seed_every_mode(store: LearningStore, guest_id: str, user_id: str) -> dict[
 
 _GUEST_DIRECT_TABLES = (
     "learner_preferences",
+    "learner_calendar_settings",
+    "study_calendar_items",
     "subskill_retention_events",
     "guided_learning_events",
     "objective_mastery",

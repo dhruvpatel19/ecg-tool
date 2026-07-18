@@ -34,10 +34,13 @@ def _start(client: TestClient, *, length: int = 1) -> tuple[str, str, str]:
     )
     assert response.status_code == 200, response.text
     payload = response.json()
+    session_id = payload["session"]["sessionId"]
     item_id = payload["next"]["itemId"]
-    authored = clinical_item_store.get_item(item_id)
+    authored = clinical_item_store.get_item(
+        store.get_shift_session(session_id)["pendingItemId"]
+    )
     assert authored is not None
-    return payload["session"]["sessionId"], item_id, authored.ecg_id
+    return session_id, item_id, authored.ecg_id
 
 
 def _reveal(client: TestClient, session_id: str, item_id: str) -> dict:
@@ -388,7 +391,9 @@ def test_stale_presentation_expires_once_and_active_resume_rotates_case() -> Non
         assert resumed.status_code == 200, resumed.text
         assert resumed.json()["state"] == "orient"
         replacement_id = resumed.json()["current"]["itemId"]
-        replacement = clinical_item_store.get_item(replacement_id)
+        replacement = clinical_item_store.get_item(
+            store.get_shift_session(session_id)["pendingItemId"]
+        )
         assert replacement is not None and replacement.ecg_id != first_ecg
         assert client.get("/clinical/shift/active").status_code == 200
         with store.connect() as conn:

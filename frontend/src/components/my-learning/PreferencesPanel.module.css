@@ -1,7 +1,27 @@
 .form {
   min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 14px;
+}
+
+.form > *,
+.intro > *,
+.grid > *,
+.stack > *,
+.card > *,
+.choiceGroup > *,
+.saveBar > *,
+.saveBar > div:last-child > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.intro,
+.card,
+.choiceGroup,
+.saveBar {
+  overflow-wrap: anywhere;
 }
 
 .intro {
@@ -158,11 +178,13 @@
 .lengthChoices input,
 .optionChoices input {
   position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  opacity: 0;
 }
 
 .lengthChoices span,
@@ -230,8 +252,8 @@
 }
 
 .toggleCard input {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   margin: 1px 0 0;
   accent-color: var(--accent);
 }
@@ -388,5 +410,9 @@
 
   .lengthChoices {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .saveBar > div:last-child {
+    grid-template-columns: 1fr;
   }
 }

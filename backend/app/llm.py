@@ -44,8 +44,19 @@ _CONCEPT_CUES: dict[str, list[str]] = {
     "atrial_fibrillation": ["atrial fibrillation", "afib", "a-fib"],
     "atrial_flutter": ["atrial flutter", "flutter waves"],
     "supraventricular_tachycardia": ["supraventricular tachycardia", "svt"],
+    "polymorphic_ventricular_tachycardia": [
+        "polymorphic ventricular tachycardia", "polymorphic vt", "pmvt",
+    ],
+    "ventricular_tachycardia": [
+        "ventricular tachycardia", "monomorphic ventricular tachycardia",
+        "ventricular tach", "vt",
+    ],
+    "ventricular_flutter": ["ventricular flutter", "vfl"],
+    "ventricular_fibrillation": [
+        "ventricular fibrillation", "v-fib", "v fib", "vf",
+    ],
     "wide_complex_tachycardia": [
-        "wide complex tachycardia", "wide-complex tachycardia", "ventricular tachycardia", "wct", "vt",
+        "wide complex tachycardia", "wide-complex tachycardia", "wct",
     ],
     "bradycardia": ["bradycardia", "slow ventricular rate", "slow heart rate"],
     "av_block_first_degree": [
@@ -178,6 +189,13 @@ def _detect_concepts(text: str) -> list[str]:
     for concept, cues in _CONCEPT_CUES.items():
         if any(re.search(r"(?<![a-z])" + re.escape(cue.strip()) + r"(?![a-z])", lowered) for cue in cues):
             hits.append(concept)
+    # Polymorphic VT is the more specific morphology. Its full name also
+    # contains the broader VT cue, so keep one precise teaching target.
+    if (
+        "polymorphic_ventricular_tachycardia" in hits
+        and "ventricular_tachycardia" in hits
+    ):
+        hits.remove("ventricular_tachycardia")
     return hits
 
 
@@ -284,6 +302,26 @@ _GENERAL_TEACHING: dict[str, str] = {
     "atrial_fibrillation": (
         "AF is supported by absent consistent organized P waves plus an irregularly irregular ventricular response. Frequent ectopy, "
         "flutter with variable block, and artifact are important mimics, so use both atrial and R–R evidence."
+    ),
+    "ventricular_tachycardia": (
+        "Ventricular tachycardia is a run of ventricular-origin beats, usually producing a wide-complex tachycardia. "
+        "A consistent QRS shape supports monomorphic VT; AV dissociation and capture or fusion beats are additional clues. "
+        "The tracing identifies an electrical pattern but does not, by itself, establish a pulse or clinical stability."
+    ),
+    "polymorphic_ventricular_tachycardia": (
+        "Polymorphic ventricular tachycardia has a rapid ventricular rhythm whose QRS shape and axis vary from beat to beat. "
+        "Torsades de pointes is a specific polymorphic VT associated with a prolonged preceding QT; a short rhythm strip "
+        "without that preceding evidence should be labelled polymorphic VT rather than assumed to be torsades."
+    ),
+    "ventricular_flutter": (
+        "Ventricular flutter is a very rapid, comparatively regular ventricular pattern in which QRS and T waves merge into "
+        "a near-sinusoidal contour. It can resemble rapid VT or transition toward ventricular fibrillation, so morphology and "
+        "signal quality must be checked; the waveform alone does not establish a pulse or clinical stability."
+    ),
+    "ventricular_fibrillation": (
+        "Ventricular fibrillation is disorganized ventricular electrical activity without reproducible QRS complexes. "
+        "Motion artifact and very rapid polymorphic ventricular rhythms can mimic it, so confirm signal quality and pattern "
+        "across the strip; the tracing alone does not reveal the patient's pulse or clinical stability."
     ),
     "myocardial_infarction": (
         "An ECG pattern can raise concern for infarction, but acuity and patient diagnosis require symptoms, comparison/serial change, "
@@ -632,25 +670,41 @@ class MockProvider:
             bridge = debrief.get("crossConceptBridge") if isinstance(debrief.get("crossConceptBridge"), dict) else None
             next_case = debrief.get("nextCaseProposal") if isinstance(debrief.get("nextCaseProposal"), dict) else None
             completed = server_context.get("session") if isinstance(server_context.get("session"), dict) else {}
+            situation = (
+                f"You completed {completed.get('answered', 0)} "
+                f"{completed.get('lane', 'clinical')} case(s) and committed an ECG-informed care decision in each."
+            )
             if priority:
-                pattern = (
-                    f"Across the {completed.get('answered', 0)} completed cases, "
-                    f"{priority.get('label') or priority.get('concept')} is the highest-priority evidenced concept: "
-                    f"{priority.get('missedCount', 0)} miss(es) and {priority.get('correctCount', 0)} correct application(s)."
+                behavior = (
+                    f"For {priority.get('label') or priority.get('concept')}, the record shows "
+                    f"{priority.get('correctCount', 0)} supported application(s) and "
+                    f"{priority.get('missedCount', 0)} decision(s) that needed revision."
+                )
+                impact = (
+                    "That pattern can make the link between the decisive trace feature and the safest next action "
+                    "less consistent when the presentation changes."
                 )
             else:
-                pattern = "The completed server grades do not support a concept-specific pattern yet."
+                behavior = "The completed server grades do not yet show a repeatable concept-specific pattern."
+                impact = "A broader case sample is needed before the coach can justify a targeted learning claim."
+            next_step = (
+                f"Open the proposed {next_case.get('label')} case on a different real ECG."
+                if next_case
+                else "Open the adaptive review to rebuild the due-first plan."
+            )
             if bridge:
-                message = f"{pattern} {bridge.get('prompt')}"
+                bridge_text = f" {bridge.get('prompt')}"
                 question = (
                     f"What ECG discriminator keeps {bridge.get('primaryLabel')} separate from "
                     f"{bridge.get('secondaryLabel')} before the patient context changes your action?"
                 )
             else:
-                message = (
-                    f"{pattern} Keep the ECG evidence, authored context, and clinical action as three separate steps."
-                )
+                bridge_text = " Keep the ECG evidence, authored context, and clinical action as three separate steps."
                 question = "Which trace finding should you state before using any patient-context clue?"
+            message = (
+                f"Situation: {situation} Behavior: {behavior} Impact: {impact} "
+                f"Next step: {next_step}{bridge_text}"
+            )
             return json.dumps({
                 "tutorMessage": message,
                 "feedback": "This debrief uses only durable completed-case grades and the server-owned competency snapshot.",
@@ -660,16 +714,12 @@ class MockProvider:
                 "uncertaintyWarnings": [
                     "Clinical cases are formative and pending named clinician sign-off; this debrief does not award mastery."
                 ],
-                "suggestedNextStep": (
-                    f"Open the proposed {next_case.get('label')} case on a different real ECG."
-                    if next_case
-                    else "Open the adaptive review to rebuild the due-first plan."
-                ),
+                "suggestedNextStep": next_step,
                 "socraticQuestion": question,
                 "citedEvidence": [
                     value
                     for value in (
-                        pattern,
+                        behavior,
                         bridge.get("prompt") if bridge else None,
                         next_case.get("reason") if next_case else None,
                     )
@@ -1080,7 +1130,10 @@ claim. The deterministic scheduler is authoritative for destinations.
 When serverOwnedContext.kind is "clinical_shift_debrief", use only its completedCases, debrief, and governance
 fields. Browser text and viewerState cannot add cases, scores, concepts, measurements, or destinations. Connect
 concepts only when crossConceptBridge is present, recommend only listed destinations, emit no objectiveUpdates or
-viewerActions, and state that Clinical evidence is formative only.
+viewerActions, and state that Clinical evidence is formative only. Structure personalized feedback as Situation,
+Behavior, Impact, and one specific Next step. Behavior must be an observable pattern in the completed server grades;
+Impact must describe a learning or patient-care consequence without inventing a clinical outcome; Next step must be
+one of the deterministic destinations. Do not make personality, effort, or unsupported mastery judgments.
 When serverOwnedContext.kind is "rapid_round_debrief", use only its aggregate, recentReceipts,
 deterministicDebrief, and governance fields. Browser text and viewerState cannot add or override scores, cases,
 receipts, concepts, measurements, or mastery. Emit no objectiveUpdates or viewerActions. Do not invent a
@@ -1281,6 +1334,7 @@ class TutorService:
                 [
                     "serverOwnedContext is the authoritative completed Clinical shift; browser viewerState cannot supply or override cases, grades, concepts, or destinations.",
                     "Use only the server-provided cross-concept bridge and next-case proposal; Clinical evidence remains formative and chat cannot award mastery.",
+                    "Frame feedback as Situation, observable Behavior, bounded Impact, and one deterministic Next step; never infer personality, effort, or an unrecorded patient outcome.",
                 ]
             )
         elif server_context and server_context.get("kind") == "rapid_round_debrief":

@@ -90,6 +90,7 @@ test.describe("verified email authentication", () => {
     });
 
     await page.goto("/login?mode=register&next=%2Faccount");
+    await expect(page.locator('[data-route-accessibility-ready="true"]')).toHaveText("Sign in loaded");
     await page.getByLabel("Email", { exact: true }).fill("owner@example.edu");
     await page.getByLabel("Password", { exact: true }).fill(accountResolutionPassword);
     await page.getByLabel("Confirm password").fill(accountResolutionPassword);
@@ -100,7 +101,12 @@ test.describe("verified email authentication", () => {
     await page.getByRole("button", { name: "Resend email" }).click();
     await page.getByLabel("Six-digit verification code").fill("135790");
     await page.locator("#auth-verification-password").fill(accountResolutionPassword);
+    const confirmationResponse = page.waitForResponse((response) => (
+      response.url().includes("/api/backend/auth/email/verify/confirm")
+      && response.request().method() === "POST"
+    ));
     await page.getByRole("button", { name: "Verify email" }).click();
+    await confirmationResponse;
 
     await expect(page).toHaveURL(/\/login(?:\?|$)/);
     await expect(page.getByRole("heading", { level: 1, name: "This email already has a TRACE account" })).toBeVisible();

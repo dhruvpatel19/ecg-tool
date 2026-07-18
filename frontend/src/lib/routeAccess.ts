@@ -51,17 +51,17 @@ export function safeAppPath(requested: string | null | undefined, fallback = "/"
 
 /** Sign-in entry point for a specific private workspace. */
 export function signInPath(next?: string | null): string {
-  const destination = safeAppPath(next, "/dashboard");
+  const destination = safeAppPath(next, "/home");
   const search = new URLSearchParams();
-  if (destination !== "/dashboard") search.set("next", destination);
+  if (destination !== "/home") search.set("next", destination);
   const query = search.toString();
   return query ? `/login?${query}` : "/login";
 }
 
 /** Explicit account-creation entry point used by public product CTAs. */
 export function registrationPath(next?: string | null): string {
-  const destination = safeAppPath(next, "/dashboard");
+  const destination = safeAppPath(next, "/home");
   const search = new URLSearchParams({ mode: "register" });
-  if (destination !== "/dashboard") search.set("next", destination);
+  if (destination !== "/home") search.set("next", destination);
   return `/login?${search.toString()}`;
 }

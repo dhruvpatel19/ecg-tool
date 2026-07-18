@@ -193,10 +193,10 @@
 
 .previewWorkspace {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(190px, .75fr);
   overflow: hidden;
   border: 1px solid #e1e7e4;
-  border-radius: 12px 12px 0 0;
+  border-radius: 12px;
 }
 
 .toolRail {
@@ -268,11 +268,17 @@
 }
 
 .previewQuestion {
-  align-items: flex-start;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 13px;
   padding: 15px;
-  border: 1px solid #e1e7e4;
-  border-top: 0;
-  border-radius: 0 0 12px 12px;
+  border: 0;
+  border-left: 1px solid #e1e7e4;
+  border-radius: 0;
+  background: #fff;
 }
 
 .previewQuestion > div:first-child {
@@ -296,9 +302,7 @@
 }
 
 .previewChoices {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  display: grid;
   gap: 6px;
 }
 
@@ -312,6 +316,13 @@
   color: #65736d;
   font-size: .63rem;
   font-weight: 700;
+}
+
+.previewQuestion > small {
+  margin-top: auto;
+  color: #5f6f67;
+  font-size: .58rem;
+  line-height: 1.4;
 }
 
 .previewChoices .choiceSelected {
@@ -711,6 +722,11 @@
 
   .previewWorkspace {
     grid-template-columns: 1fr;
+  }
+
+  .previewQuestion {
+    border-top: 1px solid #e1e7e4;
+    border-left: 0;
   }
 
   .toolRail {

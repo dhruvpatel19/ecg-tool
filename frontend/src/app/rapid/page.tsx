@@ -5,11 +5,16 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  BrainCircuit,
   CheckCircle2,
   Clock3,
   GitBranch,
+  Layers3,
+  ListChecks,
+  Siren,
   RotateCcw,
   ShieldCheck,
+  ScanSearch,
   Sparkles,
   Timer,
   XCircle,
@@ -18,6 +23,11 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ECGViewer } from "@/components/ECGViewer";
+import {
+  RapidQuestionDeck,
+  rapidTaskAnswered,
+  type RapidTaskResponse,
+} from "@/components/rapid/RapidQuestionDeck";
 import { TutorChat } from "@/components/TutorChat";
 import {
   DisclosureArea,
@@ -36,7 +46,8 @@ import { conceptLabel } from "@/lib/coordinates";
 import { resolveHandoffTarget, type HandoffTargetResolution } from "@/lib/learning/handoffTargets";
 import type { LearningSubskill } from "@/lib/learning/interactionTypes";
 import { learningReturnLabel } from "@/lib/learning/learningReturn";
-import { parseRapidLaunchIntent, RAPID_CASE_CONCEPTS, RAPID_SESSION_LENGTHS, rapidClinicalHandoffHref, rapidReceiptSummary } from "@/lib/learning/rapidLogic";
+import { competencySkillLabel } from "@/lib/learning/skillLabels";
+import { parseRapidLaunchIntent, RAPID_CASE_CONCEPTS, RAPID_EMERGENCY_RHYTHM_CONCEPTS, RAPID_SESSION_LENGTHS, RAPID_VISIBLE_SESSION_LENGTHS, rapidClinicalHandoffHref, rapidDebriefPracticeHref, rapidReceiptSummary } from "@/lib/learning/rapidLogic";
 import { useLearningPreferences } from "@/lib/useLearningPreferences";
 import type {
   CasePacket,
@@ -44,6 +55,7 @@ import type {
   EcgCapability,
   RapidEvidenceReceipt,
   RapidRoundPayload,
+  RapidTaskPacket,
   TutorMessageResponse,
   ViewerAction,
   ViewerTaskEvidence,
@@ -53,6 +65,8 @@ import type {
 type PaceId = "ward" | "emergency" | "untimed";
 type View = "setup" | "runner" | "complete";
 type AnswerStage = "findings" | "sweep" | "commit";
+type PracticeMode = "adaptive" | "mixed" | "emergency";
+type QuestionDepth = "quick" | "focused" | "complete";
 
 type Pace = {
   id: PaceId;
@@ -82,6 +96,20 @@ type RapidGrade = {
   feedback?: string;
   teachingPoints?: string[];
   revealedDiagnosis?: string;
+  taskFeedback?: Array<{
+    taskId: string;
+    prompt?: string;
+    correct?: boolean;
+    learnerAnswer?: string;
+    supportedAnswer?: string;
+    explanation?: string;
+    closestMimic?: string;
+    feedback?: string;
+    correctAnswer?: string;
+    correctChoiceId?: string;
+    expectedValue?: number;
+    unit?: string;
+  }>;
 };
 
 type CaseResult = {
@@ -94,18 +122,27 @@ type CaseResult = {
   overcalledObjectives: string[];
   misconceptions: string[];
   revealedDiagnosis: string;
+  competencyOutcomes: Array<{
+    objectiveId: string;
+    subskill: string;
+    correct: boolean;
+    score: number;
+    formativeOnly: boolean;
+  }>;
 };
 
 type RapidConceptOption = { id: string; label: string };
 type RapidConceptGroup = { id: string; label: string; concepts: RapidConceptOption[] };
 
 type RapidSessionSnapshot = {
-  version: 3;
+  version: 4;
   ownerKey: string;
   roundId?: string;
   context: string;
   view: View;
   paceId: PaceId;
+  practiceMode: PracticeMode;
+  questionDepth: QuestionDepth;
   sessionLength: number;
   caseIndex: number;
   /** Only the opaque ref needed to match a server-restored draft is cached. */
@@ -116,6 +153,8 @@ type RapidSessionSnapshot = {
   grade: RapidGrade | null;
   aiViewerActions: ViewerAction[];
   traceEvidence: ViewerTaskEvidence | null;
+  taskResponses: Record<string, RapidTaskResponse>;
+  activeTaskIndex: number;
   traceReceipt: string;
   handoffReceipt: string;
   results: CaseResult[];
@@ -126,22 +165,22 @@ type RapidSessionSnapshot = {
 const PACES: Pace[] = [
   {
     id: "ward",
-    title: "Ward read",
-    detail: "2 minutes for a compact, systematic read using quick choices plus optional precise notes.",
+    title: "Standard timer",
+    detail: "A realistic clock that scales to the questions on each tracing.",
     seconds: 120,
     icon: Clock3,
   },
   {
     id: "emergency",
-    title: "Time-pressured quick-look",
-    detail: "20 seconds for one dominant resting-ECG finding. Not ACLS or acute-event certification.",
+    title: "Speed round",
+    detail: "Short recognition decisions when the task is designed for a quick look.",
     seconds: 20,
     icon: Zap,
   },
   {
     id: "untimed",
-    title: "Untimed practice",
-    detail: "Build the same snap read without a clock.",
+    title: "No timer",
+    detail: "Work at your own pace while keeping the same focused question flow.",
     seconds: null,
     icon: Activity,
   },
@@ -172,6 +211,9 @@ function rapidSourceLabel(source: string) {
   if (source === "ptbxl") return "PTB-XL recording";
   if (source === "prepared_bundle") return "Prepared PTB-XL recording";
   if (source === "leipzig-heart-center") return "Leipzig expert rhythm window";
+  if (source === "ecg-fragment-dangerous-arrhythmia") return "Reviewed high-risk rhythm fragment";
+  if (source === "mit-bih-vfdb") return "MIT-BIH malignant ventricular rhythm segment";
+  if (source === "staff-iii") return "STAFF III serial ischemia recording";
   return source.replaceAll("_", " ").replaceAll("-", " ");
 }
 
@@ -189,17 +231,7 @@ function normalizeExactFinding(value: string) {
 }
 
 function learningSkillLabel(value: string) {
-  const labels: Record<string, string> = {
-    apply_in_context: "use in context",
-    calibrate_confidence: "calibrate confidence",
-    discriminate: "tell apart",
-    explain_mechanism: "explain",
-    localize: "locate",
-    measure: "measure",
-    recognize: "identify",
-    synthesize: "complete interpretation",
-  };
-  return labels[value] ?? value.replaceAll("_", " ");
+  return competencySkillLabel(value);
 }
 
 type SweepStep = {
@@ -258,14 +290,32 @@ function frequencyRank(values: string[]): string[] {
   return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([value]) => value);
 }
 
-function debriefTarget(results: CaseResult[]): string | null {
-  return frequencyRank(results.flatMap((result) => result.missedObjectives))[0]
-    ?? frequencyRank(results.flatMap((result) => result.overcalledObjectives))[0]
-    ?? frequencyRank(results.flatMap((result) => result.correctObjectives))[0]
-    ?? null;
+function debriefTarget(results: CaseResult[]): { objectiveId: string; subskill: string } | null {
+  const missedCells = results.flatMap((result) => result.competencyOutcomes.filter(
+    (outcome) => !outcome.formativeOnly && !outcome.correct,
+  ));
+  if (missedCells.length) {
+    const ranked = frequencyRank(missedCells.map((outcome) => `${outcome.objectiveId}\0${outcome.subskill}`));
+    const [objectiveId, subskill] = ranked[0].split("\0");
+    return { objectiveId, subskill };
+  }
+  const missedObjective = frequencyRank(results.flatMap((result) => result.missedObjectives))[0];
+  if (missedObjective) return { objectiveId: missedObjective, subskill: "recognize" };
+  const overcalledObjective = frequencyRank(results.flatMap((result) => result.overcalledObjectives))[0];
+  if (overcalledObjective) return { objectiveId: overcalledObjective, subskill: "recognize" };
+  const correctObjective = frequencyRank(results.flatMap((result) => result.correctObjectives))[0];
+  return correctObjective ? { objectiveId: correctObjective, subskill: "recognize" } : null;
 }
 
 function deterministicDebriefFallback(results: CaseResult[]): string {
+  const missedCells = results.flatMap((result) => result.competencyOutcomes.filter(
+    (outcome) => !outcome.formativeOnly && !outcome.correct,
+  ));
+  if (missedCells.length) {
+    const ranked = frequencyRank(missedCells.map((outcome) => `${outcome.objectiveId}\0${outcome.subskill}`));
+    const [objectiveId, subskill] = ranked[0].split("\0");
+    return `${conceptLabel(objectiveId)} · ${learningSkillLabel(subskill)} is the clearest place to focus next. Repeat that exact skill on a new tracing, then explain the discriminator.`;
+  }
   const missed = frequencyRank(results.flatMap((result) => result.missedObjectives));
   const overcalled = frequencyRank(results.flatMap((result) => result.overcalledObjectives));
   if (missed.length) return `${conceptLabel(missed[0])} is the clearest place to focus next. Compare it with a close look-alike, then use the same clue in a clinical case.`;
@@ -281,6 +331,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function rapidTaskResponseDisplay(
+  taskPacket: RapidTaskPacket | null,
+  responses: Record<string, RapidTaskResponse>,
+  taskId: string,
+) {
+  const task = taskPacket?.tasks.find((candidate) => candidate.id === taskId);
+  const response = responses[taskId];
+  if (typeof response === "string") {
+    return task?.options?.find((option) => option.id === response)?.label ?? response;
+  }
+  if (Array.isArray(response)) {
+    return response.map((value) => task?.options?.find((option) => option.id === value)?.label ?? value).join(", ");
+  }
+  if (response && typeof response === "object") {
+    const record = response as Record<string, unknown>;
+    const point = record.point;
+    if (point && typeof point === "object" && "lead" in point && "timeSec" in point) {
+      return `${String(point.lead)} at ${Number(point.timeSec).toFixed(2)} s`;
+    }
+    return Object.values(record).filter(Boolean).map(String).join(" · ");
+  }
+  return "No answer";
+}
+
 function epochMs(value: unknown): number | null {
   if (typeof value !== "string" || !value) return null;
   const parsed = Date.parse(value);
@@ -288,6 +362,21 @@ function epochMs(value: unknown): number | null {
 }
 
 function caseResultFromRecord(value: Record<string, unknown>): CaseResult {
+  const competencyOutcomes = Array.isArray(value.competencyOutcomes)
+    ? value.competencyOutcomes.flatMap((item) => {
+        if (!isRecord(item)
+          || typeof item.objectiveId !== "string"
+          || typeof item.subskill !== "string"
+          || typeof item.correct !== "boolean") return [];
+        return [{
+          objectiveId: item.objectiveId,
+          subskill: item.subskill,
+          correct: item.correct,
+          score: typeof item.score === "number" && Number.isFinite(item.score) ? item.score : item.correct ? 1 : 0,
+          formativeOnly: item.formativeOnly === true,
+        }];
+      })
+    : [];
   return {
     caseId: typeof value.caseId === "string" ? value.caseId : "",
     score: typeof value.score === "number" ? value.score : 0,
@@ -298,6 +387,7 @@ function caseResultFromRecord(value: Record<string, unknown>): CaseResult {
     overcalledObjectives: stringList(value.overcalledObjectives),
     misconceptions: stringList(value.misconceptions),
     revealedDiagnosis: typeof value.revealedDiagnosis === "string" ? value.revealedDiagnosis : "",
+    competencyOutcomes,
   };
 }
 
@@ -309,10 +399,16 @@ function rapidSessionKey(ownerKey: string): string {
   return `${RAPID_SESSION_KEY_PREFIX}:${ownerKey}`;
 }
 
+function learnerScaleRapidLength(value: number | null | undefined): (typeof RAPID_VISIBLE_SESSION_LENGTHS)[number] {
+  if (!value || value <= 5) return 5;
+  if (value <= 10) return 10;
+  return 20;
+}
+
 function readRapidSession(ownerKey: string): RapidSessionSnapshot | null {
   try {
     const parsed: unknown = JSON.parse(window.sessionStorage.getItem(rapidSessionKey(ownerKey)) ?? "null");
-    if (!isRecord(parsed) || (parsed.version !== 2 && parsed.version !== 3) || parsed.ownerKey !== ownerKey || parsed.context !== window.location.search) return null;
+    if (!isRecord(parsed) || ![2, 3, 4].includes(Number(parsed.version)) || parsed.ownerKey !== ownerKey || parsed.context !== window.location.search) return null;
     if (!(["setup", "runner", "complete"] as unknown[]).includes(parsed.view)) return null;
     if (!(["ward", "emergency", "untimed"] as unknown[]).includes(parsed.paceId)) return null;
     if (parsed.view === "complete" && (typeof parsed.roundId !== "string" || !parsed.roundId || parsed.roundId.length > 160)) return null;
@@ -322,20 +418,26 @@ function readRapidSession(ownerKey: string): RapidSessionSnapshot | null {
     if (!Array.isArray(parsed.selectedConcepts) || !parsed.selectedConcepts.every((item) => typeof item === "string")) return null;
     const legacyCaseSummary = parsed.caseSummary;
     const legacyPacket = parsed.packet;
-    const currentCaseRef = parsed.version === 3
+    const currentCaseRef = Number(parsed.version) >= 3
       ? (typeof parsed.currentCaseRef === "string" ? parsed.currentCaseRef : null)
       : (isRecord(legacyCaseSummary) && typeof legacyCaseSummary.caseId === "string" ? legacyCaseSummary.caseId : null);
     if (parsed.version === 2 && parsed.view === "runner" && (
       !currentCaseRef || !isRecord(legacyPacket) || legacyPacket.case_id !== currentCaseRef
     )) return null;
-    if (parsed.version === 3 && parsed.view === "runner" && !currentCaseRef) return null;
+    if (Number(parsed.version) >= 3 && parsed.view === "runner" && !currentCaseRef) return null;
     return {
-      version: 3,
+      version: 4,
       ownerKey,
       roundId: typeof parsed.roundId === "string" ? parsed.roundId : undefined,
       context: window.location.search,
       view: parsed.view as View,
       paceId: parsed.paceId as PaceId,
+      practiceMode: (["adaptive", "mixed", "emergency"] as unknown[]).includes(parsed.practiceMode)
+        ? parsed.practiceMode as PracticeMode
+        : "adaptive",
+      questionDepth: (["quick", "focused", "complete"] as unknown[]).includes(parsed.questionDepth)
+        ? parsed.questionDepth as QuestionDepth
+        : "focused",
       sessionLength: Number(parsed.sessionLength),
       caseIndex: Number.isFinite(Number(parsed.caseIndex)) ? Number(parsed.caseIndex) : 0,
       currentCaseRef,
@@ -345,6 +447,10 @@ function readRapidSession(ownerKey: string): RapidSessionSnapshot | null {
       grade: isRecord(parsed.grade) ? parsed.grade as RapidGrade : null,
       aiViewerActions: Array.isArray(parsed.aiViewerActions) ? parsed.aiViewerActions as ViewerAction[] : [],
       traceEvidence: isRecord(parsed.traceEvidence) ? parsed.traceEvidence as ViewerTaskEvidence : null,
+      taskResponses: isRecord(parsed.taskResponses)
+        ? parsed.taskResponses as Record<string, RapidTaskResponse>
+        : {},
+      activeTaskIndex: Number.isFinite(Number(parsed.activeTaskIndex)) ? Math.max(0, Number(parsed.activeTaskIndex)) : 0,
       traceReceipt: typeof parsed.traceReceipt === "string" ? parsed.traceReceipt : "",
       handoffReceipt: typeof parsed.handoffReceipt === "string" ? parsed.handoffReceipt : "",
       results: parsed.results.filter(isRecord).map(caseResultFromRecord),
@@ -365,6 +471,13 @@ export default function RapidPage() {
   const [sessionReady, setSessionReady] = useState(false);
   const [view, setView] = useState<View>("setup");
   const [paceId, setPaceId] = useState<PaceId>("ward");
+  const [practiceMode, setPracticeMode] = useState<PracticeMode>("adaptive");
+  const [rhythmSupplement, setRhythmSupplement] = useState<NonNullable<RapidRoundPayload["rhythmSupplement"]>>({
+    available: false,
+    count: 0,
+    targetCounts: {},
+  });
+  const [questionDepth, setQuestionDepth] = useState<QuestionDepth>("focused");
   const [sessionLength, setSessionLength] = useState(5);
   const [caseIndex, setCaseIndex] = useState(0);
   const [caseSummary, setCaseSummary] = useState<CaseSummary | null>(null);
@@ -380,6 +493,9 @@ export default function RapidPage() {
   const [grade, setGrade] = useState<RapidGrade | null>(null);
   const [aiViewerActions, setAiViewerActions] = useState<ViewerAction[]>([]);
   const [traceEvidence, setTraceEvidence] = useState<ViewerTaskEvidence | null>(null);
+  const [taskPacket, setTaskPacket] = useState<RapidTaskPacket | null>(null);
+  const [taskResponses, setTaskResponses] = useState<Record<string, RapidTaskResponse>>({});
+  const [activeTaskIndex, setActiveTaskIndex] = useState(0);
   const [results, setResults] = useState<CaseResult[]>([]);
   const [serverResultCount, setServerResultCount] = useState(0);
   const [conceptGroups, setConceptGroups] = useState<RapidConceptGroup[]>(FALLBACK_CONCEPT_GROUPS);
@@ -393,11 +509,13 @@ export default function RapidPage() {
   const [roundDebriefBusy, setRoundDebriefBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmAbandon, setConfirmAbandon] = useState(false);
+  const [leaveAfterAbandon, setLeaveAfterAbandon] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [returnTo, setReturnTo] = useState("");
   const [handoffFocus, setHandoffFocus] = useState("");
   const [integrationSecondary, setIntegrationSecondary] = useState("");
   const [integrationLaunchError, setIntegrationLaunchError] = useState("");
+  const [activeRoundIntentConflict, setActiveRoundIntentConflict] = useState("");
   const [paceSafetyNotice, setPaceSafetyNotice] = useState("");
   const [handoffSubskill, setHandoffSubskill] = useState<LearningSubskill | "">("");
   const [handoffReceiptConcept, setHandoffReceiptConcept] = useState("");
@@ -417,21 +535,49 @@ export default function RapidPage() {
   const debriefRequestRef = useRef("");
   const restoredTimingRef = useRef<{ startedAtEpochMs: number | null; deadlineAtEpochMs: number | null } | null>(null);
   const abandonTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const dialogTriggerRef = useRef<HTMLButtonElement | null>(null);
   const abandonDialogRef = useRef<HTMLElement | null>(null);
   const keepPracticingRef = useRef<HTMLButtonElement | null>(null);
   const setupTouchedRef = useRef(false);
 
   const pace = PACES.find((item) => item.id === paceId) ?? PACES[0];
+  const timeAllowanceSeconds = pace.seconds === null
+    ? null
+    : taskPacket?.estimatedSeconds ?? pace.seconds;
   const completeReadRequired = handoffSubskill === "synthesize" || Boolean(integrationSecondary);
   const score = typeof grade?.score === "number" ? grade.score : 0;
-  const traceComplete = paceId === "emergency"
-    || (traceEvidence?.mode === "point" && Boolean(traceEvidence.point));
+  const mixedTraceRequired = Boolean(taskPacket?.tasks.some((task) => ["trace_point", "point_localization", "trace_region"].includes(task.type)));
+  const traceComplete = taskPacket
+    ? !mixedTraceRequired || Boolean(traceEvidence)
+    : paceId === "emergency" || (traceEvidence?.mode === "point" && Boolean(traceEvidence.point));
   const synthesisTaskComplete = Object.values(sweep).every((value) => value.trim().length > 0)
     && sweep.synthesis.trim().length >= 12
     && selectedConcepts.length > 0;
-  const hasAnswer = (paceId === "emergency"
+  const mixedTaskComplete = Boolean(taskPacket?.tasks.length) && taskPacket!.tasks.every((task) => (
+    task.required === false || rapidTaskAnswered(task, taskResponses[task.id], traceComplete)
+  ));
+  const hasAnswer = taskPacket ? mixedTaskComplete : (paceId === "emergency"
     ? selectedConcepts.length === 1
     : synthesisTaskComplete) && traceComplete;
+  const activeRapidTask = taskPacket?.tasks[Math.min(activeTaskIndex, Math.max(0, taskPacket.tasks.length - 1))];
+  const estimatedRoundMinutes = Math.max(2, Math.ceil(
+    sessionLength * (questionDepth === "quick" ? 0.6 : questionDepth === "focused" ? 1.6 : 3.2),
+  ));
+  const rapidViewerTask: ViewerTaskSpec | undefined = !grade && (activeRapidTask?.type === "trace_point" || activeRapidTask?.type === "point_localization")
+    ? {
+        mode: "point",
+        prompt: activeRapidTask.prompt,
+        concept: activeRapidTask.topicId || activeRapidTask.objectiveId || "qrs_complex",
+        allowedLeads: taskPacket?.display.leads,
+      }
+    : !grade && activeRapidTask?.type === "trace_region"
+      ? {
+          mode: "region",
+          prompt: activeRapidTask.prompt,
+          concept: activeRapidTask.topicId || activeRapidTask.objectiveId || "st_segment",
+          allowedLeads: taskPacket?.display.leads,
+        }
+      : undefined;
   const completedSweepCount = FRAMEWORK_STEPS.filter((step) => sweep[step.key].trim()).length;
   const activeSweepStep = FRAMEWORK_STEPS[activeSweepIndex] ?? FRAMEWORK_STEPS[0];
   const searchableFindings = useMemo(() => {
@@ -470,7 +616,14 @@ export default function RapidPage() {
 
   const closeAbandonDialog = useCallback(() => {
     setConfirmAbandon(false);
-    window.requestAnimationFrame(() => abandonTriggerRef.current?.focus());
+    setLeaveAfterAbandon("");
+    window.requestAnimationFrame(() => (dialogTriggerRef.current ?? abandonTriggerRef.current)?.focus());
+  }, []);
+
+  const openAbandonDialog = useCallback((trigger: HTMLButtonElement, destination = "") => {
+    dialogTriggerRef.current = trigger;
+    setLeaveAfterAbandon(destination);
+    setConfirmAbandon(true);
   }, []);
 
   useEffect(() => {
@@ -505,11 +658,14 @@ export default function RapidPage() {
   }, [closeAbandonDialog, confirmAbandon]);
 
   const applyRoundPayload = useCallback((payload: RapidRoundPayload, restoreLocalDraft = false) => {
+    if (payload.rhythmSupplement) setRhythmSupplement(payload.rhythmSupplement);
     const round = payload.round;
     if (!round) return false;
     setRoundId(round.roundId);
     setRoundStatus(round.status);
     setPaceId(round.pace);
+    if (round.practiceMode) setPracticeMode(round.practiceMode);
+    if (round.questionDepth) setQuestionDepth(round.questionDepth);
     setSessionLength(round.length);
     const incomingResults = payload.results.map(caseResultFromRecord);
     setServerResultCount(payload.resultCount ?? incomingResults.length);
@@ -523,10 +679,13 @@ export default function RapidPage() {
       setView(round.status === "complete" ? "complete" : "runner");
       setCaseSummary(null);
       setPacket(null);
+      setTaskPacket(null);
+      setTaskResponses({});
       return true;
     }
     setCaseSummary(current.case);
     setPacket(current.packet);
+    setTaskPacket(current.taskPacket ?? null);
     if (current.kind === "pending") {
       setView("runner");
       setCaseIndex(round.position);
@@ -534,9 +693,13 @@ export default function RapidPage() {
       setAiViewerActions([]);
       setTraceReceipt("");
       setHandoffReceipt("");
+      setTaskResponses({});
+      setActiveTaskIndex(0);
       submittingRef.current = false;
       const saved = restoreLocalDraft ? readRapidSession(identityKey) : null;
       const sameDraft = saved?.roundId === round.roundId && saved.currentCaseRef === current.case.caseId;
+      setTaskResponses(sameDraft ? saved.taskResponses : {});
+      setActiveTaskIndex(sameDraft ? saved.activeTaskIndex : 0);
       const restoredSweep = sameDraft ? saved.sweep : EMPTY_SWEEP;
       setSweep(restoredSweep);
       setSelectedConcepts(sameDraft ? saved.selectedConcepts : []);
@@ -558,6 +721,10 @@ export default function RapidPage() {
     setView("runner");
     setCaseIndex(Math.max(0, round.position - 1));
     setGrade(answer.grade as RapidGrade);
+    const storedTaskResponses = answer.response.taskResponses;
+    setTaskResponses(isRecord(storedTaskResponses)
+      ? storedTaskResponses as Record<string, RapidTaskResponse>
+      : {});
     const storedTrace = (answer.response.traceEvidence as ViewerTaskEvidence | null | undefined) ?? null;
     setTraceEvidence(storedTrace?.mode === "point"
       ? {
@@ -583,10 +750,30 @@ export default function RapidPage() {
     const launchIntent = parseRapidLaunchIntent(window.location.search);
     setSessionReady(false);
     setError(null);
+    setActiveRoundIntentConflict("");
     api.activeRapidRound()
       .then((payload) => {
         if (!active) return;
+        if (payload.rhythmSupplement) setRhythmSupplement(payload.rhythmSupplement);
         if (payload.round) {
+          const requestedSubskill = launchIntent.subskill || null;
+          const requestedReceipt = launchIntent.receiptConcept || null;
+          const exactHandoffMismatch = Boolean(
+            launchIntent.focus
+            && (
+              payload.round.focusConcept !== launchIntent.focus
+              || (requestedSubskill && payload.round.focusSubskill !== requestedSubskill)
+              || (requestedReceipt && payload.round.receiptConcept !== requestedReceipt)
+            )
+          );
+          if (exactHandoffMismatch) {
+            const savedTarget = payload.round.focusConcept
+              ? conceptLabel(payload.round.focusConcept)
+              : "mixed ECG practice";
+            setActiveRoundIntentConflict(
+              `Your saved Rapid round for ${savedTarget} was resumed unchanged. The recommended ${conceptLabel(launchIntent.focus)} check was not substituted into it. Finish or abandon the saved round, then open that recommendation again.`,
+            );
+          }
           applyRoundPayload(payload, true);
           return;
         }
@@ -600,7 +787,7 @@ export default function RapidPage() {
           : preferences?.rapidPace ?? null;
         const preferredLength = preferences?.defaultSessionLength ?? null;
         if (!launchIntent.requestedPace && launchIntent.completeReadRequired && preferences?.rapidPace === "emergency") {
-          setPaceSafetyNotice("Your saved Emergency pace was changed to Ward read because this handoff requires a complete interpretation.");
+          setPaceSafetyNotice("Your saved Speed round preference was changed to Standard timer because this handoff requires a complete interpretation.");
         }
         if (saved?.view === "complete") {
           setRoundId(saved.roundId ?? "");
@@ -630,19 +817,33 @@ export default function RapidPage() {
             });
         } else if (saved?.view === "setup") {
           setPaceId(explicitPace ?? saved.paceId);
-          setSessionLength(launchIntent.suggestedLength ?? saved.sessionLength);
+          setPracticeMode(launchIntent.practiceMode === "emergency"
+            ? payload.rhythmSupplement?.available === true ? "emergency" : "adaptive"
+            : launchIntent.practiceMode ?? (
+              saved.practiceMode === "emergency" && payload.rhythmSupplement?.available !== true
+                ? "adaptive"
+                : saved.practiceMode
+            ));
+          setQuestionDepth(launchIntent.completeReadRequired ? "complete" : saved.questionDepth);
+          setSessionLength(learnerScaleRapidLength(launchIntent.suggestedLength ?? saved.sessionLength));
         } else {
           setView("setup");
           if (!setupTouchedRef.current) {
+            if (launchIntent.practiceMode === "emergency") {
+              setPracticeMode(payload.rhythmSupplement?.available === true ? "emergency" : "adaptive");
+            } else if (launchIntent.practiceMode) {
+              setPracticeMode(launchIntent.practiceMode);
+            }
             if (explicitPace ?? preferredPace) setPaceId((explicitPace ?? preferredPace) as PaceId);
             if (launchIntent.suggestedLength !== null || preferredLength !== null) {
-              setSessionLength(launchIntent.suggestedLength ?? preferredLength ?? 5);
+              setSessionLength(learnerScaleRapidLength(launchIntent.suggestedLength ?? preferredLength ?? 5));
             }
           }
         }
       })
       .catch(() => {
         if (!active) return;
+        if (launchIntent.practiceMode === "emergency") setPracticeMode("adaptive");
         const saved = readRapidSession(identityKey);
         if (saved?.view === "complete" && saved.roundId) {
           setRoundId(saved.roundId);
@@ -656,14 +857,19 @@ export default function RapidPage() {
         } else if (saved?.view === "setup") {
           const explicitPace = launchIntent.pace ?? (launchIntent.completeReadRequired ? "untimed" : null);
           setPaceId(explicitPace ?? saved.paceId);
-          setSessionLength(launchIntent.suggestedLength ?? saved.sessionLength);
+          // The active-round request failed, so supplement availability is not
+          // authoritative. Fail closed instead of restoring an emergency drill
+          // that may have no reviewed rhythm source at runtime.
+          setPracticeMode(saved.practiceMode === "emergency" ? "adaptive" : saved.practiceMode);
+          setQuestionDepth(launchIntent.completeReadRequired ? "complete" : saved.questionDepth);
+          setSessionLength(learnerScaleRapidLength(launchIntent.suggestedLength ?? saved.sessionLength));
         } else if (!setupTouchedRef.current) {
           const preferredPace = launchIntent.completeReadRequired && preferences?.rapidPace === "emergency"
             ? "ward"
             : preferences?.rapidPace ?? null;
           const explicitPace = launchIntent.pace ?? (launchIntent.completeReadRequired ? "untimed" : null);
           if (explicitPace ?? preferredPace) setPaceId((explicitPace ?? preferredPace) as PaceId);
-          setSessionLength(launchIntent.suggestedLength ?? preferences?.defaultSessionLength ?? 5);
+          setSessionLength(learnerScaleRapidLength(launchIntent.suggestedLength ?? preferences?.defaultSessionLength ?? 5));
         }
         if (saved?.view !== "complete") {
           setView("setup");
@@ -681,12 +887,14 @@ export default function RapidPage() {
     // Keep the prior draft while the next server-owned capability is in flight.
     if (view === "runner" && !caseSummary) return;
     const snapshot: RapidSessionSnapshot = {
-      version: 3,
+      version: 4,
       ownerKey: identityKey,
       roundId: roundId || undefined,
       context: window.location.search,
       view,
       paceId,
+      practiceMode,
+      questionDepth,
       sessionLength,
       caseIndex,
       currentCaseRef: caseSummary?.caseId ?? null,
@@ -696,6 +904,8 @@ export default function RapidPage() {
       grade,
       aiViewerActions,
       traceEvidence,
+      taskResponses,
+      activeTaskIndex,
       traceReceipt,
       handoffReceipt,
       // The server owns the complete answer ledger. Keep only a small local
@@ -709,7 +919,7 @@ export default function RapidPage() {
     } catch {
       // A storage quota or privacy setting must not interrupt a live assessment.
     }
-  }, [sessionReady, identityKey, roundId, view, paceId, sessionLength, caseIndex, caseSummary, sweep, selectedConcepts, confidence, grade, aiViewerActions, traceEvidence, traceReceipt, handoffReceipt, results, startedAtEpochMs, deadlineAtEpochMs]);
+  }, [sessionReady, identityKey, roundId, view, paceId, practiceMode, questionDepth, sessionLength, caseIndex, caseSummary, sweep, selectedConcepts, confidence, grade, aiViewerActions, traceEvidence, taskResponses, activeTaskIndex, traceReceipt, handoffReceipt, results, startedAtEpochMs, deadlineAtEpochMs]);
 
   useEffect(() => {
     let active = true;
@@ -763,11 +973,13 @@ export default function RapidPage() {
       : "");
     setHandoffReceiptConcept(intent.receiptConcept);
     setPaceSafetyNotice(intent.paceAdjustedForCompleteRead
-      ? "Emergency pace was changed to Ward read because this handoff requires a complete interpretation."
+      ? "Speed round was changed to Standard timer because this handoff requires a complete interpretation."
       : "");
     if (intent.subskill) {
       setHandoffSubskill(intent.subskill);
     }
+    if (intent.practiceMode) setPracticeMode(intent.practiceMode);
+    if (intent.completeReadRequired) setQuestionDepth("complete");
     if (intent.pace) setPaceId(intent.pace);
     else if (intent.completeReadRequired) setPaceId("untimed");
   }, []);
@@ -789,6 +1001,9 @@ export default function RapidPage() {
     setGrade(null);
     setAiViewerActions([]);
     setTraceEvidence(null);
+    setTaskPacket(null);
+    setTaskResponses({});
+    setActiveTaskIndex(0);
     setPacket(null);
     setCaseSummary(null);
     setSweep(EMPTY_SWEEP);
@@ -843,6 +1058,9 @@ export default function RapidPage() {
     try {
       const started = await api.startRapidRound({
         learnerId: identityKey,
+        contractVersion: "mixed-v2",
+        practiceMode,
+        questionDepth,
         pace: paceId,
         length: sessionLength,
         focusConcept: handoffResolution?.caseConcept ?? null,
@@ -861,7 +1079,7 @@ export default function RapidPage() {
     } finally {
       setBusy(false);
     }
-  }, [identityKey, paceId, sessionLength, handoffFocus, handoffResolution, handoffSubskill, handoffUnavailable, integrationSecondary, integrationLaunchError, rapidAvailableConcepts, loadCase]);
+  }, [identityKey, practiceMode, questionDepth, paceId, sessionLength, handoffFocus, handoffResolution, handoffSubskill, handoffUnavailable, integrationSecondary, integrationLaunchError, rapidAvailableConcepts, loadCase]);
 
   const onViewerReady = useCallback(() => {
     if (grade || submittingRef.current || !roundId || !caseSummary) return;
@@ -884,7 +1102,7 @@ export default function RapidPage() {
           readyAtRef.current = performance.now() - Math.max(0, nowEpochMs - authoritativeStart);
           setStartedAtEpochMs(authoritativeStart);
           setDeadlineAtEpochMs(authoritativeDeadline);
-          if (pace.seconds !== null && authoritativeDeadline !== null) {
+          if (timeAllowanceSeconds !== null && authoritativeDeadline !== null) {
             const secondsLeft = Math.max(0, (authoritativeDeadline - nowEpochMs) / 1000);
             deadlineRef.current = performance.now() + secondsLeft * 1000;
             setRemaining(secondsLeft);
@@ -905,7 +1123,7 @@ export default function RapidPage() {
         clockStartFrameRef.current = null;
       });
     });
-  }, [grade, pace.seconds, roundId, caseSummary]);
+  }, [grade, timeAllowanceSeconds, roundId, caseSummary]);
 
   useEffect(() => () => {
     if (clockStartFrameRef.current !== null) window.cancelAnimationFrame(clockStartFrameRef.current);
@@ -919,8 +1137,27 @@ export default function RapidPage() {
       setBusy(true);
       setError(null);
       try {
+        const submittedTaskResponses: Record<string, unknown> = taskPacket ? {} : { ...taskResponses };
+        if (taskPacket) {
+          for (const task of taskPacket.tasks) {
+            if (["trace_point", "point_localization", "trace_region"].includes(task.type)) {
+              if (traceEvidence?.mode === "point") submittedTaskResponses[task.id] = { point: traceEvidence.point };
+              if (traceEvidence?.mode === "region") submittedTaskResponses[task.id] = { roi: traceEvidence.roi };
+              continue;
+            }
+            const value = taskResponses[task.id];
+            if (value === undefined) continue;
+            if ((task.type === "numeric" || task.type === "numeric_fill_in") && typeof value === "string") {
+              const numericValue = Number(value);
+              if (Number.isFinite(numericValue)) submittedTaskResponses[task.id] = numericValue;
+              continue;
+            }
+            submittedTaskResponses[task.id] = value;
+          }
+        }
         const response = await api.submitRapidCase(roundId, {
           caseId: caseSummary.caseId,
+          taskResponses: submittedTaskResponses,
           structuredAnswer: {
             framework: "clerkship",
             rate: sweep.rate,
@@ -933,7 +1170,9 @@ export default function RapidPage() {
             synthesis: sweep.synthesis,
             selectedConcepts,
           },
-          freeTextAnswer: sweep.synthesis,
+          freeTextAnswer: taskPacket
+            ? Object.values(taskResponses).map((value) => typeof value === "string" ? value : "").filter(Boolean).join(" · ")
+            : sweep.synthesis,
           confidence,
           traceEvidence,
         });
@@ -957,13 +1196,13 @@ export default function RapidPage() {
         setBusy(false);
       }
     },
-    [roundId, caseSummary, grade, sweep, selectedConcepts, confidence, handoffFocus, handoffSubskill, handoffResolution, handoffReceiptConcept, results.length, traceEvidence, applyRoundPayload],
+    [roundId, caseSummary, grade, taskPacket, taskResponses, sweep, selectedConcepts, confidence, handoffFocus, handoffSubskill, handoffResolution, handoffReceiptConcept, results.length, traceEvidence, applyRoundPayload],
   );
 
   submitRef.current = submit;
 
   useEffect(() => {
-    if (!clockRunning || pace.seconds === null) return;
+    if (!clockRunning || timeAllowanceSeconds === null) return;
     const timer = window.setInterval(() => {
       const next = Math.max(0, (deadlineRef.current - performance.now()) / 1000);
       setRemaining(next);
@@ -974,7 +1213,7 @@ export default function RapidPage() {
       }
     }, 100);
     return () => window.clearInterval(timer);
-  }, [clockRunning, pace.seconds]);
+  }, [clockRunning, timeAllowanceSeconds]);
 
   async function advance() {
     if (roundStatus === "complete" || caseIndex + 1 >= sessionLength) {
@@ -998,6 +1237,7 @@ export default function RapidPage() {
 
   async function abandonRound() {
     if (!roundId || roundStatus !== "active" || busy) return;
+    const destination = leaveAfterAbandon;
     const resumeClockOnFailure = clockRunning;
     submittingRef.current = true;
     setClockRunning(false);
@@ -1025,6 +1265,9 @@ export default function RapidPage() {
       setGrade(null);
       setAiViewerActions([]);
       setTraceEvidence(null);
+      setTaskPacket(null);
+      setTaskResponses({});
+      setActiveTaskIndex(0);
       setTraceReceipt("");
       setHandoffReceipt("");
       setResults([]);
@@ -1037,6 +1280,7 @@ export default function RapidPage() {
       setConfirmAbandon(false);
       setView("setup");
       submittingRef.current = false;
+      if (destination) window.location.assign(destination);
     } catch (err) {
       submittingRef.current = Boolean(grade);
       setConfirmAbandon(false);
@@ -1074,12 +1318,21 @@ export default function RapidPage() {
   const resultLedgerTotal = Math.max(serverResultCount, results.length);
   const partialResultLedger = view === "complete" && resultLedgerTotal > results.length;
   const roundTarget = useMemo(() => debriefTarget(results), [results]);
+  const roundTargetHref = useMemo(
+    () => roundTarget ? rapidDebriefPracticeHref(roundTarget) : null,
+    [roundTarget],
+  );
   const clinicalHref = useMemo(
     () => rapidClinicalHandoffHref(results, clinicalDestinations),
     [results, clinicalDestinations],
   );
   const crossConceptBridge = useMemo(() => {
-    const missed = frequencyRank(results.flatMap((result) => result.missedObjectives));
+    const missed = frequencyRank(results.flatMap((result) => [
+      ...result.missedObjectives,
+      ...result.competencyOutcomes
+        .filter((outcome) => !outcome.formativeOnly && !outcome.correct)
+        .map((outcome) => outcome.objectiveId),
+    ]));
     const correct = frequencyRank(results.flatMap((result) => result.correctObjectives));
     if (missed[0] && correct[0] && missed[0] !== correct[0]) {
       return `Connect ${conceptLabel(correct[0])} to ${conceptLabel(missed[0])}: use the feature you recognized as the anchor, then state the additional discriminator the missed diagnosis requires.`;
@@ -1088,7 +1341,7 @@ export default function RapidPage() {
       return `Compare ${conceptLabel(missed[0])} with ${conceptLabel(missed[1])} side by side; name one shared feature and one decisive separator before looking at another label.`;
     }
     if (roundTarget) {
-      return `Carry ${conceptLabel(roundTarget)} through three levels: recognize the pattern, localize or measure its evidence, then explain what changes in the clinical context.`;
+      return `Carry ${conceptLabel(roundTarget.objectiveId)} through three levels: recognize the pattern, localize or measure its evidence, then explain what changes in the clinical context.`;
     }
     return "Keep the same framework across normal and abnormal tracings so speed comes from a stable sequence, not from skipping steps.";
   }, [results, roundTarget]);
@@ -1142,17 +1395,18 @@ export default function RapidPage() {
       <div className="page rapid-page rapid-setup">
         <header className="page-header rapid-header">
           <div>
-            <p className="eyebrow rapid-eyebrow">Rapid interpretation</p>
-            <h1><Timer size={24} aria-hidden="true" /> Rapid ECG rounds</h1>
+            <p className="eyebrow rapid-eyebrow">Rapid practice</p>
+            <h1><Timer size={24} aria-hidden="true" /> Choose how you want to read</h1>
             <p className="muted rapid-intro">
-              Real, blinded 12-lead ECGs. Commit a snap read, rate your confidence, then review
-              case-grounded feedback. The tutor stays silent until you submit.
+              Build speed without turning every tracing into the same checklist. Each ECG asks only
+              the questions that its learning goal can support.
             </p>
           </div>
-          {returnTo ? <Link className="button subtle" href={returnTo}><ArrowLeft size={16} /> {learningReturnLabel(returnTo, ["lesson", "study_plan", "clinical"])}</Link> : null}
+          {returnTo ? <Link className="button subtle" href={returnTo}><ArrowLeft size={16} /> {learningReturnLabel(returnTo)}</Link> : null}
         </header>
 
-        {returnTo ? <div className="selection-note">This round starts with <strong>{conceptLabel(handoffFocus)} · {handoffSubskill ? learningSkillLabel(handoffSubskill) : "focused check"}</strong>. {handoffResolution ? integrationSecondary ? <>This set reserves two distinct unannounced ECGs: one for <strong>{conceptLabel(handoffResolution.caseConcept)}</strong> and one for <strong>{conceptLabel(integrationSecondary)}</strong>. Later ECGs mix in related patterns.</> : <>The first ECG focuses on <strong>{conceptLabel(handoffResolution.caseConcept)}</strong>; later ECGs mix in related patterns.</> : "An unrelated ECG will not be substituted."}</div> : null}
+        {returnTo && !activeRoundIntentConflict ? <div className="selection-note">This round starts with <strong>{conceptLabel(handoffFocus)} · {handoffSubskill ? learningSkillLabel(handoffSubskill) : "focused check"}</strong>. {handoffResolution ? integrationSecondary ? <>This set reserves two distinct unannounced ECGs: one for <strong>{conceptLabel(handoffResolution.caseConcept)}</strong> and one for <strong>{conceptLabel(integrationSecondary)}</strong>. Later ECGs mix in related patterns.</> : <>The first ECG focuses on <strong>{conceptLabel(handoffResolution.caseConcept)}</strong>; later ECGs mix in related patterns.</> : "An unrelated ECG will not be substituted."}</div> : null}
+        {activeRoundIntentConflict ? <div className="warning" role="alert">{activeRoundIntentConflict}</div> : null}
         {integrationLaunchError ? <div className="warning" role="alert">{integrationLaunchError}</div> : null}
         {paceSafetyNotice ? <div className="selection-note" role="status"><Clock3 size={15} aria-hidden="true" /> {paceSafetyNotice}</div> : null}
         {handoffUnavailable ? <div className="warning" role="alert">{handoffUnavailable}</div> : null}
@@ -1167,62 +1421,190 @@ export default function RapidPage() {
           </div>
         ) : null}
 
-        <section className="panel pad rapid-setup-panel">
-          <div className="rapid-pace-grid">
-            {PACES.map((item) => {
-              const Icon = item.icon;
-              const active = paceId === item.id;
-              const unavailableForSynthesis = completeReadRequired && item.id === "emergency";
-              return (
+        <section className="rapid-setup-shell">
+          <div className="panel pad rapid-setup-panel">
+            <fieldset className="rapid-setup-group">
+              <legend>Practice plan</legend>
+              <p>Choose how the next ECGs should be selected.</p>
+              <div className="rapid-plan-grid">
                 <button
-                  className={`list-item rapid-pace${active ? " rapid-pace-active" : ""}${unavailableForSynthesis ? " rapid-pace-unavailable" : ""}`}
-                  key={item.id}
                   type="button"
-                  aria-pressed={active}
-                  disabled={unavailableForSynthesis}
-                  onClick={() => {
-                    setupTouchedRef.current = true;
-                    setPaceId(item.id);
-                    setPaceSafetyNotice("");
-                  }}
+                  className={practiceMode === "adaptive" ? "selected" : ""}
+                  aria-pressed={practiceMode === "adaptive"}
+                  onClick={() => { setupTouchedRef.current = true; setPracticeMode("adaptive"); }}
                 >
-                  <strong className="rapid-pace-title">
-                    <Icon size={18} aria-hidden="true" /> {item.title}
-                  </strong>
-                  <p className="muted rapid-pace-detail">{unavailableForSynthesis ? "A 20-second quick look checks the dominant finding, not a complete interpretation." : item.detail}</p>
+                  <BrainCircuit size={20} aria-hidden="true" />
+                  <span><strong>Adaptive practice</strong><small>Prioritizes due skills and recent misses, with retention checks mixed in.</small></span>
+                  <em>Recommended</em>
                 </button>
-              );
-            })}
+                <button
+                  type="button"
+                  className={practiceMode === "mixed" ? "selected" : ""}
+                  aria-pressed={practiceMode === "mixed"}
+                  onClick={() => { setupTouchedRef.current = true; setPracticeMode("mixed"); }}
+                >
+                  <Layers3 size={20} aria-hidden="true" />
+                  <span><strong>Mixed practice</strong><small>Balanced variety across rhythms, intervals, conduction, axis, and ST–T patterns.</small></span>
+                </button>
+                {rhythmSupplement.available && (
+                  !handoffFocus
+                  || RAPID_EMERGENCY_RHYTHM_CONCEPTS.includes(
+                    handoffFocus as (typeof RAPID_EMERGENCY_RHYTHM_CONCEPTS)[number],
+                  )
+                ) ? (
+                  <button
+                    type="button"
+                    className={practiceMode === "emergency" ? "selected" : ""}
+                    aria-pressed={practiceMode === "emergency"}
+                    onClick={() => {
+                      setupTouchedRef.current = true;
+                      setPracticeMode("emergency");
+                      if (questionDepth === "complete") setQuestionDepth("focused");
+                    }}
+                  >
+                    <Siren size={20} aria-hidden="true" />
+                    <span>
+                      <strong>Emergency rhythms</strong>
+                      <small>Fast single-lead ventricular rhythm calls, followed by clearly separated 2025 AHA simulation context.</small>
+                    </span>
+                  </button>
+                ) : null}
+              </div>
+            </fieldset>
+
+            {practiceMode === "emergency" ? (
+              <aside className="selection-note" role="note">
+                <ShieldCheck size={15} aria-hidden="true" />
+                <span><strong>Evidence boundary:</strong> the strip tests rhythm recognition. Pulse, stability, and the action pathway come only from the separately written scenario; management questions are formative.</span>
+              </aside>
+            ) : null}
+
+            <fieldset className="rapid-setup-group">
+              <legend>How deep should each read go?</legend>
+              <p>The tracing determines the exact question type. Not every ECG needs a complete report.</p>
+              <div className="rapid-depth-grid">
+                {(practiceMode === "emergency" ? ([
+                  ["quick", "Rhythm call", "One concise rhythm identification", Zap],
+                  ["focused", "Rhythm + next step", "Recognition plus one separately contextualized question", ScanSearch],
+                  ["complete", "Rhythm + evidence limits", "Three linked recognition, context, and uncertainty checks", ListChecks],
+                ] as const) : ([
+                  ["quick", "Quick recognition", "One focused call", Zap],
+                  ["focused", "Focused read", "One to three linked questions", ScanSearch],
+                  ["complete", "Complete interpretation", "A compact prioritized report", ListChecks],
+                ] as const)).map(([id, title, detail, Icon]) => {
+                  const unavailable = completeReadRequired && id !== "complete";
+                  return (
+                    <button
+                      type="button"
+                      key={id}
+                      disabled={unavailable}
+                      className={`${questionDepth === id ? "selected" : ""}${unavailable ? " unavailable" : ""}`}
+                      aria-pressed={questionDepth === id}
+                      onClick={() => {
+                        setupTouchedRef.current = true;
+                        setQuestionDepth(id);
+                        if (id === "complete" && paceId === "emergency" && practiceMode !== "emergency") setPaceId("ward");
+                      }}
+                    >
+                      <Icon size={20} aria-hidden="true" />
+                      <span><strong>{title}</strong><small>{unavailable ? "This handoff requires a complete read." : detail}</small></span>
+                    </button>
+                  );
+                })}
+              </div>
+            </fieldset>
+
+            <fieldset className="rapid-setup-group rapid-timing-group">
+              <legend>Timing</legend>
+              <div className="rapid-timing-options">
+                {PACES.map((item) => {
+                  const Icon = item.icon;
+                  const unavailable = (
+                    completeReadRequired
+                    || (questionDepth === "complete" && practiceMode !== "emergency")
+                  ) && item.id === "emergency";
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      disabled={unavailable}
+                      className={`${paceId === item.id ? "selected" : ""}${unavailable ? " unavailable" : ""}`}
+                      aria-pressed={paceId === item.id}
+                      title={item.detail}
+                      onClick={() => { setupTouchedRef.current = true; setPaceId(item.id); setPaceSafetyNotice(""); }}
+                    >
+                      <Icon size={17} aria-hidden="true" /> {item.title}
+                    </button>
+                  );
+                })}
+              </div>
+            </fieldset>
+
+            <fieldset className="rapid-setup-group rapid-length-group">
+              <legend>Round length</legend>
+              <div className="rapid-length-options" aria-label="Rapid round length">
+                {RAPID_VISIBLE_SESSION_LENGTHS.map((length) => (
+                  <button
+                    type="button"
+                    key={length}
+                    className={sessionLength === length ? "selected" : ""}
+                    aria-pressed={sessionLength === length}
+                    onClick={() => { setupTouchedRef.current = true; setSessionLength(length); }}
+                  >
+                    <strong>{length}</strong><span>ECGs</span>
+                  </button>
+                ))}
+              </div>
+              <p>No repeats within a round. You can pause safely between tracings.</p>
+            </fieldset>
           </div>
 
-          <div className="rapid-length">
-            <label className="field rapid-length-field">
-              <span>Unique ECGs in this round</span>
-              <select aria-label="Rapid round length" value={sessionLength} onChange={(event) => {
-                setupTouchedRef.current = true;
-                setSessionLength(Number(event.target.value));
-              }}>
-                {RAPID_SESSION_LENGTHS.map((length) => <option value={length} key={length}>{length.toLocaleString()} ECGs</option>)}
-              </select>
-            </label>
-            <p className="muted rapid-length-copy">No tracing repeats within a round. Pause between ECGs and resume a signed-in round on another device.</p>
-          </div>
-
-          <div className="rapid-setup-note selection-note">
-            <ShieldCheck size={16} aria-hidden="true" /> Answers and highlighted regions stay hidden until you commit.
-          </div>
-          {handoffSubskill === "synthesize" ? <div className="selection-note rapid-synthesis-gate">
-            <strong>Complete-read check:</strong> work through rate, rhythm, axis, intervals, QRS/conduction, ST–T, chambers, and a one-line synthesis. Select only findings the tracing supports.
-            {integrationSecondary ? <> This cross-concept comparison is formative practice. Your complete-read synthesis does not update synthesis mastery until each domain can be graded deterministically.</> : null}
-          </div> : null}
-          <button
-            className="button primary rapid-start"
-            type="button"
-            onClick={() => void startSession()}
-            disabled={!catalogLoaded || Boolean(handoffUnavailable) || Boolean(handoffFocus && !handoffResolution)}
-          >
-            Start {pace.title.toLowerCase()} <ArrowRight size={16} aria-hidden="true" />
-          </button>
+          <aside className="panel pad rapid-round-preview" aria-label="Round preview">
+            <p className="eyebrow">This round</p>
+            <h2>{practiceMode === "adaptive"
+              ? "Built around your next best reps"
+              : practiceMode === "emergency"
+                ? "High-risk rhythms, one decision at a time"
+                : "A broad, balanced mix"}</h2>
+            <div className="rapid-preview-count"><strong>{sessionLength}</strong><span>ECGs</span></div>
+            <ul>
+              {practiceMode === "adaptive" ? (
+                <>
+                  <li><BrainCircuit size={16} aria-hidden="true" /><span><strong>Current priorities</strong>Recent misses and due skills lead the set.</span></li>
+                  <li><ShieldCheck size={16} aria-hidden="true" /><span><strong>Retention checks</strong>Mastered concepts stay active without dominating.</span></li>
+                  <li><GitBranch size={16} aria-hidden="true" /><span><strong>Transfer</strong>Related look-alikes test whether the idea generalizes.</span></li>
+                </>
+              ) : practiceMode === "emergency" ? (
+                <>
+                  <li><Siren size={16} aria-hidden="true" /><span><strong>Single-lead recognition</strong>Source-author-labelled VF, ventricular flutter, VT, and polymorphic VT fragments.</span></li>
+                  <li><GitBranch size={16} aria-hidden="true" /><span><strong>Source separation</strong>Patient state is stated explicitly and never inferred from the strip.</span></li>
+                  <li><ShieldCheck size={16} aria-hidden="true" /><span><strong>Guideline context</strong>2025 AHA pathway questions are formative and version-labelled.</span></li>
+                </>
+              ) : (
+                <>
+                  <li><Layers3 size={16} aria-hidden="true" /><span><strong>Topic breadth</strong>Rhythm, conduction, intervals, axis, and ST–T findings.</span></li>
+                  <li><ListChecks size={16} aria-hidden="true" /><span><strong>Question variety</strong>Typed calls, choices, measurements, and trace tasks.</span></li>
+                  <li><ShieldCheck size={16} aria-hidden="true" /><span><strong>Blinded answers</strong>Feedback stays hidden until the ECG is submitted.</span></li>
+                </>
+              )}
+            </ul>
+            <div className="rapid-preview-summary">
+              <span>{questionDepth === "quick" ? "Quick recognition" : questionDepth === "focused" ? "Focused read" : "Complete interpretation"}</span>
+              <span>{pace.title}</span>
+              <span>About {estimatedRoundMinutes} min</span>
+            </div>
+            <button
+              className="button primary rapid-start"
+              type="button"
+              onClick={() => void startSession()}
+              disabled={!catalogLoaded
+                || Boolean(handoffUnavailable)
+                || Boolean(handoffFocus && !handoffResolution)
+                || (practiceMode === "emergency" && !rhythmSupplement.available)}
+            >
+              Start rapid set <ArrowRight size={16} aria-hidden="true" />
+            </button>
+          </aside>
         </section>
       </div>
     );
@@ -1257,10 +1639,25 @@ export default function RapidPage() {
           <div className="list rapid-result-list">
             {results.slice(-50).map((item, index, recentResults) => (
               <div className="list-item rapid-result-row" key={`${item.caseId}-${index}`}>
-                <strong>ECG {resultLedgerTotal - recentResults.length + index + 1}</strong>
-                <span className="muted rapid-result-meta">
-                  {Math.round(item.score * 100)}%{item.timedOut ? " · time" : item.responseMs ? ` · ${(item.responseMs / 1000).toFixed(1)}s` : ""}
-                </span>
+                <div>
+                  <strong>ECG {resultLedgerTotal - recentResults.length + index + 1}</strong>
+                  <span className="muted rapid-result-meta">
+                    {Math.round(item.score * 100)}%{item.timedOut ? " · time expired" : item.responseMs ? ` · ${(item.responseMs / 1000).toFixed(1)}s` : ""}
+                  </span>
+                </div>
+                <div className="rapid-result-learning">
+                  {item.competencyOutcomes.some((outcome) => !outcome.formativeOnly && !outcome.correct)
+                    ? <span className="review">Review {item.competencyOutcomes
+                        .filter((outcome) => !outcome.formativeOnly && !outcome.correct)
+                        .slice(0, 2)
+                        .map((outcome) => `${conceptLabel(outcome.objectiveId)} · ${learningSkillLabel(outcome.subskill)}`)
+                        .join(" / ")}</span>
+                    : item.missedObjectives.length
+                      ? <span className="review">Review {item.missedObjectives.slice(0, 2).map(conceptLabel).join(" · ")}</span>
+                    : item.overcalledObjectives.length
+                      ? <span className="review">Recheck {item.overcalledObjectives.slice(0, 2).map(conceptLabel).join(" · ")}</span>
+                      : <span className="strong">Targets met</span>}
+                </div>
               </div>
             ))}
           </div>
@@ -1278,9 +1675,11 @@ export default function RapidPage() {
               <div><strong>Connect this skill</strong><p>{crossConceptBridge}</p></div>
             </div>
             <div className="actions rapid-handoffs">
-              {roundTarget ? (
-                <Link className="button primary" href={`/train?focus=${encodeURIComponent(roundTarget)}&subskill=recognize&returnTo=/rapid`}>
-                  Train {conceptLabel(roundTarget)} <ArrowRight size={15} aria-hidden="true" />
+              {roundTarget && roundTargetHref ? (
+                <Link className="button primary" href={roundTargetHref}>
+                  {roundTargetHref.startsWith("/rapid?")
+                    ? `Practice ${conceptLabel(roundTarget.objectiveId)} in Emergency Rapid`
+                    : `Train ${conceptLabel(roundTarget.objectiveId)} · ${learningSkillLabel(roundTarget.subskill)}`} <ArrowRight size={15} aria-hidden="true" />
                 </Link>
               ) : null}
               {clinicalHref ? (
@@ -1291,11 +1690,14 @@ export default function RapidPage() {
             </div>
           </section>
           <div className="actions rapid-complete-actions">
-            <button className="button primary rapid-restart" type="button" onClick={() => void startSession()}>
+            <Link className="button primary" href="/home?panel=activity">
+              Review ECGs &amp; answers <ArrowRight size={16} aria-hidden="true" />
+            </Link>
+            <button className="button rapid-restart" type="button" onClick={() => void startSession()}>
               <RotateCcw size={16} aria-hidden="true" /> Repeat this round
             </button>
             <button className="button rapid-new-setup" type="button" onClick={() => setView("setup")}>Change setup</button>
-            {returnTo ? <Link className="button" href={returnTo}><ArrowLeft size={16} /> {learningReturnLabel(returnTo, ["lesson", "study_plan", "clinical"])}</Link> : null}
+            {returnTo ? <Link className="button" href={returnTo}><ArrowLeft size={16} /> {learningReturnLabel(returnTo)}</Link> : null}
           </div>
         </section>
       </div>
@@ -1305,7 +1707,7 @@ export default function RapidPage() {
   const correct = stringList(grade?.correctObjectives);
   const missed = stringList(grade?.missedObjectives);
   const overcalled = stringList(grade?.overcalledObjectives);
-  const timerPercent = pace.seconds && remaining !== null ? Math.max(0, Math.min(100, (remaining / pace.seconds) * 100)) : 100;
+  const timerPercent = timeAllowanceSeconds && remaining !== null ? Math.max(0, Math.min(100, (remaining / timeAllowanceSeconds) * 100)) : 100;
   const restoredTraceActions: ViewerAction[] = grade
     && traceEvidence?.mode === "point"
     && traceEvidence.correct === true
@@ -1332,7 +1734,22 @@ export default function RapidPage() {
       <SessionBar className="rapid-hud" tutorAvailable={Boolean(grade)} tutorLabel="Open tutor">
         <span className="pill rapid-mode-pill"><Timer size={14} aria-hidden="true" /> {pace.title}</span>
         <strong className="rapid-progress">ECG {caseIndex + 1} / {sessionLength}</strong>
-        {returnTo ? <Link className="button subtle small" href={returnTo}><ArrowLeft size={15} /> {learningReturnLabel(returnTo, ["lesson", "study_plan", "clinical"])}</Link> : null}
+        {taskPacket ? (
+          <span className="pill rapid-question-count">
+            {taskPacket.tasks.length} {taskPacket.tasks.length === 1 ? "question" : "questions"}
+          </span>
+        ) : null}
+        {returnTo ? (
+          <button
+            className="button subtle small"
+            type="button"
+            aria-haspopup="dialog"
+            onClick={(event) => openAbandonDialog(event.currentTarget, returnTo)}
+            disabled={busy || confirmAbandon}
+          >
+            <ArrowLeft size={15} /> {learningReturnLabel(returnTo)}
+          </button>
+        ) : null}
         {roundStatus === "active" && grade ? (
           <Link className="button subtle small rapid-pause" href="/">
             Pause between ECGs
@@ -1344,19 +1761,19 @@ export default function RapidPage() {
             className="button subtle small rapid-abandon"
             type="button"
             aria-haspopup="dialog"
-            onClick={() => setConfirmAbandon(true)}
+            onClick={(event) => openAbandonDialog(event.currentTarget)}
             disabled={busy}
           >
             <XCircle size={15} aria-hidden="true" /> Abandon round
           </button>
         ) : null}
-        {pace.seconds !== null ? (
+        {timeAllowanceSeconds !== null ? (
           <span
             className={`pill rapid-timer${!grade && clockRunning && remaining !== null && remaining <= 5 ? " rapid-timer-urgent" : ""}`}
             aria-label={grade ? "Rapid read complete" : clockRunning ? "Rapid timer running" : "Rapid timer waiting for ECG"}
             data-clock-state={grade ? "complete" : clockRunning ? "running" : "waiting"}
           >
-            {grade ? "Read complete" : clockRunning ? `${Math.ceil(remaining ?? pace.seconds)}s` : "ECG loading"}
+            {grade ? "Read complete" : clockRunning ? `${Math.ceil(remaining ?? timeAllowanceSeconds)}s` : "ECG loading"}
           </span>
         ) : grade ? (
           <span
@@ -1369,7 +1786,7 @@ export default function RapidPage() {
         ) : <span className="pill rapid-untimed">Untimed</span>}
       </SessionBar>
 
-      {confirmAbandon || error ? (
+      {confirmAbandon || activeRoundIntentConflict || error ? (
         <WorkspaceNotices>
           {confirmAbandon ? (
             <div className="rapid-abandon-modal-layer">
@@ -1388,14 +1805,16 @@ export default function RapidPage() {
                 aria-labelledby="rapid-abandon-title"
                 aria-describedby="rapid-abandon-description"
               >
-                <h2 id="rapid-abandon-title">Abandon this Rapid round?</h2>
+                <h2 id="rapid-abandon-title">{leaveAfterAbandon ? "Leave this Rapid round?" : "Abandon this Rapid round?"}</h2>
                 <p id="rapid-abandon-description" className="muted">
-                  Your completed ECG results stay in your learning history. The current unsubmitted read will not be scored,
-                  and this {sessionLength.toLocaleString()}-ECG round cannot be resumed.
+                  {results.length
+                    ? "Your submitted ECGs stay in learning history as a partial round and can be reviewed. "
+                    : "No ECG from this round has been submitted, so the round will not appear in learning history. "}
+                  The current unsubmitted ECG will be discarded and will not be scored or count toward progress. This {sessionLength.toLocaleString()}-ECG round cannot be resumed.
                 </p>
                 <div className="actions">
                   <button className="button warn" type="button" onClick={() => void abandonRound()} disabled={busy}>
-                    Abandon round and change setup
+                    {leaveAfterAbandon ? `${learningReturnLabel(leaveAfterAbandon)} and abandon round` : "Abandon round and change setup"}
                   </button>
                   <button ref={keepPracticingRef} className="button" type="button" onClick={closeAbandonDialog} disabled={busy}>
                     Keep practicing
@@ -1404,23 +1823,29 @@ export default function RapidPage() {
               </section>
             </div>
           ) : null}
+          {activeRoundIntentConflict ? <div className="warning rapid-error" role="alert">{activeRoundIntentConflict}</div> : null}
           {error ? <div className="warning rapid-error" role="alert">{error}</div> : null}
         </WorkspaceNotices>
       ) : null}
 
       {caseSummary && packet ? (
-        <WorkspaceBody className="rapid-workspace">
+        <WorkspaceBody className={`rapid-workspace${!grade && timeAllowanceSeconds !== null && !clockRunning ? " rapid-workspace-arming" : ""}`}>
           <WaveformPane className="rapid-tracing" label="Rapid ECG waveform">
             <ECGViewer
               ecgRef={caseSummary.caseId}
               waveformScope={{ kind: "rapid", roundId }}
               actions={caseViewerActions}
-              toolbar={grade ? "full" : "none"}
+              toolbar={grade ? "clinical" : "none"}
               onReady={onViewerReady}
               groundedRois={grade ? packet.ptbxl_plus.fiducials.rois ?? [] : []}
               medianBeats={packet.ptbxl_plus.median_beats ?? null}
-              task={!grade && paceId !== "emergency" ? RAPID_TRACE_TASK : undefined}
+              task={taskPacket ? rapidViewerTask : !grade && paceId !== "emergency" ? RAPID_TRACE_TASK : undefined}
+              presentation={taskPacket?.display.kind === "rhythm_strip"
+                ? { kind: "rhythm_strip", leads: taskPacket.display.leads }
+                : { kind: "twelve_lead" }}
+              reviewMode={Boolean(grade)}
               onTaskEvidence={setTraceEvidence}
+              onTaskReset={() => setTraceEvidence(null)}
               gradingMode="deferred"
             />
             {grade && traceEvidence?.mode === "point" && traceEvidence.correct === true && !traceEvidence.noTarget ? (
@@ -1436,7 +1861,20 @@ export default function RapidPage() {
             phase={responsePhase}
           >
             {!grade ? (
-            <section className={`panel pad rapid-answer-panel${paceId === "emergency" ? " rapid-quick-response" : ""}`}>
+            taskPacket ? (
+              <RapidQuestionDeck
+                tasks={taskPacket.tasks}
+                responses={taskResponses}
+                activeIndex={activeTaskIndex}
+                onActiveIndexChange={setActiveTaskIndex}
+                onResponse={(taskId, response) => setTaskResponses((current) => ({ ...current, [taskId]: response }))}
+                onSubmit={() => void submit()}
+                traceComplete={traceComplete}
+                disabled={busy || !clockRunning && timeAllowanceSeconds !== null}
+                submitting={busy}
+              />
+            ) : (
+            <section className={`panel pad rapid-answer-panel rapid-legacy-answer${paceId === "emergency" ? " rapid-quick-response" : ""}`}>
               <div className="rapid-answer-heading">
                 <div>
                   <p className="eyebrow rapid-answer-eyebrow">Commit your read</p>
@@ -1708,6 +2146,7 @@ export default function RapidPage() {
                 </div>
               ) : null}
             </section>
+            )
           ) : (
             <section className={`panel pad rapid-feedback${score >= 0.6 ? " rapid-feedback-ok" : " rapid-feedback-miss"}`}>
               <div className="rapid-feedback-heading">
@@ -1723,6 +2162,34 @@ export default function RapidPage() {
                     ? "Mostly there. Recheck the missed finding before moving on."
                     : "Pause and compare your call with the grounded findings below before the next ECG."}
               </p>
+
+              {grade.taskFeedback?.length ? (
+                <div className="rapid-task-feedback-list">
+                  {grade.taskFeedback.map((item, index) => (
+                    <article className={item.correct ? "correct" : "review"} key={item.taskId || index}>
+                      <header>
+                        <span>Question {index + 1}</span>
+                        <strong>{item.correct ? "Correct" : "Review"}</strong>
+                      </header>
+                      {item.prompt || taskPacket?.tasks.find((task) => task.id === item.taskId)?.prompt ? (
+                        <h3>{item.prompt || taskPacket?.tasks.find((task) => task.id === item.taskId)?.prompt}</h3>
+                      ) : null}
+                      <dl>
+                        <div><dt>Your answer</dt><dd>{item.learnerAnswer || rapidTaskResponseDisplay(taskPacket, taskResponses, item.taskId)}</dd></div>
+                        <div><dt>Supported answer</dt><dd>{item.supportedAnswer
+                          || item.correctAnswer
+                          || (item.correctChoiceId
+                            ? taskPacket?.tasks.find((task) => task.id === item.taskId)?.options?.find((option) => option.id === item.correctChoiceId)?.label
+                            : "")
+                          || (typeof item.expectedValue === "number" ? `${item.expectedValue} ${item.unit || ""}`.trim() : "")
+                          || "See the reviewed findings below"}</dd></div>
+                      </dl>
+                      {item.explanation || item.feedback ? <p><strong>Why it fits:</strong> {item.explanation || item.feedback}</p> : null}
+                      {item.closestMimic ? <p><strong>Closest mimic:</strong> {item.closestMimic}</p> : null}
+                    </article>
+                  ))}
+                </div>
+              ) : null}
 
               <div className="evidence-grid rapid-feedback-grid">
                 <div className="evidence-card rapid-correct">
@@ -1782,10 +2249,10 @@ export default function RapidPage() {
       <DisclosureArea className="rapid-disclosure">
         {caseSummary ? <span className="rapid-source"><ShieldCheck size={13} aria-hidden="true" /> {grade ? rapidSourceLabel(caseSummary.source) : "Reviewed real ECG"}</span> : null}
         <span className="rapid-silence"><ShieldCheck size={13} aria-hidden="true" /> {grade ? "Tutor available for a post-commit debrief" : "Tutor silent until commitment"}</span>
-        {pace.seconds !== null && !grade ? (
+        {timeAllowanceSeconds !== null && !grade ? (
           <progress
             className="rapid-clockbar"
-            aria-label={`${Math.ceil(remaining ?? pace.seconds)} seconds remaining`}
+            aria-label={`${Math.ceil(remaining ?? timeAllowanceSeconds)} seconds remaining`}
             max={100}
             value={timerPercent}
           />

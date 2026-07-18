@@ -176,17 +176,31 @@ def _grade_dict(
 
 def _grade_option_based(item: ClinicalCaseItem, packet: dict[str, Any], answer: ClinicalAnswer) -> dict[str, Any]:
     tested = _tested_objectives(item, packet)
+    supported_option = next(
+        (candidate for candidate in item.options if candidate.answer_class == "ideal"),
+        next(
+            (candidate for candidate in item.options if candidate.answer_class == "acceptable"),
+            None,
+        ),
+    )
     if answer.timed_out:
-        return _grade_dict(
+        grade = _grade_dict(
             item, 0.0, tested, correct=False,
             feedback="Time. Here is the safest interpretation — review the discriminating feature.",
             answer_class=None, confidence=answer.confidence, timed_out=True,
             axes={"clinical_decision": 0.0},
-            calibration={"timedOut": True, "confidence": answer.confidence},
+            calibration=(
+                {"timedOut": True, "confidence": answer.confidence}
+                if answer.confidence is not None
+                else None
+            ),
         )
+        grade["supportedAnswer"] = supported_option.text if supported_option else None
+        grade["learnerAnswer"] = None
+        return grade
     option = next((o for o in item.options if o.id == answer.selected_option_id), None)
     if option is None:
-        return _grade_dict(
+        grade = _grade_dict(
             item,
             0.0,
             tested,
@@ -194,6 +208,9 @@ def _grade_option_based(item: ClinicalCaseItem, packet: dict[str, Any], answer: 
             feedback="No option selected.",
             axes={"clinical_decision": 0.0},
         )
+        grade["supportedAnswer"] = supported_option.text if supported_option else None
+        grade["learnerAnswer"] = None
+        return grade
 
     base = BASE_CREDIT.get(option.answer_class, 0.0)
     safety_flags: list[str] = []
@@ -213,9 +230,15 @@ def _grade_option_based(item: ClinicalCaseItem, packet: dict[str, Any], answer: 
             base = 0.10
 
     correct = option.answer_class in _CORRECT_CLASSES and not capped
-    band = confidence_band(answer.confidence)
-    score = base * (_CORRECT_MULT[band] if correct else _WRONG_MULT[band])
-    high_conf_wrong = (not correct) and band == "high"
+    if answer.confidence is None:
+        # Confidence is an optional reflection, not a hidden scoring input.
+        # Preserve authored base credit when the learner does not provide it.
+        score = base
+        high_conf_wrong = False
+    else:
+        band = confidence_band(answer.confidence)
+        score = base * (_CORRECT_MULT[band] if correct else _WRONG_MULT[band])
+        high_conf_wrong = (not correct) and band == "high"
 
     label = ", ".join(concept_label(o) for o in tested) or "the finding"
     # Headline only — the ideal action is surfaced once, separately, via teachingPoints (avoid repeating it).
@@ -223,26 +246,33 @@ def _grade_option_based(item: ClinicalCaseItem, packet: dict[str, Any], answer: 
         feedback = f"{option.answer_class.replace('_', ' ').title()}."
     else:
         feedback = f"That choice is {option.answer_class.replace('_', ' ')}. Discriminator: {label}."
-    calibration = {
-        "answerClass": option.answer_class,
-        "overTriage": option.answer_class == "over_triage_safe",
-        "underTriage": option.answer_class == "under_triage",
-        "unsafe": option.answer_class == "unsafe",
-        "insufficientData": option.answer_class == "insufficient_data",
-        "highConfidenceWrong": high_conf_wrong,
-        "confidence": answer.confidence,
-    }
+    calibration = (
+        {
+            "answerClass": option.answer_class,
+            "overTriage": option.answer_class == "over_triage_safe",
+            "underTriage": option.answer_class == "under_triage",
+            "unsafe": option.answer_class == "unsafe",
+            "insufficientData": option.answer_class == "insufficient_data",
+            "highConfidenceWrong": high_conf_wrong,
+            "confidence": answer.confidence,
+        }
+        if answer.confidence is not None
+        else None
+    )
     axes = {
         **option.axis_scores,
         "clinical_decision": round(base, 3),
         "safety": 0.0 if capped or option.answer_class in {"under_triage", "unsafe"} else 1.0,
     }
-    return _grade_dict(
+    grade = _grade_dict(
         item, score, tested, correct, feedback,
         answer_class=option.answer_class, axes=axes, confidence=answer.confidence,
         safety_flags=safety_flags, calibration=calibration,
         viewer_actions=_discriminator_actions(item, packet, tested),
     )
+    grade["learnerAnswer"] = option.text
+    grade["supportedAnswer"] = supported_option.text if supported_option else None
+    return grade
 
 
 def periodic_click_match(packet: dict[str, Any], concept: str, lead: str, time_sec: float, tol_ms: float = CLICK_TOLERANCE_MS) -> dict | None:
@@ -311,7 +341,11 @@ def _grade_fillin(
             axes={"measurement_accuracy": 0.0},
             confidence=answer.confidence,
             timed_out=answer.timed_out,
-            calibration={"timedOut": answer.timed_out, "confidence": answer.confidence},
+            calibration=(
+                {"timedOut": answer.timed_out, "confidence": answer.confidence}
+                if answer.confidence is not None
+                else None
+            ),
         )
 
     expected_raw = grounding.features(packet).get(task.expected_feature)
@@ -344,7 +378,11 @@ def _grade_fillin(
         else f"Your estimate was {submitted_text}; the packet measurement is {expected_text}. "
         "Recheck QRS onset, T-wave end, and the ECG grid scale."
     )
-    high_conf_wrong = bool(not correct and confidence_band(answer.confidence) == "high")
+    high_conf_wrong = bool(
+        answer.confidence is not None
+        and not correct
+        and confidence_band(answer.confidence) == "high"
+    )
     return _grade_dict(
         item,
         score,
@@ -354,11 +392,15 @@ def _grade_fillin(
         answer_class=None,
         axes={"measurement_accuracy": score},
         confidence=answer.confidence,
-        calibration={
-            "measurementError": round(error, 3),
-            "highConfidenceWrong": high_conf_wrong,
-            "confidence": answer.confidence,
-        },
+        calibration=(
+            {
+                "measurementError": round(error, 3),
+                "highConfidenceWrong": high_conf_wrong,
+                "confidence": answer.confidence,
+            }
+            if answer.confidence is not None
+            else None
+        ),
         viewer_actions=_discriminator_actions(item, packet, tested),
     )
 
@@ -432,13 +474,17 @@ def _grade_matching(
         answer_class=None,
         axes=axes,
         confidence=answer.confidence,
-        calibration={
-            "highConfidenceWrong": bool(
-                not correct and confidence_band(answer.confidence) == "high"
-            ),
-            "confidence": answer.confidence,
-            "matchingComplete": complete_shape,
-        },
+        calibration=(
+            {
+                "highConfidenceWrong": bool(
+                    not correct and confidence_band(answer.confidence) == "high"
+                ),
+                "confidence": answer.confidence,
+                "matchingComplete": complete_shape,
+            }
+            if answer.confidence is not None
+            else None
+        ),
         timed_out=answer.timed_out,
     )
     result["matchingResults"] = row_results
@@ -467,15 +513,208 @@ def _grade_spoterror(item: ClinicalCaseItem, packet: dict[str, Any], answer: Cli
                        viewer_actions=_discriminator_actions(item, packet, tested))
 
 
+def _stepwise_feedback(
+    item: ClinicalCaseItem,
+    answer: ClinicalAnswer,
+    *,
+    timed_out: bool,
+) -> tuple[list[bool], list[dict[str, Any]]]:
+    """Return keyed stage results plus option-specific learner corrections."""
+
+    results: list[bool] = []
+    feedback: list[dict[str, Any]] = []
+    for index, step in enumerate(item.steps):
+        selected_index = answer.step_answers[index] if index < len(answer.step_answers) else -1
+        supported_index = next(
+            (option_index for option_index, option in enumerate(step.options) if option.correct),
+            -1,
+        )
+        selected = (
+            step.options[selected_index]
+            if 0 <= selected_index < len(step.options)
+            else None
+        )
+        supported = (
+            step.options[supported_index]
+            if 0 <= supported_index < len(step.options)
+            else None
+        )
+        selection_correct = bool(selected and selected.correct)
+        credited = bool(selection_correct and not timed_out)
+        results.append(credited)
+
+        if selected is not None and not selection_correct and selected.rationale:
+            explanation = selected.rationale
+            if supported and supported.rationale:
+                explanation = f"{explanation} {supported.rationale}"
+        elif supported and supported.rationale:
+            explanation = supported.rationale
+        elif timed_out:
+            explanation = "Time ended before this stage could receive credit; compare your choice with the supported response."
+        else:
+            explanation = "Compare the selected branch with the evidence available at this stage."
+
+        feedback.append(
+            {
+                "stageIndex": index,
+                "stageKind": step.stage_kind,
+                "stageTitle": step.stage_title or f"Stage {index + 1}",
+                "elapsedLabel": step.elapsed_label,
+                "clinicalUpdate": step.clinical_update,
+                "dataPoints": [point.model_dump(mode="json") for point in step.data_points],
+                "prompt": step.prompt,
+                "learnerOptionIndex": selected_index if selected is not None else None,
+                "learnerAnswer": selected.text if selected else "No response recorded",
+                "supportedOptionIndex": supported_index if supported is not None else None,
+                "supportedAnswer": supported.text if supported else "No keyed response available",
+                "correct": credited,
+                "selectionCorrect": selection_correct,
+                "timedOut": timed_out,
+                "explanation": explanation,
+            }
+        )
+    return results, feedback
+
+
+def _stepwise_competency_outcomes(
+    item: ClinicalCaseItem,
+    step_results: list[bool],
+    answer: ClinicalAnswer,
+    *,
+    action_correct: bool,
+    action_score: float,
+    timed_out: bool,
+) -> list[dict[str, Any]]:
+    """Project exact stage/action evidence without collapsing unrelated skills."""
+
+    if not any(step.competencies for step in item.steps):
+        return []
+    outcomes: list[dict[str, Any]] = []
+    for index, step in enumerate(item.steps):
+        stage_correct = bool(index < len(step_results) and step_results[index] and not timed_out)
+        selected_index = answer.step_answers[index] if index < len(answer.step_answers) else -1
+        selected = (
+            step.options[selected_index]
+            if 0 <= selected_index < len(step.options)
+            else None
+        )
+        for competency in step.competencies:
+            analytic_score = (
+                float(selected.competency_scores.get(
+                    competency.objective_id,
+                    1.0 if stage_correct else 0.0,
+                ))
+                if selected is not None and not timed_out
+                else 0.0
+            )
+            outcomes.append(
+                {
+                    "concept": competency.objective_id,
+                    "subskill": competency.subskill,
+                    "score": round(analytic_score, 3),
+                    "correct": bool(analytic_score >= 1.0 and not timed_out),
+                    "stageIndex": index,
+                    "stageTitle": step.stage_title or f"Stage {index + 1}",
+                    "stageKind": step.stage_kind,
+                    "evidenceSource": "clinical_step_server_grade",
+                }
+            )
+    for concept in item.application_objectives:
+        concept_stage_scores = [
+            float(outcome["score"])
+            for outcome in outcomes
+            if outcome["concept"] == concept
+            and isinstance(outcome.get("stageIndex"), int)
+        ]
+        if item.prior_ecg_id and concept_stage_scores:
+            # Application credit requires the interpretation evidence that the
+            # longitudinal stages map to this same concept. Unrelated serial
+            # comparison errors remain separate (for example rhythm recognition
+            # versus QT-risk correction).
+            interpretation_score = min(concept_stage_scores)
+        else:
+            # Compact stepwise cases retain their established safety invariant:
+            # the final action cannot be credited after any failed ECG stage.
+            # This is also the fail-closed path for a longitudinal application
+            # concept with no same-concept stage mapping.
+            interpretation_score = (
+                sum(1.0 if result else 0.0 for result in step_results)
+                / len(step_results)
+                if step_results
+                else 0.0
+            )
+        effective_action_score = min(action_score, interpretation_score)
+        outcomes.append(
+            {
+                "concept": concept,
+                "subskill": "apply_in_context",
+                "score": (
+                    0.0
+                    if timed_out
+                    else round(max(0.0, min(1.0, effective_action_score)), 3)
+                ),
+                "correct": bool(
+                    action_correct
+                    and interpretation_score >= 1.0
+                    and not timed_out
+                ),
+                "stageIndex": None,
+                "stageTitle": "Integrated management plan",
+                "stageKind": "decision",
+                "evidenceSource": "clinical_action_server_grade",
+            }
+        )
+    return outcomes
+
+
+def _objective_summary_from_outcomes(
+    outcomes: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    by_concept: dict[str, list[bool]] = {}
+    for outcome in outcomes:
+        concept = str(outcome.get("concept") or "")
+        if concept:
+            by_concept.setdefault(concept, []).append(bool(outcome.get("correct")))
+    correct = [concept for concept, values in by_concept.items() if values and all(values)]
+    missed = [concept for concept, values in by_concept.items() if not values or not all(values)]
+    return correct, missed
+
+
 def _grade_stepwise(item: ClinicalCaseItem, packet: dict[str, Any], answer: ClinicalAnswer) -> dict[str, Any]:
-    """Grade the ECG sequence separately from the downstream clinical action."""
+    """Grade each longitudinal stage separately from the final clinical action."""
     action_grade = _grade_option_based(item, packet, answer)
+    step_results, step_feedback = _stepwise_feedback(
+        item,
+        answer,
+        timed_out=answer.timed_out,
+    )
+    action_score = float(
+        (action_grade.get("axisScores") or {}).get(
+            "clinical_decision", action_grade.get("score", 0.0)
+        )
+    )
+    action_correct = bool(
+        not answer.timed_out
+        and action_grade.get("answerClass") in _CORRECT_CLASSES
+        and not action_grade.get("safetyFlags")
+    )
+    competency_outcomes = _stepwise_competency_outcomes(
+        item,
+        step_results,
+        answer,
+        action_correct=action_correct,
+        action_score=action_score,
+        timed_out=answer.timed_out,
+    )
+
     if answer.timed_out:
         # The option grader has already produced the uniform timeout result.
         # Never re-score prefilled/late step answers after the authoritative
         # clock expired, or a timeout could manufacture ECG mastery.
         action_grade.update({
-            "stepResults": [False for _ in item.steps],
+            "stepResults": step_results,
+            "stepFeedback": step_feedback,
+            "competencyOutcomes": competency_outcomes,
             "axisScores": {
                 **(action_grade.get("axisScores") or {}),
                 "ecg_sequence": 0.0,
@@ -483,40 +722,41 @@ def _grade_stepwise(item: ClinicalCaseItem, packet: dict[str, Any], answer: Clin
             },
             "clinicalApplicationEvidence": "formative_only",
         })
+        if competency_outcomes:
+            correct, missed = _objective_summary_from_outcomes(competency_outcomes)
+            action_grade.update({"correctObjectives": correct, "missedObjectives": missed})
         return action_grade
-    step_results = []
-    for index, step in enumerate(item.steps):
-        selected = answer.step_answers[index] if index < len(answer.step_answers) else -1
-        step_results.append(
-            0 <= selected < len(step.options) and bool(step.options[selected].correct)
-        )
+
     sequence_score = sum(step_results) / len(step_results) if step_results else 0.0
     sequence_correct = bool(step_results) and all(step_results)
-    action_correct = action_grade.get("answerClass") in _CORRECT_CLASSES and not action_grade.get("safetyFlags")
     combined = 0.55 * sequence_score + 0.45 * float(action_grade["score"])
     tested = _tested_objectives(item, packet)
     overall_correct = sequence_correct and action_correct
+    if competency_outcomes:
+        correct_objectives, missed_objectives = _objective_summary_from_outcomes(
+            competency_outcomes
+        )
+    else:
+        # Legacy compact stepwise items predate explicit stage mappings. Keep
+        # their established behavior until each is curated under this contract.
+        correct_objectives = tested if sequence_correct else []
+        missed_objectives = [] if sequence_correct else tested
     action_grade.update(
         {
             "score": round(combined, 3),
-            "correctObjectives": tested if sequence_correct else [],
-            "missedObjectives": [] if sequence_correct else tested,
+            "correctObjectives": correct_objectives,
+            "missedObjectives": missed_objectives,
             # Sequence performance remains visible in the formative axes and
             # exact event history, but this unreviewed item cannot move mastery.
             "masteryDelta": {},
             "axisScores": {
                 **(action_grade.get("axisScores") or {}),
                 "ecg_sequence": round(sequence_score, 3),
-                "clinical_decision": round(
-                    float(
-                        (action_grade.get("axisScores") or {}).get(
-                            "clinical_decision", action_grade["score"]
-                        )
-                    ),
-                    3,
-                ),
+                "clinical_decision": round(action_score, 3),
             },
             "stepResults": step_results,
+            "stepFeedback": step_feedback,
+            "competencyOutcomes": competency_outcomes,
             "clinicalApplicationEvidence": "formative_only",
         }
     )
@@ -585,11 +825,17 @@ def _first_look_assessment(
     if not expected:
         expected.add("uncertain")
     submitted = answer.first_look_finding
+    first_look_timed_out = bool(answer.first_look_timed_out)
     return {
         "submittedCategory": submitted,
         "confidence": answer.first_look_confidence,
         "expectedCategories": sorted(expected),
-        "agreement": submitted in expected if submitted is not None else None,
+        "agreement": (
+            None
+            if first_look_timed_out
+            else submitted in expected if submitted is not None else None
+        ),
+        "timedOut": first_look_timed_out,
         "formativeOnly": True,
         "exactPathologyMasterySuppressed": True,
     }

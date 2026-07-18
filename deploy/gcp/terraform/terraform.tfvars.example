@@ -49,6 +49,11 @@ artifact_repository_id = "ecg-tool-backend"
 backend_image           = ""
 artifact_delete_after_days = 90
 artifact_keep_recent_count  = 10
+# Optional keyless GitHub publisher. When enabled, Terraform creates a service
+# account that can write only this Artifact Registry repository and a provider
+# that accepts only dhruvpatel19/ecg-tool tokens from main or release/* refs.
+enable_github_actions_publisher = false
+github_actions_repository       = "dhruvpatel19/ecg-tool"
 # Add the previous deployed digest here before changing backend_image so cleanup
 # cannot remove the explicitly retained recovery artifact.
 artifact_recovery_image_digests = []

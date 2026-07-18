@@ -8,6 +8,7 @@ calibration label (§16C/§16-4).
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any, Callable
 
@@ -17,11 +18,13 @@ from ..adaptive import (
     independent_subskill_index,
     priority_exact_row,
 )
+from ..ontology import concept_label
+from ..objectives import validate_objective_subskill
 from . import grounding, integrity
 from .clinical_grading import grade_clinical_answer
 from .constants import clock_for
 from .debrief import build_shift_debrief
-from .item_reference import public_item_reference
+from .item_reference import public_item_reference, public_option_reference
 from .provenance import assert_learner_item_provenance
 from .schemas import ClinicalAnswer, ClinicalCaseItem
 from .tutor_context import shift_tutor_context_reference, tutor_context_reference
@@ -29,6 +32,7 @@ from .tutor_context import shift_tutor_context_reference, tutor_context_referenc
 PacketProvider = Callable[[str], dict[str, Any] | None]
 SERVING_STATUS = "harness_pass"
 SERVING_LABEL = "automated-screened formative"
+STEPWISE_STAGE_SECONDS = 45
 
 # A metadata label cannot turn a scheduled outpatient encounter into an ED
 # case. These phrases describe workflows that are categorically incompatible
@@ -70,9 +74,12 @@ def _runtime_provenance_ok(
 
 # --- blinding ---------------------------------------------------------------------
 def blind_clinical_item(
-    item: ClinicalCaseItem, *, reveal_context: bool = True
+    item: ClinicalCaseItem,
+    *,
+    reveal_context: bool = True,
+    option_reference: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
-    """Strip answer keys and, until first-look commit, all authored context."""
+    """Strip answer keys and keep response-bearing tasks behind first look."""
     data = item.model_dump()
     data.pop("evidence_manifest", None)
     data.pop("application_objectives", None)
@@ -107,9 +114,14 @@ def blind_clinical_item(
     for opt in data.get("options", []):
         for hidden in ("answer_class", "axis_scores", "required_safety_tokens", "parsed"):
             opt.pop(hidden, None)
+        if option_reference is not None:
+            opt["id"] = option_reference(str(opt.get("id") or ""))
     for step in data.get("steps", []):
+        step.pop("competencies", None)
         for so in step.get("options", []):
             so.pop("correct", None)
+            so.pop("rationale", None)
+            so.pop("competency_scores", None)
     for line in data.get("machine_read", []):
         line.pop("bad", None)
     data.pop("difficulty_vector", None)
@@ -117,11 +129,12 @@ def blind_clinical_item(
     data.pop("validation_status", None)
     if not reveal_context:
         # This is a transport boundary, not merely a hidden React panel: authored
-        # symptoms, vitals, prompts, choices, and machine text do not reach the
-        # browser until the learner persists an ECG-only first look.
+        # response prompts, choices, and machine text do not reach the browser
+        # until the learner persists a first look.  The indication/vignette and
+        # non-diagnostic chips remain visible because an ECG is never ordered in
+        # a clinical vacuum.
         for field in (
-            "stem", "chips", "prompt", "options", "steps", "machine_read", "fill_in_task",
-            "matching_task",
+            "prompt", "options", "steps", "machine_read", "fill_in_task", "matching_task",
         ):
             data.pop(field, None)
         data.pop("clickable_leads", None)
@@ -129,17 +142,27 @@ def blind_clinical_item(
     return data
 
 
+def _clock_durations(item: ClinicalCaseItem) -> tuple[int, int]:
+    orient, decide = clock_for(item.situation, item.question_type)
+    if item.question_type == "stepwise" and item.prior_ecg_id:
+        # The base clock covers the final integrated decision. Every locked
+        # stage in a longitudinal episode adds another read/decision cycle.
+        # Existing compact stepwise checks retain their established clock.
+        decide = min(300, decide + STEPWISE_STAGE_SECONDS * len(item.steps))
+    return orient, decide
+
+
 def clock_spec(item: ClinicalCaseItem, tier: str) -> dict[str, Any]:
     if tier == "learn":
         return {"untimed": True}
-    orient, decide = clock_for(item.situation, item.question_type)
+    orient, decide = _clock_durations(item)
     return {"untimed": False, "orientSec": orient, "decideSec": decide}
 
 
 def _phase_duration(item: ClinicalCaseItem, tier: str, phase: str) -> int | None:
     if tier == "learn":
         return None
-    orient, decide = clock_for(item.situation, item.question_type)
+    orient, decide = _clock_durations(item)
     return orient if phase == "orient" else decide
 
 
@@ -243,6 +266,52 @@ def _clinical_competency_events(
     supported = grounding.supported_objectives(packet)
     events: list[dict[str, Any]] = []
     timed_out = bool(grade.get("timedOut"))
+    exact_outcomes = grade.get("competencyOutcomes") or []
+    if isinstance(exact_outcomes, list) and exact_outcomes:
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for outcome in exact_outcomes:
+            if not isinstance(outcome, dict):
+                continue
+            concept = str(outcome.get("concept") or "")
+            subskill = str(outcome.get("subskill") or "")
+            if (
+                concept not in supported
+                or not validate_objective_subskill(concept, subskill)
+            ):
+                continue
+            grouped.setdefault((concept, subskill), []).append(outcome)
+        for (concept, subskill), outcomes in grouped.items():
+            scores = [float(outcome.get("score", 0.0)) for outcome in outcomes]
+            stage_indices = [
+                int(outcome["stageIndex"])
+                for outcome in outcomes
+                if isinstance(outcome.get("stageIndex"), int)
+            ]
+            sources = {
+                str(outcome.get("evidenceSource") or "clinical_step_server_grade")
+                for outcome in outcomes
+            }
+            events.append({
+                "concept": concept,
+                "subskill": subskill,
+                "score": 0.0 if timed_out else sum(scores) / len(scores),
+                "correct": bool(
+                    not timed_out
+                    and outcomes
+                    and all(bool(outcome.get("correct")) for outcome in outcomes)
+                ),
+                "confidence": answer.confidence,
+                "caseId": item.ecg_id,
+                "itemId": item.item_id,
+                "stageIndices": stage_indices,
+                "evidenceSource": (
+                    next(iter(sources))
+                    if len(sources) == 1
+                    else "clinical_longitudinal_server_grade"
+                ),
+            })
+        return events
+
     axes = grade.get("axisScores") or {}
     action_correct = bool(
         not timed_out
@@ -422,6 +491,53 @@ def _score_item(
     return value
 
 
+_SELECTION_NEED_WINDOW = 0.12
+_INTERACTION_SWITCH_BONUS = 0.07
+_BLOOM_BALANCE_STEP = 0.02
+_BLOOM_BALANCE_MAX = 0.04
+
+
+def _bloom_demand(item: ClinicalCaseItem) -> str:
+    """Derive a conservative Bloom-aligned demand band from task structure.
+
+    Clinical tasks intentionally begin at application rather than simple fact
+    recall.  Trace operations apply a method, evidence comparisons analyze
+    competing claims, and triage or multi-stage decisions evaluate alternatives
+    under clinical constraints.  This stays internal selection metadata; zeroed
+    authored difficulty vectors are never treated as learner evidence.
+    """
+
+    if item.question_type == "stepwise":
+        if len(item.steps) >= 2:
+            return "evaluate"
+        return "analyze"
+    if item.question_type == "triage":
+        return "evaluate"
+    if item.question_type in {"spoterror", "matching", "oldnew"}:
+        return "analyze"
+    return "apply"
+
+
+def _selection_diversity_bonus(
+    item: ClinicalCaseItem,
+    served_items: list[ClinicalCaseItem],
+) -> float:
+    """Return a deterministic, tightly bounded interleaving preference."""
+
+    if not served_items:
+        return 0.0
+    bonus = (
+        _INTERACTION_SWITCH_BONUS
+        if item.question_type != served_items[-1].question_type
+        else 0.0
+    )
+    demand_counts = Counter(_bloom_demand(served) for served in served_items)
+    most_seen = max(demand_counts.values(), default=0)
+    demand_gap = max(0, most_seen - demand_counts.get(_bloom_demand(item), 0))
+    bonus += min(_BLOOM_BALANCE_MAX, demand_gap * _BLOOM_BALANCE_STEP)
+    return round(bonus, 3)
+
+
 def _select_next(
     store,
     item_store,
@@ -434,8 +550,9 @@ def _select_next(
     focus_subskill: str | None = None,
 ) -> ClinicalCaseItem | None:
     live_exposures = integrity.live_owner_exposures(store, learner_id)
+    pool = item_store.list_for_serving(situation=lane, status=SERVING_STATUS)
     candidates = [
-        item for item in item_store.list_for_serving(situation=lane, status=SERVING_STATUS)
+        item for item in pool
         if _lane_compatible(item, lane)
         and item.item_id not in served
         and item.ecg_id not in served_ecgs
@@ -488,14 +605,42 @@ def _select_next(
         for concept, ecg_ids in unseen_application_ecgs.items()
     }
     recent_ecgs = set(store.recent_case_ids(learner_id))
-    return max(
-        candidates,
-        key=lambda it: _score_item(
-            it,
+    personalized_scores = {
+        item.item_id: _score_item(
+            item,
             exact_mastery,
             recent_ecgs,
             application_history,
             unseen_application_counts,
+        )
+        for item in candidates
+    }
+    strongest_need = max(personalized_scores.values())
+    close_candidates = [
+        item
+        for item in candidates
+        if personalized_scores[item.item_id]
+        >= strongest_need - _SELECTION_NEED_WINDOW
+    ]
+    pool_by_id = {item.item_id: item for item in pool}
+    served_history = [
+        pool_by_id[item_id]
+        for item_id in served
+        if item_id in pool_by_id
+    ]
+
+    # Diversity can reorder only candidates inside the narrow personalized-need
+    # window.  A materially stronger need never enters competition with a lower
+    # candidate, and the final item-id key makes exact ties stable across workers.
+    return min(
+        close_candidates,
+        key=lambda item: (
+            -(
+                personalized_scores[item.item_id]
+                + _selection_diversity_bonus(item, served_history)
+            ),
+            -personalized_scores[item.item_id],
+            item.item_id,
         ),
     )
 
@@ -505,10 +650,27 @@ def _serve_payload(
     packet_provider: PacketProvider,
     session: dict[str, Any],
 ) -> dict[str, Any]:
+    # Reject an unsafe item before reading transport/session metadata. This
+    # keeps the provenance guard authoritative even in startup/runtime audits
+    # that intentionally inject a malformed item with a minimal session stub.
+    assert_learner_item_provenance(item, packet_provider)
     context_revealed = bool(session.get("contextRevealed"))
-    blinded = blind_clinical_item(item, reveal_context=context_revealed)
+    learner_id = str(session["learnerId"])
+    session_id = str(session["sessionId"])
+    blinded = blind_clinical_item(
+        item,
+        reveal_context=context_revealed,
+        option_reference=lambda option_id: public_option_reference(
+            item.item_id,
+            option_id,
+            learner_id=learner_id,
+            session_id=session_id,
+        ),
+    )
     presented_item_id = public_item_reference(
-        str(session.get("pendingItemId") or session.get("feedbackItemId") or item.item_id)
+        item.item_id,
+        learner_id=learner_id,
+        session_id=session_id,
     )
     # Authoring ids intentionally describe scenario families and therefore can
     # contain the diagnosis.  Use only the keyed transport handle in every
@@ -523,6 +685,11 @@ def _serve_payload(
                 "prompt": public_steps[index]["prompt"],
                 "answerIndex": answer_index,
                 "answerText": public_steps[index]["options"][answer_index]["text"],
+                "stage_kind": public_steps[index].get("stage_kind"),
+                "stage_title": public_steps[index].get("stage_title"),
+                "elapsed_label": public_steps[index].get("elapsed_label"),
+                "clinical_update": public_steps[index].get("clinical_update"),
+                "data_points": public_steps[index].get("data_points", []),
             }
             for index, answer_index in enumerate(committed_answers)
             if index < len(public_steps)
@@ -544,7 +711,6 @@ def _serve_payload(
             "active": active_step,
             "finalChoicesRevealed": active_step is None,
         }
-    assert_learner_item_provenance(item, packet_provider)
     packet = packet_provider(item.ecg_id) or {}
     if context_revealed and item.roi_target:
         # The response surface needs a neutral waveform concept to validate
@@ -569,9 +735,17 @@ def _serve_payload(
     blinded["tracing_provenance"] = "real_deidentified_ecg"
     blinded["context_provenance"] = "authored_simulation"
     blinded["learning_evidence"] = "formative_only"
-    blinded["content_label"] = (
-        "Automated-screened authored vignette · real de-identified ECG · formative only · pending named clinician sign-off"
-    )
+    if item.prior_ecg_id:
+        blinded["comparison_provenance"] = "same_patient_time_ordered_real_ecgs"
+        blinded["content_label"] = (
+            "Authenticated same-patient ECG comparison · authored simulated clinical timeline · "
+            "formative only · pending named clinician sign-off"
+        )
+    else:
+        blinded["content_label"] = (
+            "Automated-screened authored vignette · real de-identified ECG · formative only · "
+            "pending named clinician sign-off"
+        )
     clock = {
         **clock_spec(item, session["tier"]),
         "orientStartedAt": session.get("orientStartedAt"),
@@ -642,7 +816,7 @@ def reveal_shift_context(
         return None
     if session.get("pendingItemId") != item_id:
         return {"error": "not_pending", "pendingItemId": session.get("pendingItemId")}
-    if answer.first_look_finding is None or answer.first_look_confidence is None:
+    if answer.first_look_finding is None:
         return {"error": "first_look_required"}
     item = item_store.get_item(item_id)
     if item is None:
@@ -655,7 +829,6 @@ def reveal_shift_context(
             "firstLookFinding": answer.first_look_finding,
             "firstLookConfidence": answer.first_look_confidence,
         },
-        _phase_duration(item, session["tier"], "decide"),
     )
     if result["status"] in {"missing", "not_pending", "phase_not_activated"}:
         return {
@@ -707,6 +880,7 @@ def commit_shift_step(
         "missing",
         "not_pending",
         "context_not_revealed",
+        "phase_not_activated",
         "invalid_step",
         "step_locked",
         "step_out_of_order",
@@ -785,7 +959,7 @@ def next_shift_item(store, item_store, packet_provider: PacketProvider, session_
     claim = integrity.claim_pending_item(
         store,
         session_id=session_id,
-        item_id=public_item_reference(item.item_id),
+        item_id=item.item_id,
         ecg_id=item.ecg_id,
     )
     if claim.get("status") == "exposure_conflict":
@@ -801,7 +975,7 @@ def next_shift_item(store, item_store, packet_provider: PacketProvider, session_
     pending_id = claimed.get("pendingItemId")
     persisted = (
         item
-        if pending_id == public_item_reference(item.item_id)
+        if pending_id == item.item_id
         else item_store.get_item(pending_id)
     )
     return _serve_payload(persisted, packet_provider, claimed) if persisted else None
@@ -886,7 +1060,12 @@ def grade_and_record(
             "pendingItemId": reservation.get("pendingItemId"),
         }
     timing = store.claim_shift_submission_timing(session_id, item_id)
-    if timing["status"] in {"missing", "not_pending", "context_not_revealed"}:
+    if timing["status"] in {
+        "missing",
+        "not_pending",
+        "context_not_revealed",
+        "phase_not_activated",
+    }:
         integrity.release_answer_submission(
             store,
             session_id=session_id,
@@ -910,6 +1089,7 @@ def grade_and_record(
         update={
             "first_look_finding": committed.get("firstLookFinding"),
             "first_look_confidence": committed.get("firstLookConfidence"),
+            "first_look_timed_out": bool(committed.get("orientTimedOut")),
             "answer_time_ms": timing["answerTimeMs"],
             # There is no independent server event for a confidence-only click;
             # retaining a client duration would falsely imply verified timing.
@@ -924,13 +1104,15 @@ def grade_and_record(
             if item.question_type == "matching"
             else not grade["missedObjectives"] and grade["score"] >= 0.6
         )
-        calibration_event = {
-            "itemId": item_id,
-            "score": grade["score"],
-            "correct": correct,
-            "decideMs": timing["answerTimeMs"],
-            **(grade.get("calibrationEvent") or {}),
-        }
+        calibration_event = None
+        if answer.confidence is not None:
+            calibration_event = {
+                "itemId": item_id,
+                "score": grade["score"],
+                "correct": correct,
+                "decideMs": timing["answerTimeMs"],
+                **(grade.get("calibrationEvent") or {}),
+            }
         recorded = integrity.finalize_answer(
             store,
             session_id=session_id,
@@ -944,8 +1126,10 @@ def grade_and_record(
             },
             grade=grade,
             correct=correct,
-            confidence=answer.confidence or 3,
-            calibration_event=None if session["tier"] == "learn" else calibration_event,
+            confidence=answer.confidence,
+            calibration_event=(
+                None if session["tier"] == "learn" else calibration_event
+            ),
             competency_events=_clinical_competency_events(item, packet, grade, answer),
             lease_id=str(reservation["leaseId"]),
             submission_key=str(reservation["submissionKey"]),
@@ -1152,6 +1336,8 @@ def _performance_domains(
     first_looks: list[dict[str, Any]] = []
     for row in answers:
         assessment = row.get("grade", {}).get("firstLookAssessment")
+        if isinstance(assessment, dict) and assessment.get("timedOut") is True:
+            continue
         if isinstance(assessment, dict) and assessment.get("agreement") in {True, False}:
             first_looks.append(assessment)
     matched = sum(1 for assessment in first_looks if assessment.get("agreement") is True)
@@ -1186,7 +1372,10 @@ def _performance_domains(
     unsafe_choices = sum(
         1
         for row in answers
-        if (row.get("grade", {}).get("calibrationEvent") or {}).get("unsafe")
+        if (
+            (row.get("grade", {}).get("calibrationEvent") or {}).get("unsafe")
+            or row.get("grade", {}).get("answerClass") == "unsafe"
+        )
     )
     calibration_score = (
         round(sum(calibration_scores) / len(calibration_scores), 3)
@@ -1241,9 +1430,67 @@ def _performance_domains(
             "broadCategoryMatches": matched,
             "highConfidenceMismatches": high_confidence_mismatches,
             "score": calibration_score,
-            "label": confidence_label if calibration_scores else calibration_summary,
+            "label": confidence_label,
         },
     }
+
+
+def _case_review_summaries(
+    answers: list[dict[str, Any]],
+    item_store,
+    packet_provider: PacketProvider | None,
+) -> list[dict[str, Any]]:
+    """Project safe per-attempt metadata for the completed-set review UI.
+
+    The full authored question, learner submission, grounded answer guide, and
+    waveform are reconstructed by the existing owner-bound replay endpoint.
+    This summary therefore contains only durable outcomes and display metadata;
+    it never becomes a second answer-key transport.
+    """
+
+    summaries: list[dict[str, Any]] = []
+    for attempt_index, answer in enumerate(answers, start=1):
+        grade = answer.get("grade") if isinstance(answer.get("grade"), dict) else {}
+        item_id = str(answer.get("itemId") or "")
+        ecg_id = str(answer.get("ecgId") or "")
+        item = item_store.get_item(item_id) if item_id else None
+        review_available = bool(
+            item is not None
+            and str(item.ecg_id) == ecg_id
+            and item.validation_status == SERVING_STATUS
+        )
+        if review_available and packet_provider is not None:
+            try:
+                assert_learner_item_provenance(item, packet_provider)
+            except Exception:
+                review_available = False
+
+        objectives = list(
+            dict.fromkeys(
+                str(value)
+                for value in (
+                    *(grade.get("correctObjectives") or []),
+                    *(grade.get("missedObjectives") or []),
+                )
+                if value
+            )
+        )
+        summary: dict[str, Any] = {
+            "attemptIndex": attempt_index,
+            "questionType": item.question_type if review_available else None,
+            "situation": item.situation if review_available else None,
+            "score": round(float(grade.get("score") or 0.0), 3),
+            "correct": bool(answer.get("correct")),
+            "title": (
+                str(item.stem).strip()
+                if review_available
+                else f"Clinical case {attempt_index}"
+            ),
+            "objectiveLabels": [concept_label(value) for value in objectives],
+            "reviewAvailable": review_available,
+        }
+        summaries.append(summary)
+    return summaries
 
 
 def shift_report(
@@ -1279,6 +1526,9 @@ def shift_report(
         "status": session["status"],
     }
     if item_store is not None and answers:
+        report["caseReviews"] = _case_review_summaries(
+            answers, item_store, packet_provider
+        )
         report["debrief"] = build_shift_debrief(
             session,
             answers,

@@ -15,10 +15,25 @@ export type ClinicalOption = {
 };
 
 export type StepOption = { text: string };
-export type StepwiseStep = { prompt: string; options: StepOption[] };
+export type StepwiseStageKind = "ecg" | "decision" | "reassessment" | "handoff";
+export type StepwiseDataPoint = {
+  label: string;
+  value: string;
+  detail?: string | null;
+  trend?: "up" | "down" | "stable" | "new" | null;
+  source?: "source_metadata" | "authored_simulation";
+};
+export type StepwiseStageMetadata = {
+  stage_kind?: StepwiseStageKind | null;
+  stage_title?: string | null;
+  elapsed_label?: string | null;
+  clinical_update?: string | null;
+  data_points?: StepwiseDataPoint[];
+};
+export type StepwiseStep = StepwiseStageMetadata & { prompt: string; options: StepOption[] };
 export type StepwiseState = {
   totalSteps: number;
-  committed: Array<{
+  committed: Array<StepwiseStageMetadata & {
     stepIndex: number;
     prompt: string;
     answerIndex: number;
@@ -76,6 +91,7 @@ export type BlindedItem = {
   click_roi_concept?: string | null;
   tracing_provenance?: "real_deidentified_ecg";
   context_provenance?: "authored_simulation";
+  comparison_provenance?: "same_patient_time_ordered_real_ecgs";
   learning_evidence?: "formative_only";
   content_label?: string;
 };
@@ -109,10 +125,39 @@ export type NextResult = {
   reason?: string;
   clock?: ClockSpec;
   contextRevealed?: boolean;
-  firstLook?: { firstLookFinding: string; firstLookConfidence: number } | null;
+  firstLook?: { firstLookFinding: string; firstLookConfidence?: number | null } | null;
 };
 
 export type AxisScore = Record<string, number>;
+
+export type ClinicalCompetencyOutcome = {
+  concept: string;
+  subskill: "recognize" | "localize" | "measure" | "discriminate" | "explain_mechanism" | "synthesize" | "apply_in_context" | "calibrate_confidence";
+  score: number;
+  correct: boolean;
+  stageIndex: number | null;
+  stageTitle: string;
+  stageKind: StepwiseStageKind | null;
+  evidenceSource: "clinical_step_server_grade" | "clinical_action_server_grade";
+};
+
+export type ClinicalStepFeedback = {
+  stageIndex: number;
+  stageKind: StepwiseStageKind | null;
+  stageTitle: string;
+  elapsedLabel?: string | null;
+  clinicalUpdate?: string | null;
+  dataPoints: StepwiseDataPoint[];
+  prompt: string;
+  learnerOptionIndex: number | null;
+  learnerAnswer: string;
+  supportedOptionIndex: number | null;
+  supportedAnswer: string;
+  correct: boolean;
+  selectionCorrect: boolean;
+  timedOut: boolean;
+  explanation: string;
+};
 
 export type ClinicalGrade = {
   /** Public Clinical item reference (not a corpus ECG id). */
@@ -121,6 +166,8 @@ export type ClinicalGrade = {
   correctObjectives: string[];
   missedObjectives: string[];
   feedback: string;
+  learnerAnswer?: string | null;
+  supportedAnswer?: string | null;
   teachingPoints: string[];
   answerClass: string | null;
   axisScores: AxisScore;
@@ -133,7 +180,7 @@ export type ClinicalGrade = {
   clinicalApplicationEvidence?: "formative_only";
   competencyReceipts?: Array<{
     concept: string;
-    subskill: "apply_in_context" | "localize" | "measure";
+    subskill: ClinicalCompetencyOutcome["subskill"];
     score: number;
     correct: boolean;
     formativeScore: number;
@@ -142,9 +189,11 @@ export type ClinicalGrade = {
     formativeOnly: true;
     retentionEligible: false;
     nextDueAt: string | null;
-    evidenceSource: "clinical_action_server_grade" | "clinical_trace_roi_server_grade" | "clinical_measurement_server_grade";
+    evidenceSource: "clinical_action_server_grade" | "clinical_step_server_grade" | "clinical_longitudinal_server_grade" | "clinical_trace_roi_server_grade" | "clinical_measurement_server_grade";
   }>;
   stepResults?: boolean[];
+  stepFeedback?: ClinicalStepFeedback[];
+  competencyOutcomes?: ClinicalCompetencyOutcome[];
   matchingCorrect?: boolean;
   matchingResults?: Array<{
     rowId: string;
@@ -157,6 +206,7 @@ export type ClinicalGrade = {
     confidence: number | null;
     expectedCategories: string[];
     agreement: boolean | null;
+    timedOut: boolean;
     formativeOnly: true;
     exactPathologyMasterySuppressed: true;
   };
@@ -176,7 +226,11 @@ export type ShiftSession = {
   pendingItemId?: string | null;
   feedbackItemId?: string | null;
   contextRevealed?: boolean;
-  firstLook?: { firstLookFinding: string; firstLookConfidence: number } | null;
+  firstLook?: {
+    firstLookFinding: string;
+    firstLookConfidence?: number | null;
+    orientTimedOut?: boolean;
+  } | null;
   stepAnswers?: number[];
   orientStartedAt?: string | null;
   orientDeadlineAt?: string | null;
@@ -188,6 +242,21 @@ export type ShiftSession = {
 
 export type ShiftReport = {
   sessionId: string;
+  /** Opaque reference used to open the server-backed set review. */
+  reviewSessionRef?: string;
+  reviewHref?: string;
+  caseReviews?: Array<{
+    attemptIndex: number;
+    questionType: string | null;
+    situation: string | null;
+    score: number;
+    correct: boolean;
+    title: string;
+    objectiveLabels: string[];
+    reviewAvailable: boolean;
+    reviewHref?: string;
+    replayHref?: string;
+  }>;
   lane: Lane;
   tier: Mode;
   answered: number;
@@ -288,7 +357,7 @@ export type ShiftReport = {
 };
 
 export type ClinicalAnswerPayload = {
-  /** ECG-only commitment captured before the authored context is revealed. */
+  /** Broad interpretation captured after the ordering indication and before the decision prompt. */
   firstLookFinding?: string | null;
   firstLookConfidence?: number | null;
   selectedOptionId?: string | null;

@@ -52,6 +52,11 @@ def test_unassessed_plan_starts_with_baseline_and_never_displays_a_mastery_prior
     assert plan["stages"][0]["receiptConcept"] == "normal_ecg"
     assert plan["stages"][0]["receiptSubskill"] == "recognize"
     assert plan["stages"][0]["stageKind"] == "baseline"
+    assert plan["stages"][0]["suggestedLength"] == 5
+    assert plan["stages"][0]["suggestedPace"] == "untimed"
+    baseline_query = parse_qs(urlparse(plan["stages"][0]["href"]).query)
+    assert baseline_query["suggestedLength"] == ["5"]
+    assert baseline_query["pace"] == ["untimed"]
     assert plan["integration"] is None
     assert plan["guidedRemediation"] is None
     assert plan["integrationReadiness"]["unlocked"] is False
@@ -97,7 +102,7 @@ def test_due_and_high_confidence_evidence_drive_plan_before_unseen_cells() -> No
         "purpose": plan["clinicalApplication"]["purpose"],
         "href": (
             "/practice?focus=atrial_fibrillation&subskill=apply_in_context"
-            "&returnTo=%2Fprofile%3Ftab%3Dplan"
+            "&returnTo=%2Fhome%3Fpanel%3Dplan"
         ),
         "concept": "atrial_fibrillation",
         "subskill": "apply_in_context",
@@ -277,10 +282,10 @@ def test_every_prescribed_subskill_links_to_a_mode_that_emits_that_exact_receipt
         assert stage["receiptSubskill"] == subskill
         assert f"subskill={subskill}" in stage["href"]
         query = parse_qs(urlparse(stage["href"]).query)
-        expected_length = 25 if expected_mode == "train" else 10
+        expected_length = 25 if expected_mode == "train" else 5
         assert stage["suggestedLength"] == expected_length
         assert query["suggestedLength"] == [str(expected_length)]
-        assert query["returnTo"] == ["/profile?tab=plan"]
+        assert query["returnTo"] == ["/home?panel=plan"]
 
     exact_synthesis = build_mastery_plan(
         {"subskillMastery": []},
@@ -479,7 +484,7 @@ def test_saved_session_preferences_shape_runnable_stages_without_weakening_recei
     assert training_stage["receiptSubskill"] == "discriminate"
     assert training["preferenceContext"]["primaryGoal"] == "clinical_reading"
 
-    recognition = build_mastery_plan(
+    baseline_recognition = build_mastery_plan(
         {"subskillMastery": []},
         {"atrial_fibrillation": 25},
         definitions=[
@@ -494,12 +499,52 @@ def test_saved_session_preferences_shape_runnable_stages_without_weakening_recei
             "rapidPace": "emergency",
         },
     )
-    rapid_stage = recognition["stages"][0]
-    assert rapid_stage["suggestedLength"] == 50
-    assert rapid_stage["suggestedPace"] == "emergency"
-    rapid_query = parse_qs(urlparse(rapid_stage["href"]).query)
-    assert rapid_query["suggestedLength"] == ["50"]
-    assert rapid_query["pace"] == ["emergency"]
+    baseline_stage = baseline_recognition["stages"][0]
+    assert baseline_stage["stageKind"] == "baseline"
+    assert baseline_stage["suggestedLength"] == 5
+    assert baseline_stage["suggestedPace"] == "untimed"
+    baseline_query = parse_qs(urlparse(baseline_stage["href"]).query)
+    assert baseline_query["suggestedLength"] == ["5"]
+    assert baseline_query["pace"] == ["untimed"]
+
+    established_recognition = build_mastery_plan(
+        {
+            "subskillMastery": [
+                {
+                    "concept": "atrial_fibrillation",
+                    "subskill": "recognize",
+                    "attempts": 1,
+                    "independentAttempts": 1,
+                    "independentMastery": 0.7,
+                    "highConfidenceWrong": 0,
+                    "isDue": False,
+                    "dueState": "scheduled",
+                    "overdueDays": 0,
+                    "distinctSuccessfulEcgs": 1,
+                    "distinctModes": 1,
+                }
+            ]
+        },
+        {"atrial_fibrillation": 25},
+        definitions=[
+            _definition(
+                "atrial_fibrillation",
+                "atrial_fibrillation",
+                "recognize",
+            )
+        ],
+        preferences={
+            "defaultSessionLength": 50,
+            "rapidPace": "emergency",
+        },
+    )
+    established_stage = established_recognition["stages"][0]
+    assert established_stage["stageKind"] == "consolidation"
+    assert established_stage["suggestedLength"] == 50
+    assert established_stage["suggestedPace"] == "emergency"
+    established_query = parse_qs(urlparse(established_stage["href"]).query)
+    assert established_query["suggestedLength"] == ["50"]
+    assert established_query["pace"] == ["emergency"]
 
     synthesis = build_mastery_plan(
         {"subskillMastery": []},

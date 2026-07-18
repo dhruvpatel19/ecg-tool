@@ -1,12 +1,11 @@
 "use client";
 
-import { Activity, ArrowLeft, ArrowRight, CheckCircle2, Clock, GitBranch, HeartPulse, RefreshCw, ShieldCheck, Sparkles, Stethoscope, Timer } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpenCheck, CheckCircle2, Clock, LayoutDashboard, RefreshCw, RotateCcw, Sparkles, Stethoscope, Timer } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ECGViewer } from "@/components/ECGViewer";
 import { TutorChat } from "@/components/TutorChat";
 import {
-  DisclosureArea,
   LearningWorkspaceShell,
   ResponseRail,
   SessionBar,
@@ -28,8 +27,20 @@ import {
   type NextResult,
   type ShiftReport,
   type ShiftSession,
+  type StepwiseStageMetadata,
 } from "@/lib/clinical";
-import { PinnedRhythmStrip } from "./PinnedRhythmStrip";
+import {
+  ClinicalEvidenceTimeline,
+  ClinicalImmediateReview,
+  ClinicalJourneyProgress,
+  ClinicalPatientSnapshot,
+  ClinicalSetReviewExperience,
+  ClinicalSetupExperience,
+  buildClinicalDomainSummaries,
+  buildClinicalJourney,
+  type ClinicalCaseReviewItem,
+  type ClinicalSBIFeedback,
+} from "./ClinicalExperience";
 import { useAuth } from "@/lib/auth";
 import { api, type ClinicalTutorContextRef } from "@/lib/api";
 import type { LearningSubskill } from "@/lib/learning/interactionTypes";
@@ -88,6 +99,89 @@ function readableApiError(caught: unknown, fallback: string) {
   return detail;
 }
 
+function clinicalStageLabel(stageKind: StepwiseStageMetadata["stage_kind"]) {
+  const labels = {
+    ecg: "ECG interpretation",
+    decision: "Clinical decision",
+    reassessment: "Reassessment",
+    handoff: "Handoff",
+  } as const;
+  return stageKind ? labels[stageKind] : "Patient update";
+}
+
+function hasEpisodeStageMetadata(stage: StepwiseStageMetadata) {
+  return Boolean(
+    stage.stage_kind
+    || stage.stage_title
+    || stage.elapsed_label
+    || stage.clinical_update
+    || stage.data_points?.length,
+  );
+}
+
+function ClinicalEpisodeStageUpdate({
+  stage,
+  stepNumber,
+  status,
+}: {
+  stage: StepwiseStageMetadata;
+  stepNumber: number;
+  status: "active" | "committed";
+}) {
+  const headingId = useId();
+  if (!hasEpisodeStageMetadata(stage)) return null;
+  const title = stage.stage_title || clinicalStageLabel(stage.stage_kind);
+  const statusLabel = status === "active" ? "Current patient update" : "Completed patient update";
+  const stageSources = new Set(stage.data_points?.map((point) => point.source).filter(Boolean));
+  const sourceLabel = stageSources.has("authored_simulation")
+    ? "Authored simulation"
+    : stageSources.has("source_metadata")
+      ? "Source-verified comparison metadata"
+      : null;
+  return (
+    <article
+      className="clinical-episode-update"
+      data-status={status}
+      aria-labelledby={headingId}
+      role={status === "active" ? "status" : undefined}
+      aria-live={status === "active" ? "polite" : undefined}
+      aria-atomic={status === "active" ? true : undefined}
+    >
+      <span className="sr-only">{statusLabel}</span>
+      <header>
+        <div>
+          <span className="clinical-episode-stage-kind">{clinicalStageLabel(stage.stage_kind)} · Stage {stepNumber}</span>
+          <h3 id={headingId}>{title}</h3>
+        </div>
+        {stage.elapsed_label ? <span className="clinical-episode-elapsed"><Clock size={13} aria-hidden="true" /> {stage.elapsed_label}</span> : null}
+      </header>
+      {sourceLabel ? (
+        <span
+          className="clinical-episode-source"
+          data-source={stageSources.has("authored_simulation") ? "authored" : "source"}
+        >
+          {sourceLabel}
+        </span>
+      ) : null}
+      {stage.clinical_update ? <p>{stage.clinical_update}</p> : null}
+      {stage.data_points?.length ? (
+        <dl className="clinical-episode-data" aria-label={`${title} clinical data`}>
+          {stage.data_points.map((point, index) => (
+            <div key={`${point.label}-${index}`}>
+              <dt>{point.label}</dt>
+              <dd>
+                <strong>{point.value}</strong>
+                {point.trend ? <span className="clinical-episode-trend">{humanLabel(point.trend)}</span> : null}
+                {point.detail ? <small>{point.detail}</small> : null}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+    </article>
+  );
+}
+
 export function ClinicalDecisions() {
   const { identityKey } = useAuth();
   const { preferences, loading: preferencesLoading } = useLearningPreferences();
@@ -111,6 +205,7 @@ export function ClinicalDecisions() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmAbandon, setConfirmAbandon] = useState(false);
+  const [leaveAfterAbandon, setLeaveAfterAbandon] = useState("");
   const [busy, setBusy] = useState(false);
   const [hydrating, setHydrating] = useState(true);
   const [returnTo, setReturnTo] = useState("");
@@ -119,15 +214,15 @@ export function ClinicalDecisions() {
   const [competencyReceipt, setCompetencyReceipt] = useState<string | null>(null);
   const [handoffResolution, setHandoffResolution] = useState<HandoffTargetResolution | null>(null);
   const [handoffUnavailable, setHandoffUnavailable] = useState("");
+  const [activeShiftIntentConflict, setActiveShiftIntentConflict] = useState("");
   const [coverageReady, setCoverageReady] = useState(false);
-  const [reviewStatus, setReviewStatus] = useState<{ clinicianReviewed: boolean; label: string }>({
-    clinicianReviewed: false,
-    label: "pending_named_clinician_signoff",
-  });
   const [aiViewerActions, setAiViewerActions] = useState<ViewerAction[]>([]);
+  const [reviewActionStep, setReviewActionStep] = useState(0);
+  const [reviewPlaybackKey, setReviewPlaybackKey] = useState(0);
   const contextRef = useRef<HTMLDivElement | null>(null);
   const submissionRef = useRef(false);
   const abandonTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const dialogTriggerRef = useRef<HTMLButtonElement | null>(null);
   const abandonDialogRef = useRef<HTMLElement | null>(null);
   const keepWorkingRef = useRef<HTMLButtonElement | null>(null);
   const lengthChoiceSourceRef = useRef<"untouched" | "preference" | "explicit" | "restored" | "user">("untouched");
@@ -138,7 +233,14 @@ export function ClinicalDecisions() {
 
   const closeAbandonDialog = useCallback(() => {
     setConfirmAbandon(false);
-    window.requestAnimationFrame(() => abandonTriggerRef.current?.focus());
+    setLeaveAfterAbandon("");
+    window.requestAnimationFrame(() => (dialogTriggerRef.current ?? abandonTriggerRef.current)?.focus());
+  }, []);
+
+  const openAbandonDialog = useCallback((trigger: HTMLButtonElement, destination = "") => {
+    dialogTriggerRef.current = trigger;
+    setLeaveAfterAbandon(destination);
+    setConfirmAbandon(true);
   }, []);
 
   useEffect(() => {
@@ -225,9 +327,8 @@ export function ClinicalDecisions() {
     setCoverageReady(false);
     setHandoffUnavailable("");
     clinicalApi.bankCoverage()
-      .then(({ coverage, applicationCoverage, clinicianReviewed, reviewStatus: liveReviewStatus }) => {
+      .then(({ coverage, applicationCoverage }) => {
         if (cancelled) return;
-        setReviewStatus({ clinicianReviewed, label: liveReviewStatus });
         const source = handoffSubskill === "apply_in_context"
           ? Object.fromEntries(Object.entries(applicationCoverage ?? {}).flatMap(([concept, lanes]) => {
             const depth = lanes[lane];
@@ -270,6 +371,7 @@ export function ClinicalDecisions() {
   const [phaseReady, setPhaseReady] = useState(false);
   const clockEndRef = useRef<number>(0);
   const activationRef = useRef("");
+  const waveformReadyRef = useRef({ key: "", current: false, prior: false });
 
   const item = current?.item ?? null;
   const isShift = mode === "shift";
@@ -315,7 +417,6 @@ export function ClinicalDecisions() {
     setTutorContext(null);
     setAnswer(next.firstLook ? {
       firstLookFinding: next.firstLook.firstLookFinding,
-      firstLookConfidence: next.firstLook.firstLookConfidence,
     } : {});
     setStepDraft(null);
     submissionRef.current = false;
@@ -324,8 +425,10 @@ export function ClinicalDecisions() {
     setRemaining(0);
     clockEndRef.current = 0;
     activationRef.current = "";
+    waveformReadyRef.current = { key: "", current: false, prior: false };
     setCompetencyReceipt(null);
     setAiViewerActions([]);
+    setReviewActionStep(0);
     const nextPhase = next.contextRevealed ? "decide" : "orient";
     setPhase(nextPhase);
     setCurrent(next);
@@ -333,12 +436,55 @@ export function ClinicalDecisions() {
   }, [syncPhaseClock]);
 
   useEffect(() => {
+    const actions = grade?.viewerActions ?? [];
+    if (phase !== "feedback" || actions.length === 0) {
+      setReviewActionStep(0);
+      return;
+    }
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      || document.documentElement.dataset.reduceMotion === "true";
+    if (reduceMotion) {
+      setReviewActionStep(actions.length);
+      return;
+    }
+    setReviewActionStep(1);
+    const id = window.setInterval(() => {
+      setReviewActionStep((currentStep) => {
+        if (currentStep >= actions.length) {
+          window.clearInterval(id);
+          return currentStep;
+        }
+        return currentStep + 1;
+      });
+    }, 900);
+    return () => window.clearInterval(id);
+  }, [grade?.caseId, grade?.viewerActions, phase, reviewPlaybackKey]);
+
+  useEffect(() => {
     let cancelled = false;
     setHydrating(true);
     setError(null);
+    setActiveShiftIntentConflict("");
     clinicalApi.active()
       .then((lifecycle) => {
         if (cancelled || !lifecycle.session) return;
+        const params = new URLSearchParams(window.location.search);
+        const requestedFocus = params.get("focus") ?? "";
+        const requestedSubskill = params.get("subskill") ?? "";
+        if (
+          requestedFocus
+          && (
+            lifecycle.session.focusObjective !== requestedFocus
+            || (requestedSubskill && lifecycle.session.focusSubskill !== requestedSubskill)
+          )
+        ) {
+          const savedTarget = lifecycle.session.focusObjective
+            ? conceptLabel(lifecycle.session.focusObjective)
+            : "mixed clinical cases";
+          setActiveShiftIntentConflict(
+            `Your saved Clinical ${lifecycle.session.tier === "shift" ? "shift" : "set"} for ${savedTarget} was resumed unchanged. The recommended ${conceptLabel(requestedFocus)} application was not substituted into it. Finish or abandon the saved work, then open that recommendation again.`,
+          );
+        }
         setSession(lifecycle.session);
         setLane(lifecycle.session.lane);
         setMode(lifecycle.session.tier);
@@ -416,7 +562,7 @@ export function ClinicalDecisions() {
             );
           } else {
             setCompetencyReceipt(
-              `Practice saved: ${conceptLabel(receipt.concept)} · ${skillLabel(receipt.subskill)}. This case will shape what is recommended next.`,
+              `Practice saved: ${conceptLabel(receipt.concept)} · ${skillLabel(receipt.subskill)}. This result will shape future Clinical case selection.`,
             );
           }
         } else if (exactReceipts.length) {
@@ -455,7 +601,8 @@ export function ClinicalDecisions() {
 
   // Orientation and decision are deliberately partitioned. Expiring the ECG-only
   // first-look clock must never submit an answer before clinical choices and a
-  // confidence control are available; revealing context starts a fresh decision clock.
+  // confidence control are available. The fresh decision clock starts only after
+  // the revealed response surface has painted and every required ECG is ready.
   useEffect(() => {
     if (!running) return;
     const id = window.setInterval(() => {
@@ -502,6 +649,52 @@ export function ClinicalDecisions() {
       });
   }, [session, current, phase, untimed, phaseReady, syncPhaseClock]);
 
+  const onWaveformReady = useCallback((which: "current" | "prior") => {
+    if (!current?.itemId || !item) return;
+    const readinessKey = current.itemId;
+    if (waveformReadyRef.current.key !== readinessKey) {
+      waveformReadyRef.current = { key: readinessKey, current: false, prior: false };
+    }
+    waveformReadyRef.current[which] = true;
+    const needsPrior = Boolean(
+      item.display_spec.mode === "stacked_twelve_lead" && item.prior_ecg_ref,
+    );
+    if (waveformReadyRef.current.current && (!needsPrior || waveformReadyRef.current.prior)) {
+      onReady();
+    }
+  }, [current, item, onReady]);
+
+  useEffect(() => {
+    if (
+      phase !== "decide"
+      || phaseReady
+      || untimed
+      || !current?.itemId
+      || !item
+    ) return;
+    const readiness = waveformReadyRef.current;
+    const needsPrior = Boolean(
+      item.display_spec.mode === "stacked_twelve_lead" && item.prior_ecg_ref,
+    );
+    if (
+      readiness.key !== current.itemId
+      || !readiness.current
+      || (needsPrior && !readiness.prior)
+    ) return;
+
+    // The ECGs were already painted for first look. Wait through the revealed
+    // context's next paint as a separate readiness boundary before activating
+    // the server clock; comparison cases require both waveform callbacks above.
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => onReady());
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [current?.itemId, item, onReady, phase, phaseReady, untimed]);
+
   async function startShift() {
     if (handoffFocus && !coverageReady) {
       setError("Verifying the live Clinical case coverage for this handoff. Try again in a moment.");
@@ -542,24 +735,25 @@ export function ClinicalDecisions() {
   }
 
   async function commitFirstLook() {
-    if (!session || !current?.itemId || !answer.firstLookFinding || !answer.firstLookConfidence) return;
+    if (!session || !current?.itemId || !answer.firstLookFinding) return;
     setBusy(true);
     setError(null);
     try {
       const revealed = await clinicalApi.revealContext(session.sessionId, current.itemId, {
         firstLookFinding: answer.firstLookFinding,
-        firstLookConfidence: answer.firstLookConfidence,
       });
       setCurrent(revealed);
       setAnswer((currentAnswer) => ({
         ...currentAnswer,
         firstLookFinding: revealed.firstLook?.firstLookFinding ?? currentAnswer.firstLookFinding,
-        firstLookConfidence: revealed.firstLook?.firstLookConfidence ?? currentAnswer.firstLookConfidence,
       }));
       setPhase("decide");
       setStepDraft(null);
-      setPhaseReady(true);
-      activationRef.current = `${session.sessionId}:${current.itemId}:decide`;
+      const decisionAlreadyStarted = Boolean(revealed.clock?.decideStartedAt);
+      setPhaseReady(decisionAlreadyStarted || Boolean(revealed.clock?.untimed));
+      activationRef.current = decisionAlreadyStarted
+        ? `${session.sessionId}:${current.itemId}:decide`
+        : "";
       syncPhaseClock(revealed, "decide");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not reveal the clinical context.");
@@ -610,6 +804,7 @@ export function ClinicalDecisions() {
 
   async function abandonShift() {
     if (!session || session.status !== "active" || busy) return;
+    const destination = leaveAfterAbandon;
     const resumeClockOnFailure = running;
     stopClock();
     setBusy(true);
@@ -641,6 +836,7 @@ export function ClinicalDecisions() {
         `${isShift ? "Shift" : "Learning set"} closed. Completed cases stay in your history; the current unsubmitted case was discarded. Your setup choices are unchanged.`,
       );
       setView("picker");
+      if (destination) window.location.assign(destination);
     } catch (e) {
       closeAbandonDialog();
       setError(e instanceof Error ? e.message : `Could not abandon this Clinical ${sessionNoun}.`);
@@ -683,198 +879,183 @@ export function ClinicalDecisions() {
 
   // --- render ---------------------------------------------------------------
   if (view === "picker") {
+    const startDisabled = hydrating
+      || preferencesLoading
+      || Boolean(handoffUnavailable)
+      || Boolean(handoffFocus && !coverageReady);
+    const setupStatus = hydrating
+      ? `Checking for a saved ${sessionNoun}…`
+      : preferencesLoading
+        ? "Loading your setup…"
+        : handoffFocus && !coverageReady
+          ? "Finding a suitable case…"
+          : `Preparing your ${sessionNoun}…`;
     return (
-      <div className="clinical-shell">
-        <header className="page-header">
-          <div>
-            <span className="eyebrow"><Stethoscope size={15} aria-hidden="true" /> Clinical decisions</span>
-            <h1>Use the ECG to make<br />the next decision.</h1>
-            <p className="muted">
-              Situation-framed cases where the ECG changes triage, medication safety, disposition, or follow-up.
-              Every labeled tracing is real; the patient context is authored and clearly disclosed.
-            </p>
-          </div>
-          {returnDestination ? <Link className="button subtle" href={returnDestination.href}><ArrowLeft size={16} /> {returnDestination.label}</Link> : null}
-        </header>
-        {handoffFocus ? (
-          <div className="selection-note" style={{ marginBottom: 14 }}>
-            From your {handoffSource}: apply <strong>{handoffFocus ? conceptLabel(handoffFocus) : "the current skill"}</strong>
-            {handoffSubskill ? <> by practicing <strong>{skillLabel(handoffSubskill)}</strong></> : null} in a patient-care decision.
-            {handoffResolution ? <> The first case focuses on <strong>{conceptLabel(handoffResolution.caseConcept)}</strong>.</> : null} Your ECG read and clinical decision are tracked separately.
-          </div>
-        ) : null}
-        {handoffUnavailable ? <div className="warning" role="alert" style={{ marginBottom: 14 }}>{handoffUnavailable}</div> : null}
-        {!reviewStatus.clinicianReviewed ? (
-          <div className="selection-note" role="status" style={{ marginBottom: 14 }}>
-            <strong>Supervised formative prototype:</strong> these cases passed automated provenance and grading checks, but named clinician sign-off is still pending. They do not award independent clinical mastery.
-          </div>
-        ) : null}
-        {notice ? <div className="selection-note" role="status" style={{ marginBottom: 14 }}>{notice}</div> : null}
-        {error ? (
-          <div className="warning mode-recovery-notice" role="alert">
-            <span>{error}</span>
-            <button className="button subtle small" type="button" onClick={() => setHydrationRetryKey((value) => value + 1)}>
-              <RefreshCw size={15} aria-hidden="true" /> Retry saved session check
-            </button>
-          </div>
-        ) : null}
-        <section className="panel pad clinical-picker">
-          <div className="field">
-            <span className="field-label" id="clinical-setting-label">Setting</span>
-            <div className="segmented" role="group" aria-labelledby="clinical-setting-label">
-              {LANES.map((l) => (
-                <button key={l} type="button" className={l === lane ? "active" : ""} aria-pressed={l === lane} onClick={() => setLane(l)}>
-                  {LANE_LABEL[l]}
+      <ClinicalSetupExperience
+        lane={lane}
+        onLaneChange={setLane}
+        mode={mode}
+        onModeChange={setMode}
+        length={length}
+        onLengthChange={(nextLength) => {
+          lengthChoiceSourceRef.current = "user";
+          setLength(nextLength);
+        }}
+        lengthOptions={LENGTHS}
+        onStart={() => void startShift()}
+        busy={busy || hydrating || preferencesLoading || Boolean(handoffFocus && !coverageReady)}
+        disabled={startDisabled}
+        startLabel={isShift ? "Start on-shift set" : "Begin learning set"}
+        busyLabel={setupStatus}
+        hero={{
+          action: returnDestination ? {
+            label: returnDestination.label,
+            href: returnDestination.href,
+            icon: <ArrowLeft size={16} aria-hidden="true" />,
+            tone: "quiet",
+          } : undefined,
+        }}
+        recommendation={{
+          body: handoffResolution
+            ? `Use a patient-care decision to strengthen ${conceptLabel(handoffResolution.caseConcept)}.`
+            : "Your set will mix ECG interpretation, evidence tasks, and clinical decisions based on your recent learning.",
+          focusLabel: handoffResolution ? conceptLabel(handoffResolution.caseConcept) : undefined,
+          reason: handoffResolution
+            ? `Recommended from your ${handoffSource}; the first case will honor that focus.`
+            : "Cases stay varied so you practice transferring skills instead of memorizing one presentation.",
+        }}
+        launchDetail="The case mix adapts behind the scenes; no extra topic filter is needed."
+        notices={(
+          <>
+            {activeShiftIntentConflict ? <div className="warning" role="alert">{activeShiftIntentConflict}</div> : null}
+            {handoffUnavailable ? <div className="warning" role="alert">{handoffUnavailable}</div> : null}
+            {notice ? <div className="selection-note" role="status">{notice}</div> : null}
+            {error ? (
+              <div className="warning mode-recovery-notice" role="alert">
+                <span>{error}</span>
+                <button className="button subtle small" type="button" onClick={() => setHydrationRetryKey((value) => value + 1)}>
+                  <RefreshCw size={15} aria-hidden="true" /> Retry saved session check
                 </button>
-              ))}
-            </div>
-            <p className="muted clinical-data-boundary">Critical-care practice will open only after validated acute-rhythm ECGs are connected.</p>
-          </div>
-          <div className="field">
-            <span className="field-label" id="clinical-mode-label">Mode</span>
-            <div className="segmented" role="group" aria-labelledby="clinical-mode-label">
-              <button type="button" className={mode === "learn" ? "active" : ""} aria-pressed={mode === "learn"} onClick={() => setMode("learn")}>
-                Learn (untimed)
-              </button>
-              <button type="button" className={mode === "shift" ? "active" : ""} aria-pressed={mode === "shift"} onClick={() => setMode("shift")}>
-                Shift (timed)
-              </button>
-            </div>
-          </div>
-          <div className="field">
-            <span className="field-label" id="clinical-length-label">Length</span>
-            <div className="segmented" role="group" aria-labelledby="clinical-length-label">
-              {LENGTHS.map((n) => (
-                <button key={n} type="button" className={n === length ? "active" : ""} aria-pressed={n === length} onClick={() => {
-                  lengthChoiceSourceRef.current = "user";
-                  setLength(n);
-                }}>
-                  {n} cases
-                </button>
-              ))}
-            </div>
-          </div>
-          <button className="button primary" type="button" onClick={() => void startShift()} disabled={busy || hydrating || preferencesLoading || Boolean(handoffUnavailable) || Boolean(handoffFocus && !coverageReady)}>
-            <Activity size={16} aria-hidden="true" /> {hydrating ? `Checking for a saved ${sessionNoun}…` : preferencesLoading ? "Loading your setup…" : handoffFocus && !coverageReady ? "Finding a suitable case…" : busy ? `Starting ${sessionNoun}…` : isShift ? "Start shift" : "Start learning set"} <ArrowRight size={16} aria-hidden="true" />
-          </button>
-          <p className="clinical-authorship-note"><ShieldCheck size={14} aria-hidden="true" /> Authored patient context · ECG source shown on every case · educational use only</p>
-        </section>
-      </div>
+              </div>
+            ) : null}
+          </>
+        )}
+        footer={(
+          <details className="clinical-content-note">
+            <summary>About these learning cases</summary>
+            <p>Patient stories are authored for education and paired with real deidentified ECGs. Case work guides future practice; scored mastery checks remain separate.</p>
+          </details>
+        )}
+      />
     );
   }
 
   if (view === "report" && report) {
-    const domains = report.performanceDomains;
     const reportNoun = report.tier === "learn" ? "learning set" : "shift";
+    const caseReviews = buildCaseReviewItems(report);
+    const sbiFeedback = buildSBIFeedback(report, reportCoach);
+    const priorityConcept = report.debrief?.priorityConcept;
+    const conceptTopics = (report.debrief?.conceptEvidence ?? []).slice(0, 4).map((concept) => ({
+      id: concept.concept,
+      label: concept.label,
+      status: concept.missedCount > concept.correctCount
+        ? "priority" as const
+        : concept.missedCount > 0
+          ? "developing" as const
+          : "strong" as const,
+      statusLabel: concept.missedCount > concept.correctCount
+        ? "Priority review"
+        : concept.missedCount > 0
+          ? "Keep developing"
+          : "Strength demonstrated",
+      progress: concept.caseCount > 0 ? Math.round((concept.correctCount / concept.caseCount) * 100) : undefined,
+      href: report.debrief?.destinations.rapid?.concept === concept.concept
+        ? report.debrief.destinations.rapid.href
+        : undefined,
+    }));
     return (
       <div className="clinical-shell">
-        <header className="page-header">
-          <div>
-            <span className="eyebrow"><CheckCircle2 size={15} aria-hidden="true" /> {report.tier === "learn" ? "Learning set" : "Shift"} complete</span>
-            <h1>{LANE_LABEL[report.lane]} · {report.tier === "learn" ? "Learn" : "Shift"}</h1>
-          </div>
-          {returnDestination ? <Link className="button subtle" href={returnDestination.href}><ArrowLeft size={16} /> {returnDestination.label}</Link> : null}
-        </header>
-        <section className="panel pad clinical-report">
-          <div className="clinical-metric"><strong>{Math.round(report.accuracy * 100)}%</strong><span>accuracy</span></div>
-          <div className="clinical-metric"><strong>{report.bestStreak}</strong><span>best streak</span></div>
-          <div className="clinical-metric"><strong>{report.answered}/{report.length}</strong><span>answered</span></div>
-          <div className="clinical-metric"><strong>{report.avgDecideMs != null ? `${(report.avgDecideMs / 1000).toFixed(1)}s` : "—"}</strong><span>avg decision</span></div>
-          <div className="clinical-metric wide"><strong>{report.calibrationLabel}</strong><span>confidence match</span></div>
-        </section>
-        {domains ? (
-          <section className="clinical-domain-report" aria-labelledby="clinical-domain-report-heading">
-            <div className="clinical-domain-report-heading">
-              <p className="eyebrow">Four separate signals</p>
-              <h2 id="clinical-domain-report-heading">What this {reportNoun} actually checked</h2>
-              <p className="muted">Clinical cases remain formative. Exact ECG pathology mastery changes only in an eligible mixed ECG check.</p>
-            </div>
-            <article className="panel pad clinical-domain-card">
-              <h3>ECG recognition / first look</h3>
-              <strong>{formatReportScore(domains.ecgRecognitionFirstLook.broadCategory.score)}</strong>
-              <p>{domains.ecgRecognitionFirstLook.broadCategory.matched}/{domains.ecgRecognitionFirstLook.broadCategory.assessed} broad categories matched before context.</p>
-              {Object.entries(domains.ecgRecognitionFirstLook.traceAxes).map(([axis, row]) => (
-                <small key={axis}>{humanLabel(axis)}: {formatReportScore(row.score)} across {row.assessed} check{row.assessed === 1 ? "" : "s"}</small>
-              ))}
-              <small>Broad-category agreement is not exact pathology mastery.</small>
-            </article>
-            <article className="panel pad clinical-domain-card">
-              <h3>Clinical application / decision</h3>
-              <strong>{formatReportScore(domains.clinicalApplicationDecision.score)}</strong>
-              <p>{domains.clinicalApplicationDecision.assessed} case decision{domains.clinicalApplicationDecision.assessed === 1 ? "" : "s"} assessed.</p>
-              <small>Patient-care choices are tracked separately from recognizing the tracing.</small>
-            </article>
-            <article className="panel pad clinical-domain-card">
-              <h3>Safety</h3>
-              <strong>{domains.safety.safe}/{domains.safety.assessed}</strong>
-              <p>safe decision{domains.safety.assessed === 1 ? "" : "s"} · {domains.safety.flagged} flagged · {domains.safety.unsafeChoices} unsafe choice{domains.safety.unsafeChoices === 1 ? "" : "s"}</p>
-              <small>Safety reflects required actions and unsafe or under-triaged choices.</small>
-            </article>
-            <article className="panel pad clinical-domain-card">
-              <h3>Confidence calibration</h3>
-              <strong>{formatReportScore(domains.confidenceCalibration.score)}</strong>
-              <p>{domains.confidenceCalibration.label}</p>
-              <small>{domains.confidenceCalibration.highConfidenceMismatches} high-confidence first-look mismatch{domains.confidenceCalibration.highConfidenceMismatches === 1 ? "" : "es"}.</small>
-            </article>
+        <ClinicalSetReviewExperience
+          hero={{
+            report,
+            eyebrow: `${report.tier === "learn" ? "Learning set" : "Shift"} complete`,
+            title: "Review the reasoning behind your decisions",
+            summary: `You managed ${report.answered} patient case${report.answered === 1 ? "" : "s"} in ${LANE_LABEL[report.lane].toLowerCase()} practice. Revisit the ECG evidence, decisions, and explanations that matter most.`,
+            supportingText: "These cases shape your personalized practice plan; independent ECG mastery is measured separately.",
+            action: returnDestination ? {
+              label: returnDestination.label,
+              href: returnDestination.href,
+              icon: <ArrowLeft size={16} aria-hidden="true" />,
+              tone: "quiet",
+            } : {
+              label: "Dashboard",
+              href: "/dashboard",
+              icon: <LayoutDashboard size={16} aria-hidden="true" />,
+              tone: "quiet",
+            },
+          }}
+          summaryItems={buildClinicalDomainSummaries(report)}
+          cases={{
+            items: caseReviews,
+            description: "Open a case to inspect its ECG, your response, and the teaching review without exposing answer keys in activity history.",
+            action: report.reviewHref ? {
+              label: "Review all ECGs and decisions",
+              href: report.reviewHref,
+              icon: <BookOpenCheck size={16} aria-hidden="true" />,
+              tone: "secondary",
+            } : undefined,
+          }}
+          nextSteps={report.debrief ? {
+            summary: priorityConcept
+              ? `${priorityConcept.label} is the most useful concept to strengthen next, based on this set and your independent practice history.`
+              : "No single weakness dominated this set. Use another varied case set to keep transferring your reasoning.",
+            topics: conceptTopics,
+            action: report.debrief.destinations.clinical ? {
+              label: `Apply ${report.debrief.destinations.clinical.label} in a new case`,
+              href: report.debrief.destinations.clinical.href,
+              icon: <ArrowRight size={15} aria-hidden="true" />,
+              tone: "primary",
+            } : undefined,
+            secondaryAction: {
+              label: "Open my study plan",
+              href: report.debrief.destinations.adaptiveReview.href,
+              tone: "quiet",
+            },
+          } : undefined}
+          coaching={{
+            feedback: sbiFeedback,
+            personalizationNote: reportCoachBusy
+              ? `Luna is connecting this ${reportNoun} with your recent learning history…`
+              : reportCoach?.socraticQuestion
+                ? `Reflection question: ${reportCoach.socraticQuestion}`
+                : "Grounded in the completed cases and learning evidence available for this set.",
+          }}
+          notices={reportCoachError ? <div className="selection-note">{reportCoachError} Your saved review and next steps are still available.</div> : undefined}
+          actions={(
+            <>
+              <button className="button primary" type="button" onClick={() => setView("picker")}>
+                {report.tier === "learn" ? "Start another learning set" : "Start another shift"}
+              </button>
+              <Link className="button subtle" href="/dashboard"><LayoutDashboard size={16} aria-hidden="true" /> View learning dashboard</Link>
+            </>
+          )}
+        />
+        {!reportCoachBusy && report.tutorContext ? (
+          <section className="panel pad clinical-set-coach-chat" aria-labelledby="clinical-set-coach-heading">
+            <span className="eyebrow"><Sparkles size={15} aria-hidden="true" /> Ask Luna</span>
+            <h2 id="clinical-set-coach-heading">Clarify, connect, or test what you learned</h2>
+            <TutorChat
+              mode="practice"
+              roleLabel={`${report.tier === "learn" ? "Learning set" : "Shift"} review coach`}
+              lessonId={report.tutorContext.contextId}
+              clinicalShiftContext={report.tutorContext}
+              openingPrompt="Ask for clarification, compare two decisions, connect the ECG evidence to patient care, or request a short transfer question."
+              viewerState={{ activity: "clinical_shift_debrief", committed: true }}
+              resetKey={report.tutorContext.contextId}
+              collapsedByDefault
+            />
           </section>
         ) : null}
-        {report.debrief ? (
-          <section className="panel pad" aria-labelledby="clinical-shift-coach-heading">
-            <span className="eyebrow"><Sparkles size={15} aria-hidden="true" /> AI reflection grounded in this {reportNoun}</span>
-            <h2 id="clinical-shift-coach-heading">Choose the next useful move</h2>
-            {reportCoachBusy ? <p className="muted" aria-live="polite">Reviewing this {reportNoun}…</p> : null}
-            {reportCoach ? (
-              <div aria-live="polite">
-                <p>{reportCoach.tutorMessage}</p>
-                {reportCoach.socraticQuestion ? <p><strong>Think next:</strong> {reportCoach.socraticQuestion}</p> : null}
-              </div>
-            ) : reportCoachError ? (
-              <p className="selection-note">{reportCoachError} Your saved summary and next steps remain available below.</p>
-            ) : null}
-            {report.debrief.crossConceptBridge ? (
-              <div className="selection-note">
-                <GitBranch size={16} aria-hidden="true" />{" "}
-                <strong>Connect these skills:</strong> {report.debrief.crossConceptBridge.prompt}
-              </div>
-            ) : (
-              <p className="muted">Only one ECG finding appeared in this {reportNoun}. Complete another case before connecting it to a second pattern.</p>
-            )}
-            {report.debrief.nextCaseProposal ? (
-              <p className="muted">
-                <strong>Why this case next:</strong> A different real ECG is available in this setting to practice {report.debrief.nextCaseProposal.label}.
-              </p>
-            ) : null}
-            <div className="actions">
-              {report.debrief.destinations.clinical ? (
-                <Link className="button primary" href={report.debrief.destinations.clinical.href}>
-                  Apply {report.debrief.destinations.clinical.label} in a new case <ArrowRight size={15} aria-hidden="true" />
-                </Link>
-              ) : null}
-              {report.debrief.destinations.rapid ? (
-                <Link className="button" href={report.debrief.destinations.rapid.href}>
-                  Recheck the ECG pattern <ArrowRight size={15} aria-hidden="true" />
-                </Link>
-              ) : null}
-              <Link className="button subtle" href={report.debrief.destinations.adaptiveReview.href}>Open my study plan</Link>
-            </div>
-            {!reportCoachBusy && report.tutorContext ? (
-              <TutorChat
-                mode="practice"
-                roleLabel={`${report.tier === "learn" ? "Learning set" : "Shift"} debrief coach`}
-                lessonId={report.tutorContext.contextId}
-                clinicalShiftContext={report.tutorContext}
-                openingPrompt="Ask about the recurring reasoning pattern, the supported concept bridge, or why the proposed real-ECG case comes next."
-                viewerState={{ activity: "clinical_shift_debrief", committed: true }}
-                resetKey={report.tutorContext.contextId}
-                collapsedByDefault
-              />
-            ) : null}
-          </section>
-        ) : null}
-        <div className="actions">
-          <button className="button primary" type="button" onClick={() => setView("picker")}>{report.tier === "learn" ? "New learning set" : "New shift"}</button>
-          {returnDestination ? <Link className="button subtle" href={returnDestination.href}><ArrowLeft size={16} /> {returnDestination.label}</Link> : null}
-        </div>
       </div>
     );
   }
@@ -913,35 +1094,84 @@ export function ClinicalDecisions() {
   const feedbackSucceeded = item.question_type === "matching"
     ? Boolean(grade?.matchingCorrect)
     : Boolean(grade && grade.score >= 0.6);
-  const feedbackActions = phase === "feedback" && grade ? [...(grade.viewerActions ?? []), ...aiViewerActions] : [];
-  const clinicalViewerTask: ViewerTaskSpec | undefined = phase === "decide"
-    && (item.question_type === "click" || item.question_type === "spoterror")
-    && item.click_roi_concept
-    ? {
-        mode: "point",
-        prompt: item.prompt || "Mark the ECG evidence that supports your decision.",
-        concept: item.click_roi_concept,
-        allowedLeads: item.clickable_leads,
-      }
-    : undefined;
+  const authoredReviewActions = grade?.viewerActions ?? [];
+  const feedbackActions = phase === "feedback" && grade
+    ? [...authoredReviewActions.slice(0, reviewActionStep), ...aiViewerActions]
+    : [];
+  const fillInTask = item.fill_in_task;
+  const clinicalViewerTask: ViewerTaskSpec | undefined = phase !== "decide"
+    ? undefined
+    : (item.question_type === "click" || item.question_type === "spoterror") && item.click_roi_concept
+      ? {
+          mode: "point",
+          prompt: item.prompt || "Mark the ECG evidence that supports your decision.",
+          concept: item.click_roi_concept,
+          allowedLeads: item.clickable_leads,
+        }
+      : item.question_type === "fillin" && fillInTask && ["ms", "bpm"].includes(fillInTask.unit)
+        ? {
+            mode: "caliper",
+            prompt: `Use the calipers to estimate ${fillInTask.response_label.toLowerCase()}.`,
+            measurement: measurementToolFor(fillInTask.response_label, fillInTask.unit),
+          }
+        : undefined;
 
-  function captureClinicalPoint(evidence: ViewerTaskEvidence) {
-    if (evidence.mode !== "point") return;
-    setAnswer((currentAnswer) => ({
-      ...currentAnswer,
-      click: {
-        lead: evidence.point.lead,
-        timeSec: evidence.point.timeSec,
-        amplitudeMv: evidence.point.amplitudeMv,
-      },
-    }));
+  function captureClinicalEvidence(evidence: ViewerTaskEvidence) {
+    if (evidence.mode === "point") {
+      setAnswer((currentAnswer) => ({
+        ...currentAnswer,
+        click: {
+          lead: evidence.point.lead,
+          timeSec: evidence.point.timeSec,
+          amplitudeMv: evidence.point.amplitudeMv,
+        },
+      }));
+      return;
+    }
+    if (evidence.mode === "caliper" && fillInTask) {
+      const measured = fillInTask.unit === "bpm"
+        ? Math.round(60_000 / Math.max(1, evidence.valueMs))
+        : Math.round(evidence.valueMs / fillInTask.step) * fillInTask.step;
+      setAnswer((currentAnswer) => ({ ...currentAnswer, fillInValue: measured }));
+    }
   }
 
   const responseLabel = phase === "orient"
-    ? "Clinical first look"
+    ? "Initial ECG interpretation"
     : phase === "decide"
       ? "Clinical context and decision"
       : "Clinical feedback";
+  const activeEpisodeStage = item.question_type === "stepwise" ? item.stepwise_state?.active : null;
+  const journeyStage = phase === "orient"
+    ? "ecg"
+    : phase === "feedback"
+      ? "reassessment"
+      : activeEpisodeStage?.stage_kind
+        ?? (activeEpisodeStage ? "ecg" : "decision");
+  const journey = buildClinicalJourney(journeyStage).map((stage) => (
+    stage.status === "current" && activeEpisodeStage?.stage_title
+      ? {
+          ...stage,
+          detail: [activeEpisodeStage.stage_title, activeEpisodeStage.elapsed_label].filter(Boolean).join(" · "),
+        }
+      : stage
+  ));
+  const patientVitals = [
+    item.chips?.bp ? { label: "BP", value: item.chips.bp } : null,
+    item.chips?.mental_status ? { label: "Status", value: humanLabel(item.chips.mental_status) } : null,
+  ].filter((value): value is { label: string; value: string } => Boolean(value));
+  const patientDetails = [
+    item.chips?.setting ? { label: "Care setting", value: humanLabel(item.chips.setting) } : null,
+    item.chips?.symptom && item.chips.symptom !== "none"
+      ? { label: "Presenting concern", value: humanLabel(item.chips.symptom) }
+      : null,
+  ].filter((value): value is { label: string; value: string } => Boolean(value));
+  const evidenceTimeline = authoredReviewActions.map((action, index) => ({
+    id: `${item.item_id}-review-action-${index}`,
+    title: viewerActionTitle(action),
+    description: viewerActionDescription(action),
+    status: index < reviewActionStep ? "complete" as const : index === reviewActionStep ? "current" as const : "upcoming" as const,
+  }));
 
   return (
     <div className="clinical-shell clinical-shell-active">
@@ -953,12 +1183,11 @@ export function ClinicalDecisions() {
         <SessionBar
           className="clinical-session-bar"
           tutorAvailable={phase === "feedback" && Boolean(tutorContext)}
-          tutorLabel="Open tutor"
+          tutorLabel="Ask Luna"
         >
           <div className="clinical-session-meta">
+            <strong>Case {current!.index + 1} of {current!.total}</strong>
             <span className="pill"><Stethoscope size={14} aria-hidden="true" /> {LANE_LABEL[item.situation]}</span>
-            <span className="pill subtle">{questionTypeLabel(item.question_type)}</span>
-            <span className="muted">Case {current!.index + 1} / {current!.total}</span>
           </div>
           {phase === "feedback" ? (
             <div className="clinical-clock complete" data-clock-phase="feedback">
@@ -974,21 +1203,32 @@ export function ClinicalDecisions() {
           ) : (
             <div className="clinical-clock untimed" data-clock-phase={phase}><Clock size={14} aria-hidden="true" /> <span>Learn — untimed</span></div>
           )}
-          {returnDestination ? <Link className="button subtle small clinical-return-link" href={returnDestination.href}><ArrowLeft size={15} /> {returnDestination.label}</Link> : null}
+          {returnDestination ? (
+            <button
+              className="button subtle small clinical-return-link"
+              type="button"
+              aria-haspopup="dialog"
+              onClick={(event) => openAbandonDialog(event.currentTarget, returnDestination.href)}
+              disabled={busy || confirmAbandon}
+            >
+              <ArrowLeft size={15} /> {returnDestination.label}
+            </button>
+          ) : null}
           {session?.status === "active" && !(phase === "feedback" && current!.index + 1 >= current!.total) ? (
             <button
               ref={abandonTriggerRef}
               className="button warn small clinical-abandon-button"
               type="button"
               aria-label={`Abandon ${sessionNoun}`}
-              onClick={() => setConfirmAbandon(true)}
+              onClick={(event) => openAbandonDialog(event.currentTarget)}
               disabled={busy || confirmAbandon}
             >
-              <span className="clinical-abandon-label">Abandon {sessionNoun}</span>
+              <span className="clinical-abandon-label">Exit {sessionNoun}</span>
               <span className="clinical-abandon-label-mobile" aria-hidden="true">Exit</span>
             </button>
           ) : null}
         </SessionBar>
+        <ClinicalJourneyProgress stages={journey} label={`Case ${current!.index + 1} patient journey`} />
 
         <WorkspaceNotices>
           {confirmAbandon ? (
@@ -1021,7 +1261,7 @@ export function ClinicalDecisions() {
                   }
                 }}
               >
-                <h2 id="clinical-abandon-title">Abandon this Clinical {sessionNoun}?</h2>
+                <h2 id="clinical-abandon-title">{leaveAfterAbandon ? `Leave this Clinical ${sessionNoun}?` : `Abandon this Clinical ${sessionNoun}?`}</h2>
                 <p id="clinical-abandon-description" className="muted">
                   Completed case answers and saved progress stay in your learning history. Any current unsubmitted response,
                   revealed context, and timer state will be discarded, and this {session?.length ?? length}-case {sessionNoun} cannot be resumed.
@@ -1032,46 +1272,58 @@ export function ClinicalDecisions() {
                     Keep working
                   </button>
                   <button className="button warn" type="button" onClick={() => void abandonShift()} disabled={busy}>
-                    Abandon {sessionNoun} and change setup
+                    {leaveAfterAbandon ? `${returnDestination?.label ?? "Return"} and abandon ${sessionNoun}` : `Abandon ${sessionNoun} and change setup`}
                   </button>
                 </div>
               </section>
             </div>
           ) : null}
+          {activeShiftIntentConflict ? <div className="warning clinical-runner-error" role="alert">{activeShiftIntentConflict}</div> : null}
           {notice ? <div className="selection-note clinical-runner-notice" role="status">{notice}</div> : null}
           {error ? <div className="warning clinical-runner-error" role="alert">{error}</div> : null}
         </WorkspaceNotices>
 
         <WorkspaceBody className="clinical-active-workspace">
           <WaveformPane className="clinical-viewer-pane" label="Clinical ECG waveform">
+            <ClinicalPatientSnapshot
+              patientLabel={item.chips?.age != null ? `${item.chips.age}-year-old patient` : "Adult patient"}
+              reasonForEcg={item.stem || "An ECG was requested to support the next clinical decision."}
+              vitals={patientVitals}
+              details={patientDetails}
+              heading={phase === "orient" ? "Why this ECG was ordered" : "Patient presentation"}
+              eyebrow={phase === "orient" ? "Presentation" : "Case context"}
+            />
             {item.display_spec.mode === "stacked_twelve_lead" && item.prior_ecg_ref ? (
               <div className="clinical-stacked">
-                <div><div className="clinical-strip-label">Today</div><ECGViewer ecgRef={item.ecg_ref} waveformScope={{ kind: "clinical", sessionId: session.sessionId }} onReady={onReady} actions={feedbackActions} gradingMode="deferred" /></div>
-                <div><div className="clinical-strip-label">Prior</div><ECGViewer ecgRef={item.prior_ecg_ref} waveformScope={{ kind: "clinical", sessionId: session.sessionId }} toolbar="none" gradingMode="deferred" /></div>
+                <aside className="clinical-comparison-provenance" role="note" aria-label="ECG comparison provenance">
+                  <strong>Authentic same-patient comparison</strong>
+                  <span>These are time-ordered, real de-identified ECGs from the same patient. The surrounding clinical timeline is authored for learning.</span>
+                </aside>
+                <section className="clinical-comparison-study" aria-label="Current ECG">
+                  <div className="clinical-strip-label">Current ECG</div>
+                  <ECGViewer ecgRef={item.ecg_ref} waveformScope={{ kind: "clinical", sessionId: session.sessionId }} onReady={() => onWaveformReady("current")} actions={feedbackActions} toolbar="clinical" gradingMode="deferred" />
+                </section>
+                <section className="clinical-comparison-study" aria-label="Comparison ECG">
+                  <div className="clinical-strip-label">Comparison ECG</div>
+                  <ECGViewer ecgRef={item.prior_ecg_ref} waveformScope={{ kind: "clinical", sessionId: session.sessionId }} onReady={() => onWaveformReady("prior")} toolbar="clinical" gradingMode="deferred" />
+                </section>
               </div>
             ) : (
-              <>
-                <ECGViewer
-                  ecgRef={item.ecg_ref}
-                  waveformScope={{ kind: "clinical", sessionId: session.sessionId }}
-                  onReady={onReady}
-                  actions={feedbackActions}
-                  task={clinicalViewerTask}
-                  onTaskEvidence={clinicalViewerTask ? captureClinicalPoint : undefined}
-                  gradingMode="deferred"
-                  onCoordinate={
-                    !clinicalViewerTask && (item.question_type === "click" || item.question_type === "spoterror")
-                      ? (p: ECGPoint) => setAnswer((a) => ({ ...a, click: { lead: p.lead, timeSec: p.timeSec, amplitudeMv: p.amplitudeMv } }))
-                      : undefined
-                  }
-                />
-                {item.display_spec.mode === "twelve_lead_pinned_strip" ? (
-                  <details className="clinical-rhythm-detail">
-                    <summary>Magnify lead {item.display_spec.pinned_strip_lead ?? "II"} rhythm strip</summary>
-                    <PinnedRhythmStrip ecgRef={item.ecg_ref} sessionId={session.sessionId} lead={item.display_spec.pinned_strip_lead ?? "II"} />
-                  </details>
-                ) : null}
-              </>
+              <ECGViewer
+                ecgRef={item.ecg_ref}
+                waveformScope={{ kind: "clinical", sessionId: session.sessionId }}
+                onReady={() => onWaveformReady("current")}
+                actions={feedbackActions}
+                task={clinicalViewerTask}
+                onTaskEvidence={clinicalViewerTask ? captureClinicalEvidence : undefined}
+                gradingMode="deferred"
+                toolbar="clinical"
+                onCoordinate={
+                  !clinicalViewerTask && (item.question_type === "click" || item.question_type === "spoterror")
+                    ? (p: ECGPoint) => setAnswer((a) => ({ ...a, click: { lead: p.lead, timeSec: p.timeSec, amplitudeMv: p.amplitudeMv } }))
+                    : undefined
+                }
+              />
             )}
           </WaveformPane>
 
@@ -1081,64 +1333,34 @@ export function ClinicalDecisions() {
             phase={phase}
           >
             {phase === "orient" ? (
-              <>
-                <div className="selection-note clinical-context-mask">
-                  <strong>ECG first.</strong> The patient context stays hidden until you commit an initial read.
+              <section
+                className="panel pad clinical-first-look"
+                aria-labelledby="clinical-first-look-heading"
+                aria-describedby="clinical-first-look-guidance"
+              >
+                <p className="eyebrow">ECG interpretation</p>
+                <h2 id="clinical-first-look-heading">Record your initial ECG read</h2>
+                <p id="clinical-first-look-guidance" className="muted clinical-first-look-guidance">
+                  Use the ordering indication and the tracing together. Choose the broad pattern before the clinical decision is revealed.
+                </p>
+                <div className="clinical-first-look-fields">
+                  <label htmlFor="clinical-first-look">Dominant ECG pattern</label>
+                  <select
+                    id="clinical-first-look"
+                    aria-describedby="clinical-first-look-guidance"
+                    value={answer.firstLookFinding ?? ""}
+                    onChange={(event) => setAnswer((current) => ({ ...current, firstLookFinding: event.target.value || null }))}
+                  >
+                    <option value="">Choose the best broad category…</option>
+                    {FIRST_LOOK_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+                  </select>
                 </div>
-                <section
-                  className="panel pad clinical-first-look"
-                  aria-labelledby="clinical-first-look-heading"
-                  aria-describedby="clinical-first-look-guidance"
-                >
-                  <h2 id="clinical-first-look-heading">What is the dominant ECG pattern?</h2>
-                  <p id="clinical-first-look-guidance" className="muted clinical-first-look-guidance">
-                    This checks your ECG-only read before the patient story appears.
-                  </p>
-                  <div className="clinical-first-look-fields">
-                    <label htmlFor="clinical-first-look">Dominant finding</label>
-                    <select
-                      id="clinical-first-look"
-                      aria-describedby="clinical-first-look-guidance"
-                      value={answer.firstLookFinding ?? ""}
-                      onChange={(event) => setAnswer((current) => ({ ...current, firstLookFinding: event.target.value || null }))}
-                    >
-                      <option value="">Choose the best ECG-only category…</option>
-                      {FIRST_LOOK_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
-                    </select>
-                    <fieldset>
-                      <legend>First-look confidence</legend>
-                      {[{ value: 2, label: "Low" }, { value: 3, label: "Medium" }, { value: 5, label: "High" }].map((choice) => (
-                        <button
-                          key={choice.value}
-                          type="button"
-                          className={answer.firstLookConfidence === choice.value ? "active" : ""}
-                          aria-pressed={answer.firstLookConfidence === choice.value}
-                          onClick={() => setAnswer((current) => ({ ...current, firstLookConfidence: choice.value }))}
-                        >
-                          {choice.label}
-                        </button>
-                      ))}
-                    </fieldset>
-                  </div>
-                  <button className="button primary clinical-first-look-submit" type="button" disabled={busy || (!untimed && !phaseReady) || !answer.firstLookFinding || !answer.firstLookConfidence} onClick={() => void commitFirstLook()}>
-                    {busy ? "Saving first look…" : "Commit first look and reveal context"} <ArrowRight size={16} aria-hidden="true" />
-                  </button>
-                </section>
-              </>
+                <button className="button primary clinical-first-look-submit" type="button" disabled={busy || (!untimed && !phaseReady) || !answer.firstLookFinding} onClick={() => void commitFirstLook()}>
+                  {busy ? "Saving your interpretation…" : "Continue to the clinical decision"} <ArrowRight size={16} aria-hidden="true" />
+                </button>
+              </section>
             ) : phase === "decide" ? (
               <>
-                <section ref={contextRef} tabIndex={-1} className="panel pad clinical-stem" aria-label="Clinical context and decision prompt">
-                  <p>{item.stem}</p>
-                  {item.chips ? (
-                    <div className="clinical-chips">
-                      {item.chips.age != null ? <span className="chip">{item.chips.age}y</span> : null}
-                      {item.chips.bp ? <span className="chip">BP {item.chips.bp}</span> : null}
-                      {item.chips.symptom && item.chips.symptom !== "none" ? <span className="chip">{item.chips.symptom.replace(/_/g, " ")}</span> : null}
-                      {item.chips.mental_status ? <span className="chip">{item.chips.mental_status}</span> : null}
-                    </div>
-                  ) : null}
-                </section>
-
                 {item.question_type === "spoterror" && item.machine_read ? (
                   <section className="panel pad clinical-machine">
                     <div className="clinical-strip-label">Machine read — click the wrong line</div>
@@ -1156,33 +1378,50 @@ export function ClinicalDecisions() {
                   </section>
                 ) : null}
 
-                <section className="panel pad clinical-question">
-                  <strong>{item.prompt}</strong>
+                <section ref={contextRef} tabIndex={-1} className="panel pad clinical-question" aria-label="Clinical decision">
+                  <p className="eyebrow">{questionTypeLabel(item.question_type)}</p>
+                  <h2>{item.prompt}</h2>
                   {item.question_type === "stepwise" && item.stepwise_state ? (
-                    <div className="clinical-stepwise" aria-label="Stepwise ECG interpretation">
+                    <div
+                      className="clinical-stepwise"
+                      aria-label={[
+                        ...item.stepwise_state.committed,
+                        ...(item.stepwise_state.active ? [item.stepwise_state.active] : []),
+                      ].some(hasEpisodeStageMetadata) ? "Evolving patient episode" : "Stepwise ECG interpretation"}
+                    >
                       {item.stepwise_state.committed.map((step) => (
-                        <fieldset className="clinical-step-committed" key={`${item.item_id}-step-${step.stepIndex}`}>
-                          <legend>Step {step.stepIndex + 1} · {step.prompt}</legend>
-                          <button type="button" className="selected" aria-pressed="true" disabled>{step.answerText}</button>
-                          <p className="muted" role="status">Decision committed. This step is locked.</p>
-                        </fieldset>
+                        <div className="clinical-episode-stage" data-status="committed" key={`${item.item_id}-step-${step.stepIndex}`}>
+                          <ClinicalEpisodeStageUpdate stage={step} stepNumber={step.stepIndex + 1} status="committed" />
+                          <fieldset className="clinical-step-committed">
+                            <legend>Step {step.stepIndex + 1} · {step.prompt}</legend>
+                            <button type="button" className="selected" aria-pressed="true" disabled>{step.answerText}</button>
+                            <p className="muted">Decision committed. This step is locked.</p>
+                          </fieldset>
+                        </div>
                       ))}
                       {item.stepwise_state.active ? (
-                        <fieldset key={`${item.item_id}-step-${item.stepwise_state.active.stepIndex}`}>
-                          <legend>Step {item.stepwise_state.active.stepIndex + 1} of {item.stepwise_state.totalSteps} · {item.stepwise_state.active.prompt}</legend>
-                          {item.stepwise_state.active.options.map((option, optionIndex) => (
-                            <button
-                              key={`${item.stepwise_state!.active!.stepIndex}-${optionIndex}`}
-                              type="button"
-                              className={stepDraft === optionIndex ? "selected" : ""}
-                              aria-pressed={stepDraft === optionIndex}
-                              onClick={() => setStepDraft(optionIndex)}
-                            >{option.text}</button>
-                          ))}
-                          <button className="button primary clinical-step-commit" type="button" disabled={busy || stepDraft == null} onClick={() => void commitStepwiseStage()}>
-                            {busy ? "Committing…" : item.stepwise_state.active.stepIndex + 1 === item.stepwise_state.totalSteps ? "Commit step and reveal clinical choices" : "Commit step and reveal next"}
-                          </button>
-                        </fieldset>
+                        <div className="clinical-episode-stage" data-status="active" key={`${item.item_id}-step-${item.stepwise_state.active.stepIndex}`}>
+                          <ClinicalEpisodeStageUpdate
+                            stage={item.stepwise_state.active}
+                            stepNumber={item.stepwise_state.active.stepIndex + 1}
+                            status="active"
+                          />
+                          <fieldset>
+                            <legend>Step {item.stepwise_state.active.stepIndex + 1} of {item.stepwise_state.totalSteps} · {item.stepwise_state.active.prompt}</legend>
+                            {item.stepwise_state.active.options.map((option, optionIndex) => (
+                              <button
+                                key={`${item.stepwise_state!.active!.stepIndex}-${optionIndex}`}
+                                type="button"
+                                className={stepDraft === optionIndex ? "selected" : ""}
+                                aria-pressed={stepDraft === optionIndex}
+                                onClick={() => setStepDraft(optionIndex)}
+                              >{option.text}</button>
+                            ))}
+                            <button className="button primary clinical-step-commit" type="button" disabled={busy || stepDraft == null} onClick={() => void commitStepwiseStage()}>
+                              {busy ? "Committing…" : item.stepwise_state.active.stepIndex + 1 === item.stepwise_state.totalSteps ? "Commit step and reveal clinical choices" : "Commit step and reveal next"}
+                            </button>
+                          </fieldset>
+                        </div>
                       ) : (
                         <p className="selection-note" role="status">ECG sequence committed and locked. Now choose the clinical decision.</p>
                       )}
@@ -1261,20 +1500,22 @@ export function ClinicalDecisions() {
                         }}
                       />
                       <span id={`${item.item_id}-fill-in-help`} className="muted">
-                        Enter {item.fill_in_task.min_value}–{item.fill_in_task.max_value} {item.fill_in_task.unit}; nearest {item.fill_in_task.step} {item.fill_in_task.unit}.
+                        Use the ECG calipers or enter {item.fill_in_task.min_value}–{item.fill_in_task.max_value} {item.fill_in_task.unit}; nearest {item.fill_in_task.step} {item.fill_in_task.unit}.
                       </span>
                     </div>
                   ) : item.options && item.options.length ? (
                     <div className="clinical-options">
-                      {item.options.map((opt) => (
+                      {item.options.map((opt, optionIndex) => (
                         <button
                           key={opt.id}
                           type="button"
                           className={`clinical-option${answer.selectedOptionId === opt.id ? " selected" : ""}`}
                           aria-pressed={answer.selectedOptionId === opt.id}
+                          aria-label={`Option ${String.fromCharCode(65 + optionIndex)}: ${opt.text}`}
                           onClick={() => setAnswer((a) => ({ ...a, selectedOptionId: opt.id }))}
                         >
-                          {opt.text}
+                          <span className="clinical-option-letter" aria-hidden="true">{String.fromCharCode(65 + optionIndex)}</span>
+                          <span>{opt.text}</span>
                         </button>
                       ))}
                     </div>
@@ -1284,97 +1525,87 @@ export function ClinicalDecisions() {
                     </p>
                   ) : null}
 
-                  {isShift && (item.options?.length || item.question_type === "spoterror" || item.question_type === "fillin" || item.question_type === "matching") ? (
-                    <div className="clinical-confidence">
-                      <span className="muted">Confidence</span>
-                      {[
-                        { v: 2, l: "Low" },
-                        { v: 3, l: "Medium" },
-                        { v: 5, l: "High" },
-                      ].map((c) => (
-                        <button
-                          key={c.v}
-                          type="button"
-                          className={answer.confidence === c.v ? "active" : ""}
-                          aria-pressed={answer.confidence === c.v}
-                          onClick={() => setAnswer((a) => ({ ...a, confidence: c.v }))}
-                        >
-                          {c.l}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  <button className="button primary clinical-submit" type="button" disabled={busy || !canSubmit(item, answer, isShift)} onClick={() => void submit()}>
+                  <button className="button primary clinical-submit" type="button" disabled={busy || !canSubmit(item, answer)} onClick={() => void submit()}>
                     Commit decision
                   </button>
                 </section>
               </>
             ) : grade ? (
-              <section className={`panel pad clinical-feedback ${feedbackSucceeded ? "ok" : "miss"}`}>
-                <h2>
-                  <HeartPulse size={18} aria-hidden="true" />{" "}
-                  {timedOut
-                    ? "Time"
-                    : feedbackSucceeded
-                      ? item.question_type === "matching" ? "Evidence sorted" : "Good decision"
-                      : "Reconsider"} · {Math.round(grade.score * 100)}%
-                  {grade.answerClass ? <span className="pill subtle">{grade.answerClass.replace(/_/g, " ")}</span> : null}
-                </h2>
-                <p>{grade.feedback}</p>
-                {grade.matchingResults?.length && item.matching_task ? (
-                  <MatchingFeedback task={item.matching_task} results={grade.matchingResults} />
-                ) : null}
-                {grade.firstLookAssessment ? <FirstLookFeedback assessment={grade.firstLookAssessment} /> : null}
-                {grade.clinicalApplicationEvidence === "formative_only" ? (
-                  <p className="selection-note">This case shapes your next recommendation. Mixed ECG checks update mastery separately.</p>
-                ) : null}
-                {grade.ecgRecognitionSuppressed ? (
-                  <p className="selection-note">
-                    The vignette revealed ECG clues, so this result records your clinical reasoning separately from ECG recognition.
-                  </p>
-                ) : null}
-                {competencyReceipt ? <p className="selection-note" role="status">{competencyReceipt}</p> : null}
-                {grade.safetyFlags?.length ? (
-                  <p className="warning">Safety check: {grade.safetyFlags.map(humanLabel).join(" · ")}</p>
-                ) : null}
-                {Object.keys(grade.axisScores ?? {}).length ? (
-                  <div className="clinical-axes">
-                    {Object.entries(grade.axisScores).map(([axis, score]) => (
-                      <div key={axis} className="clinical-axis">
-                        <span>{humanLabel(axis)}</span>
-                        <progress
-                          className="clinical-axis-progress"
-                          value={score as number}
-                          max={1}
-                          aria-label={`${humanLabel(axis)} ${Math.round((score as number) * 100)} percent`}
-                        />
+              <ClinicalImmediateReview
+                title={timedOut ? "Review the safest path" : "Review your decision"}
+                tone={feedbackSucceeded ? "correct" : grade.safetyFlags?.length ? "safety" : "developing"}
+                statusLabel={timedOut ? "Time ended" : feedbackSucceeded ? "Decision supported" : "Decision needs another pass"}
+                learnerAnswer={<p>{clinicalAnswerSummary(item, answer)}</p>}
+                recommendedAnswer={<p>{bestSupportedResponse(grade)}</p>}
+                rationale={(
+                  <>
+                    <p>{grade.feedback}</p>
+                    {grade.matchingResults?.length && item.matching_task ? (
+                      <MatchingFeedback task={item.matching_task} results={grade.matchingResults} />
+                    ) : null}
+                    {grade.stepFeedback?.length ? (
+                      <StepwiseFeedback results={grade.stepFeedback} />
+                    ) : null}
+                    {grade.firstLookAssessment ? <FirstLookFeedback assessment={grade.firstLookAssessment} /> : null}
+                  </>
+                )}
+                supportingEvidence={[
+                  ...grade.correctObjectives.map((objective) => `Supported: ${conceptLabel(objective)}`),
+                  ...grade.missedObjectives.map((objective) => `Revisit: ${conceptLabel(objective)}`),
+                ]}
+                alternatives={!feedbackSucceeded && grade.answerClass ? [{
+                  label: humanLabel(grade.answerClass),
+                  explanation: answerClassExplanation(grade.answerClass),
+                }] : []}
+                safetyFlags={grade.safetyFlags?.map(humanLabel)}
+                teachingPoints={grade.teachingPoints}
+                coaching={(
+                  <p>{tutorContext
+                    ? "Ask Luna to connect the highlighted ECG evidence to the decision, explain the closest alternative, or give you a transfer question."
+                    : "Your result is saved. The case coach is temporarily unavailable for this attempt."}</p>
+                )}
+                transferCheck={<p>Before continuing, name the single trace feature that most changed your next clinical action.</p>}
+                notices={(
+                  <>
+                    {evidenceTimeline.length ? (
+                      <div className="clinical-evidence-playback">
+                        <ClinicalEvidenceTimeline steps={evidenceTimeline} heading="ECG evidence walkthrough" />
+                        <button className="button subtle small" type="button" onClick={() => setReviewPlaybackKey((value) => value + 1)}>
+                          <RotateCcw size={14} aria-hidden="true" /> Replay annotations
+                        </button>
                       </div>
-                    ))}
-                  </div>
-                ) : null}
-                {grade.teachingPoints?.length ? <p className="muted">{grade.teachingPoints.join(" ")}</p> : null}
-                {!tutorContext ? (
-                  <p className="warning" role="status">
-                    Your result is saved, but the AI tutor is unavailable for this attempt.
-                  </p>
-                ) : null}
-                <button className="button primary clinical-next" type="button" onClick={() => void goNext()} disabled={busy}>
-                  {current!.index + 1 >= current!.total ? `Finish ${sessionNoun}` : "Next case"} <ArrowRight size={16} aria-hidden="true" />
-                </button>
-              </section>
+                    ) : null}
+                    {competencyReceipt ? <p className="selection-note" role="status">{competencyReceipt}</p> : null}
+                    <details className="clinical-assessment-details">
+                      <summary>How this case was assessed</summary>
+                      <p>This case informs future recommendations. Independent ECG mastery is checked separately on blinded tracings.</p>
+                      {Object.keys(grade.axisScores ?? {}).length ? (
+                        <div className="clinical-axes">
+                          {Object.entries(grade.axisScores).map(([axis, score]) => (
+                            <div key={axis} className="clinical-axis">
+                              <span>{humanLabel(axis)}</span>
+                              <progress className="clinical-axis-progress" value={score as number} max={1} aria-label={`${humanLabel(axis)} ${Math.round((score as number) * 100)} percent`} />
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      <p>{provenanceBadge(item.tracing_provenance)} · Patient context authored for learning.</p>
+                    </details>
+                  </>
+                )}
+                actions={(
+                  <button className="button primary clinical-next" type="button" onClick={() => void goNext()} disabled={busy}>
+                    {current!.index + 1 >= current!.total ? `Review ${sessionNoun}` : "Continue to next case"} <ArrowRight size={16} aria-hidden="true" />
+                  </button>
+                )}
+              />
             ) : (
               <div className="panel pad clinical-feedback-loading" role="status" aria-live="polite" aria-busy="true">Loading saved feedback…</div>
             )}
           </ResponseRail>
         </WorkspaceBody>
 
-        <DisclosureArea className="clinical-disclosure">
-          <span className="clinical-provenance"><ShieldCheck size={14} aria-hidden="true" /> {provenanceBadge(item.tracing_provenance)}</span>
-          <span className="pill subtle">Patient context authored for learning</span>
-        </DisclosureArea>
-
-        <TutorDrawer title="Case tutor">
+        <TutorDrawer title="Ask Luna about this case">
           {tutorContext ? (
             <TutorChat
               mode="practice"
@@ -1409,9 +1640,20 @@ function isLearningSubskill(value: string | null): value is LearningSubskill {
   return value != null && LEARNING_SUBSKILLS.includes(value as LearningSubskill);
 }
 
-function canSubmit(item: NonNullable<NextResult["item"]>, answer: ClinicalAnswerPayload, isShift: boolean): boolean {
-  const needConfidence = isShift && (Boolean(item.options?.length) || item.question_type === "spoterror" || item.question_type === "fillin" || item.question_type === "matching");
-  if (needConfidence && !answer.confidence) return false;
+function measurementToolFor(
+  responseLabel: string,
+  unit: NonNullable<NonNullable<NextResult["item"]>["fill_in_task"]>["unit"],
+): "rr" | "pr" | "qrs" | "qt" | "custom" {
+  if (unit === "bpm") return "rr";
+  const label = responseLabel.toLowerCase();
+  if (label.includes("qtc") || label.includes("qt")) return "qt";
+  if (label.includes("qrs")) return "qrs";
+  if (label.includes("pr")) return "pr";
+  if (label.includes("rr")) return "rr";
+  return "custom";
+}
+
+function canSubmit(item: NonNullable<NextResult["item"]>, answer: ClinicalAnswerPayload): boolean {
   if (item.question_type === "fillin") {
     const value = answer.fillInValue;
     const task = item.fill_in_task;
@@ -1449,35 +1691,26 @@ function firstLookCategoryLabel(value: string | null) {
   return FIRST_LOOK_OPTIONS.find(([candidate]) => candidate === value)?.[1] ?? "Not recorded";
 }
 
-function confidenceLabel(value: number | null) {
-  return value === 5 ? "High" : value === 3 ? "Medium" : value === 2 ? "Low" : "Not recorded";
-}
-
 function FirstLookFeedback({ assessment }: { assessment: NonNullable<ClinicalGrade["firstLookAssessment"]> }) {
-  const calibration = assessment.agreement === true
-    ? assessment.confidence === 5
-      ? "Your high confidence matched the broad ECG category."
-      : assessment.confidence === 2
-        ? "The broad category matched; consider what trace feature would justify more confidence."
-        : "Your confidence was proportionate to a matching broad category."
+  const interpretation = assessment.timedOut
+    ? "The first-look window ended before this response was committed, so it is excluded from broad-category performance and confidence calibration."
+    : assessment.agreement === true
+    ? "Your broad interpretation matched the supported ECG category."
     : assessment.agreement === false
-      ? assessment.confidence === 5
-        ? "High-confidence mismatch: slow down and name the first discriminating feature before committing."
-        : "The broad category did not match; use the trace-level feedback to recalibrate your next first look."
-      : "This first look could not be compared.";
+      ? "Your broad interpretation differed from the supported category. Re-check the first discriminating trace feature before the next decision."
+      : "This broad interpretation could not be compared.";
   return (
     <section className="clinical-first-look-feedback" aria-labelledby="clinical-first-look-feedback-heading">
       <div>
-        <p className="eyebrow">ECG-only commitment</p>
-        <h3 id="clinical-first-look-feedback-heading">Your first look, before the vignette</h3>
+        <p className="eyebrow">Initial ECG interpretation</p>
+        <h3 id="clinical-first-look-feedback-heading">Your read after the ordering indication</h3>
       </div>
       <dl>
         <div><dt>Submitted broad category</dt><dd>{firstLookCategoryLabel(assessment.submittedCategory)}</dd></div>
         <div><dt>Expected broad category</dt><dd>{assessment.expectedCategories.map(firstLookCategoryLabel).join(" or ")}</dd></div>
-        <div><dt>Confidence</dt><dd>{confidenceLabel(assessment.confidence)}</dd></div>
-        <div><dt>Calibration</dt><dd>{assessment.agreement === true ? "Matched" : assessment.agreement === false ? "Did not match" : "Not assessable"}</dd></div>
+        <div><dt>Comparison</dt><dd>{assessment.timedOut ? "Excluded — time ended" : assessment.agreement === true ? "Matched" : assessment.agreement === false ? "Did not match" : "Not assessable"}</dd></div>
       </dl>
-      <p>{calibration}</p>
+      <p>{interpretation}</p>
       <p className="muted"><strong>Separate evidence:</strong> This is a formative broad-category check. It does not establish exact pathology recognition or change exact ECG mastery.</p>
     </section>
   );
@@ -1510,8 +1743,47 @@ function MatchingFeedback({
   );
 }
 
-function formatReportScore(score: number | null) {
-  return score == null ? "Not assessed" : `${Math.round(score * 100)}%`;
+function StepwiseFeedback({
+  results,
+}: {
+  results: NonNullable<ClinicalGrade["stepFeedback"]>;
+}) {
+  return (
+    <section className="clinical-step-feedback" aria-labelledby="clinical-step-feedback-heading">
+      <div className="clinical-step-feedback-heading">
+        <p className="eyebrow">Patient-course review</p>
+        <h3 id="clinical-step-feedback-heading">Reason through each decision point</h3>
+      </div>
+      <ol>
+        {results.map((result) => (
+          <li className={result.correct ? "correct" : "developing"} key={`${result.stageIndex}-${result.stageTitle}`}>
+            <div className="clinical-step-feedback-status">
+              <span>{result.stageIndex + 1}</span>
+              <div>
+                <strong>{result.stageTitle}</strong>
+                {result.elapsedLabel ? <small>{result.elapsedLabel}</small> : null}
+              </div>
+              <b>{result.correct ? "Supported" : result.timedOut ? "Not credited" : "Revisit"}</b>
+            </div>
+            <p className="clinical-step-feedback-prompt">{result.prompt}</p>
+            <dl>
+              <div>
+                <dt>Your response</dt>
+                <dd>{result.learnerAnswer}</dd>
+              </div>
+              {!result.correct ? (
+                <div>
+                  <dt>Best-supported response</dt>
+                  <dd>{result.supportedAnswer}</dd>
+                </div>
+              ) : null}
+            </dl>
+            <p className="clinical-step-feedback-explanation">{result.explanation}</p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
 }
 
 function questionTypeLabel(questionType: NonNullable<NextResult["item"]>["question_type"]): string {
@@ -1526,4 +1798,115 @@ function questionTypeLabel(questionType: NonNullable<NextResult["item"]>["questi
     mcq: "Clinical decision",
   } as const;
   return labels[questionType];
+}
+
+function viewerActionTitle(action: ViewerAction): string {
+  const labels: Record<ViewerAction["type"], string> = {
+    zoom: "Focus the relevant interval",
+    highlightLead: "Compare the key leads",
+    highlightROI: "Inspect the supporting region",
+    circleROI: "Locate the decisive feature",
+    drawCaliper: "Check the measurement",
+    showFiducial: "Mark the reference point",
+    resetView: "Return to the full tracing",
+  };
+  return action.label || labels[action.type];
+}
+
+function viewerActionDescription(action: ViewerAction): string {
+  const leads = action.leads?.length ? action.leads.join(", ") : action.lead;
+  const interval = action.timeStart != null && action.timeEnd != null
+    ? `${action.timeStart.toFixed(2)}–${action.timeEnd.toFixed(2)} seconds`
+    : action.timeSec != null
+      ? `${action.timeSec.toFixed(2)} seconds`
+      : "the authored teaching region";
+  if (action.type === "highlightLead") return leads ? `Compare ${leads} before returning to the whole ECG.` : "Compare the highlighted leads.";
+  if (action.type === "resetView") return "Reassess the finding in the context of the complete 12-lead ECG.";
+  return `${leads ? `In ${leads}, inspect` : "Inspect"} ${interval}.`;
+}
+
+function clinicalAnswerSummary(item: NonNullable<NextResult["item"]>, answer: ClinicalAnswerPayload): string {
+  if (item.question_type === "fillin" && answer.fillInValue != null) {
+    return `${answer.fillInValue} ${item.fill_in_task?.unit ?? ""}`.trim();
+  }
+  if (item.question_type === "matching" && item.matching_task) {
+    const choices = new Map(item.matching_task.choices.map((choice) => [choice.id, choice.label]));
+    return item.matching_task.rows
+      .map((row) => `${row.clause}: ${choices.get(answer.matches?.[row.id] ?? "") ?? "No source selected"}`)
+      .join("; ");
+  }
+  if (item.question_type === "spoterror") {
+    const line = item.machine_read?.find((candidate) => candidate.id === answer.machineLineId)?.text;
+    const point = answer.click ? `${answer.click.lead} at ${answer.click.timeSec.toFixed(2)} s` : null;
+    return [line ? `Machine statement: ${line}` : null, point ? `ECG evidence: ${point}` : null].filter(Boolean).join(" · ") || "No response recorded";
+  }
+  if (item.question_type === "click" && answer.click) return `${answer.click.lead} at ${answer.click.timeSec.toFixed(2)} seconds`;
+  const selected = item.options?.find((option) => option.id === answer.selectedOptionId)?.text;
+  return selected ?? (answer.timedOut ? "No response before time ended" : "No response recorded");
+}
+
+function bestSupportedResponse(grade: ClinicalGrade): string {
+  if (grade.supportedAnswer) return grade.supportedAnswer;
+  if (grade.teachingPoints.length) return grade.teachingPoints[0];
+  if (grade.correctObjectives.length) {
+    return `A response supported by ${grade.correctObjectives.map(conceptLabel).join(", ")} and the highlighted ECG evidence.`;
+  }
+  return "Use the highlighted ECG evidence and the case rationale to choose the safest supported action.";
+}
+
+function answerClassExplanation(answerClass: string): string {
+  const explanations: Record<string, string> = {
+    missing_required_safety_action: "The response did not include a time-sensitive action needed to keep the patient safe.",
+    unsafe_choice: "The response could expose the patient to avoidable harm before the ECG finding is addressed.",
+    under_triage: "The response does not match the urgency supported by the presentation and ECG.",
+    over_triage: "The response escalates beyond what the available presentation and ECG evidence support.",
+    incomplete: "Part of the reasoning was supported, but the response did not fully address the clinical decision.",
+  };
+  return explanations[answerClass] ?? "Compare this response with the supported ECG evidence and the patient-care consequence described above.";
+}
+
+function buildCaseReviewItems(report: ShiftReport): ClinicalCaseReviewItem[] {
+  return (report.caseReviews ?? []).map((review) => ({
+    id: `${report.reviewSessionRef ?? report.sessionId}-${review.attemptIndex}`,
+    index: review.attemptIndex,
+    title: review.title,
+    context: [review.situation ? humanLabel(review.situation) : null, review.questionType ? humanLabel(review.questionType) : null]
+      .filter(Boolean)
+      .join(" · "),
+    tags: review.objectiveLabels.slice(0, 3),
+    outcome: review.correct ? "appropriate" : review.score >= 0.6 ? "developing" : "attention",
+    outcomeLabel: review.correct ? "Supported decision" : review.score >= 0.6 ? "Partly supported" : "Review needed",
+    href: review.reviewAvailable ? (review.reviewHref ?? review.replayHref) : undefined,
+  }));
+}
+
+function buildSBIFeedback(
+  report: ShiftReport,
+  reportCoach: { tutorMessage: string; socraticQuestion?: string | null; suggestedNextStep?: string | null } | null,
+): ClinicalSBIFeedback {
+  const priority = report.debrief?.priorityConcept;
+  const safety = report.performanceDomains?.safety;
+  const decisionScore = report.performanceDomains?.clinicalApplicationDecision.score ?? report.accuracy;
+  const situation = `Across ${report.answered} completed ${LANE_LABEL[report.lane].toLowerCase()} case${report.answered === 1 ? "" : "s"}, you interpreted the ECG and committed a patient-care decision.`;
+  const behavior = priority
+    ? `For ${priority.label}, you made ${priority.correctCount} supported decision${priority.correctCount === 1 ? "" : "s"} and had ${priority.missedCount} decision${priority.missedCount === 1 ? "" : "s"} that needed revision.`
+    : `Your supported clinical-decision rate was ${Math.round(decisionScore * 100)}% across a varied case mix.`;
+  const impact = safety?.flagged
+    ? `${safety.flagged} decision${safety.flagged === 1 ? "" : "s"} carried a safety signal, so recognizing the trace must be linked more consistently to the next protective action.`
+    : "Your decisions did not trigger a recorded safety concern; preserving the link between ECG evidence and action will help that reasoning transfer to less familiar presentations.";
+  const nextStep = reportCoach?.suggestedNextStep
+    ?? report.debrief?.nextCaseProposal?.reason
+    ?? (priority
+      ? `Practice one more varied case involving ${priority.label}, naming the decisive ECG feature before selecting the action.`
+      : "Complete another varied clinical set and name the ECG evidence that changes each management decision.");
+  const generated = reportCoach?.tutorMessage.match(
+    /^\s*Situation:\s*(.+?)\s+Behavior:\s*(.+?)\s+Impact:\s*(.+?)\s+Next step:\s*(.+)\s*$/is,
+  );
+  if (!generated) return { situation, behavior, impact, nextStep };
+  return {
+    situation: generated[1].trim(),
+    behavior: generated[2].trim(),
+    impact: generated[3].trim(),
+    nextStep: reportCoach?.suggestedNextStep?.trim() || generated[4].trim(),
+  };
 }

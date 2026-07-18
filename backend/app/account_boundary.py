@@ -43,6 +43,8 @@ DIRECT_OWNER_TABLES: Mapping[str, str] = {
     "auth_challenges": "user_id",
     "learner_profiles": "learner_id",
     "learner_preferences": "learner_id",
+    "learner_calendar_settings": "learner_id",
+    "study_calendar_items": "learner_id",
     "objective_mastery": "learner_id",
     "subskill_mastery": "learner_id",
     "subskill_retention_events": "learner_id",
@@ -56,6 +58,7 @@ DIRECT_OWNER_TABLES: Mapping[str, str] = {
     "training_campaigns": "learner_id",
     "assessment_leases": "owner_id",
     "learner_events": "owner_id",
+    "learning_session_flags": "owner_id",
     "guest_progress_claims": "user_id",
 }
 

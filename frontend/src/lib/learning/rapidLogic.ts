@@ -1,9 +1,19 @@
 import { safeLearningReturn } from "./learningReturn";
 import type { LearningSubskill } from "./interactionTypes";
 
-export const RAPID_SESSION_LENGTHS = [5, 10, 25, 50, 100, 500, 1000, 5000] as const;
+export const RAPID_SESSION_LENGTHS = [5, 10, 20, 25, 50, 100, 500, 1000, 5000] as const;
+/** Learner-scale choices. Larger values remain accepted only for legacy links and test fixtures. */
+export const RAPID_VISIBLE_SESSION_LENGTHS = [5, 10, 20] as const;
 export const RAPID_PACES = ["untimed", "ward", "emergency"] as const;
 export type RapidPace = (typeof RAPID_PACES)[number];
+export const RAPID_PRACTICE_MODES = ["adaptive", "mixed", "emergency"] as const;
+export type RapidPracticeMode = (typeof RAPID_PRACTICE_MODES)[number];
+export const RAPID_EMERGENCY_RHYTHM_CONCEPTS = [
+  "ventricular_fibrillation",
+  "ventricular_flutter",
+  "ventricular_tachycardia",
+  "polymorphic_ventricular_tachycardia",
+] as const;
 
 type RapidReceiptSummaryInput = {
   concept: string;
@@ -124,7 +134,30 @@ const RAPID_SUBSKILLS = new Set<LearningSubskill>([
   "calibrate_confidence",
 ]);
 
-const RAPID_RETURN_SURFACES = ["lesson", "study_plan", "clinical"] as const;
+const RAPID_RETURN_SURFACES = ["lesson", "study_plan", "profile", "calendar", "clinical", "session_review"] as const;
+
+export function rapidDebriefPracticeHref(target: {
+  objectiveId: string;
+  subskill: string;
+}): string {
+  if (
+    target.subskill === "recognize"
+    && (RAPID_EMERGENCY_RHYTHM_CONCEPTS as readonly string[]).includes(target.objectiveId)
+  ) {
+    return `/rapid?${new URLSearchParams({
+      focus: target.objectiveId,
+      receiptConcept: target.objectiveId,
+      subskill: "recognize",
+      practiceMode: "emergency",
+    }).toString()}`;
+  }
+  return `/train?${new URLSearchParams({
+    concept: target.objectiveId,
+    receiptConcept: target.objectiveId,
+    subskill: target.subskill,
+    returnTo: "/rapid",
+  }).toString()}`;
+}
 
 export type RapidLaunchIntent = {
   focus: string;
@@ -136,6 +169,7 @@ export type RapidLaunchIntent = {
   suggestedLength: number | null;
   pace: RapidPace | null;
   requestedPace: RapidPace | null;
+  practiceMode: RapidPracticeMode | null;
   paceAdjustedForCompleteRead: boolean;
   completeReadRequired: boolean;
 };
@@ -163,6 +197,10 @@ export function parseRapidLaunchIntent(search: string): RapidLaunchIntent {
   const requestedPace = RAPID_PACES.includes(rawPace as RapidPace)
     ? rawPace as RapidPace
     : null;
+  const rawPracticeMode = (params.get("practiceMode") ?? "").trim();
+  const practiceMode = RAPID_PRACTICE_MODES.includes(rawPracticeMode as RapidPracticeMode)
+    ? rawPracticeMode as RapidPracticeMode
+    : null;
   const completeReadRequired = subskill === "synthesize" || Boolean(secondaryConcept);
   const paceAdjustedForCompleteRead = requestedPace === "emergency" && completeReadRequired;
   return {
@@ -175,6 +213,7 @@ export function parseRapidLaunchIntent(search: string): RapidLaunchIntent {
     suggestedLength: allowlistedRapidLength(params.get("suggestedLength")),
     pace: paceAdjustedForCompleteRead ? "ward" : requestedPace,
     requestedPace,
+    practiceMode,
     paceAdjustedForCompleteRead,
     completeReadRequired,
   };

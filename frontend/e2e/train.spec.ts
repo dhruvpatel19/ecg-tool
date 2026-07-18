@@ -160,11 +160,11 @@ test.describe("Mode 2 · durable Training campaigns", () => {
   });
 
   test("recommended Training length seeds setup but an explicit learner choice owns launch", async ({ page }) => {
-    await page.goto("/train?concept=right_bundle_branch_block&receiptConcept=right_bundle_branch_block&subskill=discriminate&suggestedLength=25&returnTo=%2Fprofile%3Ftab%3Dplan");
+    await page.goto("/train?concept=right_bundle_branch_block&receiptConcept=right_bundle_branch_block&subskill=discriminate&suggestedLength=25&returnTo=%2Fhome%3Fpanel%3Dplan");
     const length = page.getByLabel("Requested unique ECGs");
     await expect(length).toHaveValue("25", { timeout: 30_000 });
     await length.selectOption("50");
-    await expect(page.getByRole("link", { name: "Return to study plan" })).toHaveAttribute("href", "/profile?tab=plan");
+    await expect(page.getByRole("link", { name: "Return to study plan" })).toHaveAttribute("href", "/home?panel=plan");
 
     const startRequest = page.waitForRequest((request) => (
       new URL(request.url()).pathname === "/api/backend/training/campaigns"

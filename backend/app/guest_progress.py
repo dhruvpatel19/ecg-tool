@@ -108,6 +108,8 @@ class GuestProgressService:
             "trainingCampaigns": 0,
             "learnerEvents": 0,
             "learningPreferences": 0,
+            "calendarSettings": 0,
+            "calendarItems": 0,
             "competencies": 0,
             "lastActivityAt": None,
         }
@@ -131,6 +133,12 @@ class GuestProgressService:
             "trainingCampaigns": self._count(conn, "training_campaigns", "learner_id", guest_id),
             "learnerEvents": self._count(conn, "learner_events", "owner_id", guest_id),
             "learningPreferences": self._count(conn, "learner_preferences", "learner_id", guest_id),
+            "calendarSettings": self._count(
+                conn, "learner_calendar_settings", "learner_id", guest_id
+            ),
+            "calendarItems": self._count(
+                conn, "study_calendar_items", "learner_id", guest_id
+            ),
         }
         competency_rows = 0
         if self._table_exists(conn, "objective_mastery"):
@@ -162,6 +170,8 @@ class GuestProgressService:
             ("training_campaigns", "learner_id", "updated_at"),
             ("learner_events", "owner_id", "occurred_at"),
             ("learner_preferences", "learner_id", "updated_at"),
+            ("learner_calendar_settings", "learner_id", "updated_at"),
+            ("study_calendar_items", "learner_id", "updated_at"),
         )
         for table, owner_column, timestamp_column in timestamp_tables:
             if not self._table_exists(conn, table):
@@ -376,6 +386,39 @@ class GuestProgressService:
                     "UPDATE learner_preferences SET learner_id = ? WHERE learner_id = ?",
                     (user_id, guest_id),
                 )
+        if self._table_exists(conn, "learner_calendar_settings"):
+            account_calendar_settings = conn.execute(
+                "SELECT 1 FROM learner_calendar_settings WHERE learner_id = ?",
+                (user_id,),
+            ).fetchone()
+            if account_calendar_settings:
+                conn.execute(
+                    "DELETE FROM learner_calendar_settings WHERE learner_id = ?",
+                    (guest_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE learner_calendar_settings SET learner_id = ? "
+                    "WHERE learner_id = ?",
+                    (user_id, guest_id),
+                )
+        if self._table_exists(conn, "study_calendar_items"):
+            # Browser retries can reuse a client request id on guest and account
+            # owners. Preserve both learner-authored blocks during claim by
+            # assigning only the guest copy a new internal idempotency key.
+            conn.execute(
+                "UPDATE study_calendar_items SET client_request_id = 'claim-' || item_id "
+                "WHERE learner_id = ? AND EXISTS ("
+                "SELECT 1 FROM study_calendar_items account_item "
+                "WHERE account_item.learner_id = ? "
+                "AND account_item.client_request_id = study_calendar_items.client_request_id"
+                ")",
+                (guest_id, user_id),
+            )
+            conn.execute(
+                "UPDATE study_calendar_items SET learner_id = ? WHERE learner_id = ?",
+                (user_id, guest_id),
+            )
 
         # Global integer/UUID primary keys remain unchanged; only their owner is
         # rekeyed. Dependent answer/message rows continue to reference those IDs.

@@ -65,27 +65,10 @@ else
   trap - EXIT
 fi
 
-ln -sfn "releases/${RELEASE}" "${CORPUS_ROOT}/current.next"
-mv -Tf "${CORPUS_ROOT}/current.next" "${CORPUS_ROOT}/current"
+activate_corpus_release_pointer "${CORPUS_ROOT}" "${TARGET}"
 
-# The private GCS artifact remains the durable rollback source. Keep recent
-# local releases for fast rollback but remove inactive directories/artifacts
-# older than 30 days after verifying every resolved deletion target is confined
-# to the intended persistent-disk subtree.
-RELEASES_REAL="$(realpath -e "${RELEASES_ROOT}")"
-TARGET_REAL="$(realpath -e "${TARGET}")"
-while IFS= read -r -d '' candidate; do
-  CANDIDATE_REAL="$(realpath -e "${candidate}")"
-  [[ "${CANDIDATE_REAL}" == "${RELEASES_REAL}/"* && "${CANDIDATE_REAL}" != "${TARGET_REAL}" ]] \
-    || die "refusing out-of-scope corpus release cleanup"
-  rm -rf -- "${CANDIDATE_REAL}"
-done < <(find "${RELEASES_ROOT}" -mindepth 1 -maxdepth 1 -type d -mtime +30 -print0)
-
-ARTIFACTS_REAL="$(realpath -e "${DATA_ROOT%/}/artifacts")"
-while IFS= read -r -d '' candidate; do
-  CANDIDATE_REAL="$(realpath -e "${candidate}")"
-  [[ "${CANDIDATE_REAL}" == "${ARTIFACTS_REAL}/"* ]] \
-    || die "refusing out-of-scope corpus artifact cleanup"
-  rm -f -- "${CANDIDATE_REAL}"
-done < <(find "${ARTIFACTS_REAL}" -mindepth 1 -maxdepth 1 -type f -mtime +30 -print0)
+# Never prune a release or its downloaded artifact during deployment. The
+# previously active tree is the immediate application-readiness rollback point,
+# and the production safety contract requires corpus retention to be a separate,
+# explicitly reviewed maintenance operation.
 log "activated corpus release ${RELEASE}"

@@ -15,10 +15,10 @@ export default function RouteError({ error, reset }: { error: Error & { digest?:
       <div>
         <p className="eyebrow">Workspace interrupted</p>
         <h1 id="route-error-title">This page did not finish loading.</h1>
-        <p>Your saved learning record is unchanged. Retry the page, or return to Today and choose another activity.</p>
+        <p>Your saved learning record is unchanged. Retry the page, or return to your dashboard and choose another activity.</p>
         <div className="actions">
           <button className="button primary" type="button" onClick={reset}><RotateCcw size={17} aria-hidden="true" /> Retry</button>
-          <Link className="button" href="/">Return to Today</Link>
+          <Link className="button" href="/home">Return to dashboard</Link>
         </div>
       </div>
     </section>

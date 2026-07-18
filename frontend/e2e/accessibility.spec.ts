@@ -8,7 +8,7 @@ const PUBLIC_ROUTES = [
 ] as const;
 
 const PRIVATE_ROUTES = [
-  { name: "dashboard", path: "/dashboard" },
+  { name: "dashboard", path: "/home" },
   { name: "Guided curriculum", path: "/learn" },
   { name: "Guided ECG workspace", path: "/learn/leads-vectors" },
   { name: "Foundations workspace", path: "/learn/foundations" },
@@ -74,17 +74,17 @@ test.describe("WCAG authenticated student shell", () => {
 
   test("active Rapid workspace has no detectable A/AA violations", async ({ page }) => {
     await page.goto("/rapid");
-    await page.getByRole("button", { name: /Untimed practice/ }).click();
-    await page.getByRole("button", { name: "Start untimed practice" }).click();
-    await expect(page.getByRole("heading", { name: "What matters on this ECG?" })).toBeVisible({ timeout: 30_000 });
+    await page.getByRole("button", { name: /No timer/ }).click();
+    await page.getByRole("button", { name: "Start rapid set" }).click();
+    await expect(page.getByRole("complementary", { name: "Rapid ECG response" })).toBeVisible({ timeout: 30_000 });
     await expectNoWcagViolations(page);
   });
 
   test("active Clinical workspace has no detectable A/AA violations", async ({ page }) => {
     await page.goto("/practice");
-    await page.getByRole("button", { name: "Learn (untimed)" }).click();
-    await page.getByRole("button", { name: "Start learning set" }).click();
-    await expect(page.getByRole("heading", { name: "What is the dominant ECG pattern?" })).toBeVisible({ timeout: 30_000 });
+    await page.getByRole("button", { name: "Guided" }).click();
+    await page.getByRole("button", { name: "Begin learning set" }).click();
+    await expect(page.getByRole("heading", { name: "Record your initial ECG read" })).toBeVisible({ timeout: 30_000 });
     await expectNoWcagViolations(page);
   });
 });

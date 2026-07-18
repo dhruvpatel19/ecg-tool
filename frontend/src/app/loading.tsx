@@ -62,7 +62,7 @@ export default function Loading() {
     : PRIVATE_LOADING_COPY;
 
   return (
-    <section className="system-page" aria-labelledby="route-loading-title" aria-busy="true">
+    <section className="system-page system-page-loading" aria-labelledby="route-loading-title" aria-busy="true">
       <LoaderCircle className="system-page-spinner" aria-hidden="true" />
       <div>
         <p className="eyebrow">{copy.eyebrow}</p>

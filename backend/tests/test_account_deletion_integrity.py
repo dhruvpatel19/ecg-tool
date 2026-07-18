@@ -135,6 +135,7 @@ def _run_after_delete(store: LearningStore, user_id: str, action):
         "tutor",
         "activity",
         "auth",
+        "flag",
     ],
 )
 def test_deletion_wins_before_blocked_owner_graph_creation(
@@ -217,6 +218,16 @@ def test_deletion_wins_before_blocked_owner_graph_creation(
                 user_id,
                 (datetime.now(UTC) + timedelta(days=1)).isoformat(),
             )
+        if write_kind == "flag":
+            now = datetime.now(UTC).isoformat()
+            with store.connect() as conn:
+                conn.execute(
+                    "INSERT INTO learning_session_flags ("
+                    "owner_id, mode, session_id, attempt_index, created_at, updated_at"
+                    ") VALUES (?, 'training', 'late-private-session', 1, ?, ?)",
+                    (user_id, now, now),
+                )
+            return None
         raise AssertionError(f"unhandled write kind: {write_kind}")
 
     future = _run_after_delete(store, user_id, late_write)
@@ -305,8 +316,11 @@ def test_schema_v4_migrates_and_installs_complete_owner_guard_inventory(tmp_path
     TrainingCampaignStore(database, original.connect)
     GuestProgressService(original)
     with original.connect() as conn:
-        conn.execute("PRAGMA user_version=3")
-        conn.execute("DELETE FROM schema_migrations WHERE version = 4")
+        conn.execute("PRAGMA user_version=4")
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE version = ?",
+            (LEARNER_SCHEMA_VERSION,),
+        )
         triggers = [
             str(row[0])
             for row in conn.execute(
@@ -317,13 +331,14 @@ def test_schema_v4_migrates_and_installs_complete_owner_guard_inventory(tmp_path
         ]
         for trigger in triggers:
             conn.execute(f"DROP TRIGGER {trigger}")
+        conn.execute("DROP TABLE learning_session_flags")
         conn.execute("DROP TABLE account_tombstones")
 
     migrated = LearningStore(database)
     TrainingCampaignStore(database, migrated.connect)
     GuestProgressService(migrated)
     with migrated.connect() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == LEARNER_SCHEMA_VERSION == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LEARNER_SCHEMA_VERSION == 8
         actual_triggers = {
             str(row[0])
             for row in conn.execute(

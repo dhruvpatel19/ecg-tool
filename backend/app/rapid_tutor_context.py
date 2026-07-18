@@ -57,6 +57,8 @@ def _deterministic_debrief(
     completed: int,
     correct: list[dict[str, Any]],
     missed: list[dict[str, Any]],
+    average_score: float,
+    timed_out_count: int,
 ) -> dict[str, Any]:
     strongest = correct[0] if correct else None
     priority = missed[0] if missed else None
@@ -98,11 +100,46 @@ def _deterministic_debrief(
         if priority
         else "Which step in your fixed ECG sequence will you verify first on the next unannounced tracing?"
     )
+    situation = (
+        f"In this completed {completed}-ECG Rapid Practice set, the average score was "
+        f"{round(average_score * 100)}% and {timed_out_count} item(s) reached the server deadline."
+    )
+    if priority:
+        behavior = (
+            f"The ledger records {priority['label']} as the most frequent missed target "
+            f"({priority['count']} occurrence(s))."
+        )
+        impact = (
+            f"This makes the visible discriminator for {priority['label']} the highest-value "
+            "interpretation step to stabilize before adding more speed."
+        )
+    elif strongest:
+        behavior = (
+            f"The ledger records {strongest['label']} as the most consistently recognized "
+            f"target ({strongest['count']} occurrence(s))."
+        )
+        impact = (
+            "That consistency supports maintaining the same evidence-first sequence while "
+            "testing it on a new, unrevealed tracing."
+        )
+    else:
+        behavior = "The ledger does not yet contain a recurring concept-specific correct or missed target."
+        impact = "A further independent sample is needed before making a concept-specific learning claim."
+    next_step = "Use one new eligible ECG and state the discriminator before naming the finding."
     return {
         "recurringPattern": pattern,
         "crossConceptBridge": bridge,
         "nextStepQuestion": question,
-        "suggestedNextStep": "Use one new eligible ECG and state the discriminator before naming the finding.",
+        "suggestedNextStep": next_step,
+        # SBI+Next keeps feedback observational and actionable: the Situation
+        # and Behavior are ledger facts, Impact is a bounded learning
+        # implication, and Next never writes mastery or invents patient data.
+        "sbiNext": {
+            "situation": situation,
+            "behavior": behavior,
+            "impact": impact,
+            "next": next_step,
+        },
     }
 
 
@@ -169,7 +206,7 @@ def build_rapid_round_tutor_context(
     for row in rows:
         case_id = str(row["case_id"])
         if (
-            str(row["integrity_status"]) != "atomic_v1"
+            str(row["integrity_status"]) not in {"atomic_v1", "atomic_v2"}
             or str(row["attempt_owner"]) != learner_id
             or str(row["attempt_case"]) != case_id
             or str(row["attempt_mode"]) != "rapid_practice"
@@ -239,10 +276,13 @@ def build_rapid_round_tutor_context(
     common_correct = _rank(correct_counts)
     common_missed = _rank(missed_counts)
     common_overcalls = _rank(overcall_counts)
+    average_score = sum(scores) / len(scores)
     deterministic = _deterministic_debrief(
         completed=length,
         correct=common_correct,
         missed=common_missed,
+        average_score=average_score,
+        timed_out_count=timed_out_count,
     )
     context_id = f"rapid-round:{round_id}:{length}"
     return {
@@ -261,7 +301,7 @@ def build_rapid_round_tutor_context(
                 "completedCaseCount": length,
             },
             "aggregate": {
-                "averageScore": round(sum(scores) / len(scores), 4),
+                "averageScore": round(average_score, 4),
                 "averageResponseMs": (
                     round(sum(response_times) / len(response_times)) if response_times else None
                 ),
@@ -310,9 +350,29 @@ def deterministic_rapid_tutor_response(context: dict[str, Any]) -> dict[str, Any
         deterministic.get("recurringPattern")
         or "The completed server record does not support a recurring pattern yet."
     )
+    sbi_next = (
+        deterministic.get("sbiNext")
+        if isinstance(deterministic.get("sbiNext"), dict)
+        else {}
+    )
+    structured_message = " ".join(
+        f"{label}: {str(sbi_next.get(key) or '').strip()}"
+        for label, key in (
+            ("Situation", "situation"),
+            ("Behavior", "behavior"),
+            ("Impact", "impact"),
+            ("Next", "next"),
+        )
+        if str(sbi_next.get(key) or "").strip()
+    )
     return {
-        "tutorMessage": f"{pattern} {bridge.get('prompt')}" if bridge else pattern,
-        "feedback": "This debrief was reconstructed from the owner-bound completed Rapid ledger; browser summaries were ignored.",
+        "tutorMessage": structured_message or (
+            f"{pattern} {bridge.get('prompt')}" if bridge else pattern
+        ),
+        "feedback": (
+            "SBI+Next feedback was reconstructed from the owner-bound completed Rapid ledger; "
+            "browser summaries were ignored."
+        ),
         "viewerActions": [],
         "objectiveUpdates": [],
         "misconceptions": [],

@@ -13,6 +13,7 @@ from app.clinical import shift
 from app.clinical.fixture_items import FIXTURE_ITEMS, FIXTURE_PACKETS
 from app.clinical.provenance import (
     LEARNER_CLINICAL_SOURCES,
+    assert_longitudinal_pair_provenance,
     assert_learner_item_provenance,
     assert_serving_bank_provenance,
 )
@@ -23,6 +24,7 @@ from app.clinical.real_items import (
     CLINICAL_FAMILY_BY_SCENARIO,
     MATCHING_ORDINALS_BY_SCENARIO,
     MINIMUM_CLINICAL_BANK_SIZE,
+    LONGITUDINAL_APPLICATION_OBJECTIVES_BY_CURRENT,
     REAL_ECGS_BY_SCENARIO,
     _OLD_NEUTRAL_CLONE_MARKERS,
     normalized_scenario_signature,
@@ -165,6 +167,11 @@ def test_clinical_application_receipts_are_limited_to_declared_canonical_cells()
         for objectives in APPLICATION_OBJECTIVES_BY_SCENARIO.values()
         for objective in objectives
     }
+    declared_application.update(
+        objective
+        for objectives in LONGITUDINAL_APPLICATION_OBJECTIVES_BY_CURRENT.values()
+        for objective in objectives
+    )
     assert declared_application == set(CLINICAL_APPLICATION_CONCEPTS)
 
     # Every canonical ECG concept may rehearse the information boundary in
@@ -302,7 +309,7 @@ def test_runtime_payload_assertion_rejects_fixture_even_if_injected() -> None:
         shift._serve_payload(synthetic, provider, session)
 
 
-def test_oldnew_and_wct_remain_locked_without_authentic_sources() -> None:
+def test_oldnew_rejects_a_self_pair_and_wct_remains_locked() -> None:
     oldnew = next(item for item in FIXTURE_ITEMS if item.question_type == "oldnew").model_copy(
         deep=True,
         update={
@@ -312,7 +319,7 @@ def test_oldnew_and_wct_remain_locked_without_authentic_sources() -> None:
             "validation_status": "harness_pass",
         },
     )
-    with pytest.raises(RuntimeError, match="old/new"):
+    with pytest.raises(RuntimeError, match="distinct records"):
         assert_learner_item_provenance(oldnew, clinical_packet)
 
     wct = SYNTHETIC_WCT_TEMPLATE.model_copy(
@@ -325,3 +332,108 @@ def test_oldnew_and_wct_remain_locked_without_authentic_sources() -> None:
     )
     with pytest.raises(RuntimeError, match="locked objective"):
         assert_learner_item_provenance(wct, clinical_packet)
+
+
+def _longitudinal_packet(
+    case_id: str,
+    *,
+    patient_id: str | None = "patient-1",
+    recording_date: str = "2026-01-02 12:00:00",
+    source: str = "ptbxl",
+    source_version: str = "1.0.3",
+    signal_status: str | None = "acceptable",
+    human_validated: bool | None = True,
+) -> dict:
+    identity = {
+        "sourceId": source,
+        "sourceRecordId": case_id,
+        "patientId": patient_id,
+        "sourceVersion": source_version,
+        "licenseId": "CC-BY-4.0",
+    }
+    provenance = {
+        "sourceId": source,
+        "sourceVersion": source_version,
+        "licenseId": "CC-BY-4.0",
+        "patientId": patient_id,
+    }
+    metadata: dict[str, object] = {"recording_date": recording_date}
+    quality: dict[str, object] = {}
+    if signal_status is not None:
+        quality["status"] = signal_status
+    if human_validated is not None:
+        quality["human_validated"] = human_validated
+        metadata["validated_by_human"] = human_validated
+    return {
+        "case_id": case_id,
+        "source": source,
+        "record_identity": identity,
+        "source_provenance": provenance,
+        "signal_quality": quality,
+        "ptbxl": {"metadata": metadata},
+    }
+
+
+def test_authenticated_same_patient_pair_unlocks_oldnew_provenance() -> None:
+    current = clinical_packet("948")
+    prior = clinical_packet("942")
+    assert current is not None and prior is not None
+
+    resolved = assert_longitudinal_pair_provenance(
+        current,
+        prior,
+        current_ecg_id="948",
+        prior_ecg_id="942",
+    )
+    assert resolved == (current, prior)
+
+    oldnew = next(item for item in FIXTURE_ITEMS if item.question_type == "oldnew").model_copy(
+        deep=True,
+        update={
+            "item_id": "ptb-authenticated-longitudinal-948",
+            "ecg_id": "948",
+            "prior_ecg_id": "942",
+            "validation_status": "harness_pass",
+        },
+    )
+    resolved_item = assert_learner_item_provenance(oldnew, clinical_packet)
+    assert resolved_item["case_id"] == "948"
+
+
+@pytest.mark.parametrize(
+    ("current_overrides", "prior_overrides", "message"),
+    [
+        ({"case_id": "prior"}, {}, "distinct records"),
+        ({"patient_id": "patient-2"}, {}, "patient identity"),
+        ({"source_version": "1.0.2"}, {}, "version is not approved"),
+        ({"recording_date": "not-a-date"}, {}, "timestamp is invalid"),
+        ({"recording_date": "2026-01-01 12:00:00"}, {}, "prior must precede"),
+        ({"signal_status": "borderline"}, {}, "not acceptable"),
+        ({"signal_status": None}, {}, "not acceptable"),
+        ({"human_validated": False}, {}, "human signal validation"),
+        ({"human_validated": None}, {}, "human signal validation"),
+        ({"source": "prepared_bundle"}, {}, "unapproved source"),
+    ],
+)
+def test_longitudinal_pair_provenance_fails_closed(
+    current_overrides: dict,
+    prior_overrides: dict,
+    message: str,
+) -> None:
+    current_values = {
+        "case_id": "current",
+        "recording_date": "2026-01-02 12:00:00",
+        **current_overrides,
+    }
+    prior_values = {
+        "case_id": "prior",
+        "recording_date": "2026-01-01 12:00:00",
+        **prior_overrides,
+    }
+    with pytest.raises(RuntimeError, match=message):
+        assert_longitudinal_pair_provenance(
+            _longitudinal_packet(**current_values),
+            _longitudinal_packet(**prior_values),
+            current_ecg_id=str(current_values["case_id"]),
+            prior_ecg_id=str(prior_values["case_id"]),
+        )

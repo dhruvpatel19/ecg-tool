@@ -31,6 +31,19 @@ AnswerClass = Literal[
 QuestionType = Literal[
     "triage", "stepwise", "click", "spoterror", "fillin", "matching", "oldnew", "mcq"
 ]
+ClinicalStageKind = Literal["ecg", "decision", "reassessment", "handoff"]
+ClinicalDataTrend = Literal["up", "down", "stable", "new"]
+ClinicalDataSource = Literal["source_metadata", "authored_simulation"]
+ClinicalCompetencySubskill = Literal[
+    "recognize",
+    "localize",
+    "measure",
+    "discriminate",
+    "explain_mechanism",
+    "synthesize",
+    "apply_in_context",
+    "calibrate_confidence",
+]
 Situation = Literal["clinic", "ward", "ed", "triage", "code"]
 TestedScope = Literal["full_12_lead", "rhythm_only", "zoom_lead"]
 SourceType = Literal["measured", "curated_label", "authored_context"]
@@ -137,6 +150,43 @@ class Option(BaseModel):
 class StepOption(BaseModel):
     text: str
     correct: bool
+    # Server-only, option-specific correction shown after the stage is locked.
+    # Keeping this beside the keyed option makes every distractor justify why it
+    # is tempting but not best, instead of falling back to generic feedback.
+    rationale: str | None = Field(default=None, min_length=1)
+    # Optional analytic credit by objective for integrated choices. Omitted
+    # keys receive full credit only on the keyed best response and zero on a
+    # distractor. This prevents a partly correct comparison choice from
+    # incorrectly failing every competency attached to the stage.
+    competency_scores: dict[str, float] = Field(default_factory=dict)
+
+    model_config = _FORBID
+
+
+class StepCompetency(BaseModel):
+    """Exact formative competency assessed by one stepwise stage."""
+
+    objective_id: str = Field(min_length=1)
+    subskill: ClinicalCompetencySubskill
+
+    model_config = _FORBID
+
+
+class ClinicalDataPoint(BaseModel):
+    """One explicitly sourced fact revealed during a longitudinal case stage.
+
+    ECG morphology remains bound to the immutable packet. Bedside findings,
+    laboratory values, and treatment responses are authored simulation facts
+    and are labelled as such in both the transport and learner UI. Source
+    metadata is reserved for facts such as the elapsed interval between two
+    authenticated same-patient recordings.
+    """
+
+    label: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    detail: str | None = None
+    trend: ClinicalDataTrend | None = None
+    source: ClinicalDataSource = "authored_simulation"
 
     model_config = _FORBID
 
@@ -144,6 +194,14 @@ class StepOption(BaseModel):
 class StepwiseStep(BaseModel):
     prompt: str
     options: list[StepOption]
+    stage_kind: ClinicalStageKind | None = None
+    stage_title: str | None = None
+    elapsed_label: str | None = None
+    clinical_update: str | None = None
+    data_points: list[ClinicalDataPoint] = Field(default_factory=list)
+    # Server-only assessment mapping. It is stripped from the blinded item and
+    # returned only as a scored outcome after the learner commits the case.
+    competencies: list[StepCompetency] = Field(default_factory=list)
 
     model_config = _FORBID
 
@@ -336,10 +394,15 @@ class ClinicalAnswer(BaseModel):
         "uncertain",
     ] | None = None
     first_look_confidence: Literal[2, 3, 5] | None = None
+    # Server-owned orient-phase outcome. Browser values are ignored and
+    # overwritten from the durable first-look commitment before grading.
+    first_look_timed_out: bool = False
     click: ClinicalClick | None = None
     machine_line_id: str | None = None
     fill_in_value: float | None = Field(default=None, ge=0, le=5000)
-    confidence: int | None = Field(default=None, ge=1, le=5)  # required in Shift, absent in Learn
+    # Optional legacy reflection. Clinical scoring and completion never require
+    # it; omitted values remain null throughout learner-facing projections.
+    confidence: int | None = Field(default=None, ge=1, le=5)
     answer_time_ms: int | None = None
     confidence_time_ms: int | None = None  # logged separately from decision time (§16D)
     timed_out: bool = False
@@ -396,6 +459,40 @@ class ClinicalCaseItem(BaseModel):
                 "application objectives are not in the ECG evidence manifest: "
                 f"{sorted(invalid_application)}"
             )
+        invalid_step_competencies = {
+            competency.objective_id
+            for step in self.steps
+            for competency in step.competencies
+            if competency.objective_id not in manifested
+        }
+        if invalid_step_competencies:
+            raise ValueError(
+                "step competencies are not in the ECG evidence manifest: "
+                f"{sorted(invalid_step_competencies)}"
+            )
+        for index, step in enumerate(self.steps, start=1):
+            mapped = [competency.objective_id for competency in step.competencies]
+            if len(mapped) != len(set(mapped)):
+                raise ValueError(
+                    f"step {index} repeats an objective competency mapping"
+                )
+            for option in step.options:
+                unknown_scores = set(option.competency_scores) - set(mapped)
+                if unknown_scores:
+                    raise ValueError(
+                        f"step {index} option scores unmapped competencies: "
+                        f"{sorted(unknown_scores)}"
+                    )
+                invalid_scores = {
+                    objective: score
+                    for objective, score in option.competency_scores.items()
+                    if not 0.0 <= score <= 1.0
+                }
+                if invalid_scores:
+                    raise ValueError(
+                        f"step {index} option competency scores must be between 0 and 1: "
+                        f"{invalid_scores}"
+                    )
         self.disclosed_objectives = list(dict.fromkeys(self.disclosed_objectives))
         self.application_objectives = list(dict.fromkeys(self.application_objectives))
         if self.question_type == "matching":

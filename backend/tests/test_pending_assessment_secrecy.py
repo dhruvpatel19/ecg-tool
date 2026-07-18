@@ -419,8 +419,10 @@ def test_clinical_pending_ecg_blocks_public_grading_and_cross_owner_tutor() -> N
         )
         assert started_response.status_code == 200, started_response.text
         started = started_response.json()
-        item_id = started["next"]["itemId"]
-        item = clinical_item_store.get_item(item_id)
+        session_id = started["session"]["sessionId"]
+        durable = store.get_shift_session(session_id)
+        assert durable is not None
+        item = clinical_item_store.get_item(durable["pendingItemId"])
         assert item is not None
         case_id = item.ecg_id
 

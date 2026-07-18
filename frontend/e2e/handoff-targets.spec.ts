@@ -56,13 +56,37 @@ test("competency CTAs fail closed and preserve the exact receipt contract", () =
     caseConcept: "normal_ecg",
     receiptConcept: "integrated_interpretation",
     subskill: "synthesize",
-  })).toBe("/rapid?receiptConcept=integrated_interpretation&subskill=synthesize&returnTo=%2Fprofile&focus=normal_ecg");
+  })).toBe("/rapid?receiptConcept=integrated_interpretation&subskill=synthesize&returnTo=%2Fhome%3Fpanel%3Dcompetencies&focus=normal_ecg");
   expect(competencyPracticeHref({
     mode: "train",
     caseConcept: "right_bundle_branch_block",
     receiptConcept: "right_bundle_branch_block",
     subskill: "discriminate",
-  })).toBe("/train?receiptConcept=right_bundle_branch_block&subskill=discriminate&returnTo=%2Fprofile&concept=right_bundle_branch_block");
+  })).toBe("/train?receiptConcept=right_bundle_branch_block&subskill=discriminate&returnTo=%2Fhome%3Fpanel%3Dcompetencies&concept=right_bundle_branch_block");
+  expect(competencyPracticeHref({
+    mode: "rapid",
+    caseConcept: "ventricular_fibrillation",
+    receiptConcept: "ventricular_fibrillation",
+    subskill: "recognize",
+  })).toBe("/rapid?receiptConcept=ventricular_fibrillation&subskill=recognize&returnTo=%2Fhome%3Fpanel%3Dcompetencies&focus=ventricular_fibrillation&practiceMode=emergency");
+  expect(competencyPracticeHref({
+    mode: "rapid",
+    caseConcept: "sinus_rhythm",
+    receiptConcept: "sinus_rhythm",
+    subskill: "recognize",
+  }, "/home?panel=activity")).toContain("returnTo=%2Fhome%3Fpanel%3Dactivity");
+  expect(competencyPracticeHref({
+    mode: "train",
+    caseConcept: "right_bundle_branch_block",
+    receiptConcept: "right_bundle_branch_block",
+    subskill: "discriminate",
+  }, "/home/review/lsr1_rapid_test")).toContain("returnTo=%2Fhome%2Freview%2Flsr1_rapid_test");
+  expect(competencyPracticeHref({
+    mode: "rapid",
+    caseConcept: "sinus_rhythm",
+    receiptConcept: "sinus_rhythm",
+    subskill: "recognize",
+  }, "https://evil.test/steal")).toContain("returnTo=%2Fhome%3Fpanel%3Dcompetencies");
 });
 
 test("every Guided to Rapid handoff launches an explicit exact receipt while preserving its source objective", () => {

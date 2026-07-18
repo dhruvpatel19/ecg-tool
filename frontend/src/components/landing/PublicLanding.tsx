@@ -5,13 +5,10 @@ import {
   Check,
   CircleGauge,
   LockKeyhole,
-  MousePointer2,
-  Ruler,
   ShieldCheck,
   Sparkles,
   Stethoscope,
   TimerReset,
-  ZoomIn,
 } from "lucide-react";
 import Link from "next/link";
 import styles from "./PublicLanding.module.css";
@@ -36,8 +33,8 @@ const learningModes = [
   {
     number: "03",
     title: "Rapid practice",
-    short: "Complete the whole read",
-    description: "Interpret under untimed, ward, or emergency pacing and commit to your reasoning.",
+    short: "Build speed through varied reads",
+    description: "Answer focused or complete ECG questions with adaptive selection and fair, task-sized timing.",
     href: "/login?mode=register&next=%2Frapid",
     icon: TimerReset,
   },
@@ -100,15 +97,10 @@ export function PublicLanding() {
             <span className={styles.realBadge}><ShieldCheck size={13} aria-hidden="true" /> Real teaching ECG</span>
           </div>
           <div className={styles.previewWorkspace}>
-            <div className={styles.toolRail} aria-hidden="true">
-              <span className={styles.activeTool}><MousePointer2 size={16} /><small>Select</small></span>
-              <span><ZoomIn size={16} /><small>Zoom</small></span>
-              <span><Ruler size={16} /><small>Measure</small></span>
-            </div>
             <div className={styles.traceArea}>
               <div className={styles.traceMeta}>
-                <span>Lead II</span>
-                <small>25 mm/s · 10 mm/mV</small>
+                <span>Focused read · ECG 2 of 10</span>
+                <small>Tracing ready</small>
               </div>
               <svg viewBox="0 0 760 220" role="img" aria-label="Lead II rhythm strip from a deidentified PTB-XL ECG" preserveAspectRatio="none">
                 <defs>
@@ -133,16 +125,18 @@ export function PublicLanding() {
               </svg>
               <div className={styles.traceSource}>PTB-XL · CC BY 4.0</div>
             </div>
-          </div>
-          <div className={styles.previewQuestion}>
-            <div>
-              <span>First pass</span>
-              <strong>What can you establish before naming a diagnosis?</strong>
-            </div>
-            <div className={styles.previewChoices} aria-hidden="true">
-              <span className={styles.choiceSelected}>Rate &amp; rhythm</span>
-              <span>Axis</span>
-              <span>Intervals</span>
+            <div className={styles.previewQuestion}>
+              <div>
+                <span>Question 1 of 3</span>
+                <strong>Which rhythm best explains this tracing?</strong>
+              </div>
+              <div className={styles.previewChoices} aria-hidden="true">
+                <span>Sinus rhythm</span>
+                <span className={styles.choiceSelected}>Atrial fibrillation</span>
+                <span>Atrial flutter</span>
+                <span>Multifocal atrial tachycardia</span>
+              </div>
+              <small>Next: rate response · closest mimic</small>
             </div>
           </div>
           <div className={styles.previewFooter}>

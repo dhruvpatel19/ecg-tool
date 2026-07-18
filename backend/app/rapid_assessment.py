@@ -582,7 +582,7 @@ class RapidAssessmentStore:
                     )
 
                 frozen_manifest = json.loads(session["pending_manifest_json"] or "{}")
-                frozen_keys = (
+                frozen_keys = [
                     "version",
                     "caseId",
                     "assessmentScope",
@@ -590,7 +590,9 @@ class RapidAssessmentStore:
                     "objectives",
                     "allowSelectedExtras",
                     "overcallPolicy",
-                )
+                ]
+                if frozen_manifest.get("contractVersion") == "mixed-v2":
+                    frozen_keys.extend(("contractVersion", "taskPacket"))
                 if not frozen_manifest or any(
                     frozen_manifest.get(key) != tested_objective_manifest.get(key)
                     for key in frozen_keys

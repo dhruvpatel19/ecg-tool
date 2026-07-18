@@ -5,11 +5,13 @@ locals {
     "compute.googleapis.com",
     "iap.googleapis.com",
     "iam.googleapis.com",
+    "iamcredentials.googleapis.com",
     "logging.googleapis.com",
     "monitoring.googleapis.com",
     "oslogin.googleapis.com",
     "secretmanager.googleapis.com",
     "storage.googleapis.com",
+    "sts.googleapis.com",
   ])
 }
 

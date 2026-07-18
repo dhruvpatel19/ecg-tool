@@ -1,13 +1,17 @@
 # PTB-derived clean-runner test corpus
 
-`ptb_ci_corpus.tar.gz` contains a minimized subset of 103 real ECG waveforms
-from PTB-XL, plus the PTB-XL+ derived evidence needed to validate the authored
-Clinical bank on a clean CI runner. It is source-test data only; production uses
-the complete independently audited release corpus.
+`ptb_ci_corpus.tar.gz` contains a minimized subset of 106 real ECG waveforms
+from PTB-XL: 103 tracings bound to authored Clinical encounters and three
+authenticated prior tracings used by the longitudinal episodes. It also carries
+the PTB-XL+ derived evidence needed to validate the bank on a clean CI runner.
+It is source-test data only; production uses the complete independently audited
+release corpus.
 
 The export removes stable patient identifiers, recording dates, source file
-paths, staff/site/device fields, and validator identifiers. It preserves only
-the ECG signal and educational evidence required by the tests.
+paths, staff/site/device fields, and validator identifiers. For the three
+longitudinal pairs it substitutes fixture-scoped opaque pair handles and
+synthetic ordered timestamps, which are not derived from the source values. It
+preserves only the ECG signal and educational evidence required by the tests.
 
 - PTB-XL 1.0.3: Wagner et al., “PTB-XL, a large publicly available
   electrocardiography dataset,” DOI <https://doi.org/10.1038/s41597-020-0495-6>,

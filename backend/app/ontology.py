@@ -20,6 +20,14 @@ CONCEPTS: list[Concept] = [
     Concept("atrial_flutter", "Atrial flutter", "rhythm"),
     Concept("supraventricular_tachycardia", "Supraventricular tachycardia", "rhythm"),
     Concept("wide_complex_tachycardia", "Wide-complex tachycardia", "rhythm"),
+    Concept("ventricular_tachycardia", "Ventricular tachycardia", "rhythm"),
+    Concept(
+        "polymorphic_ventricular_tachycardia",
+        "Polymorphic ventricular tachycardia",
+        "rhythm",
+    ),
+    Concept("ventricular_flutter", "Ventricular flutter", "rhythm"),
+    Concept("ventricular_fibrillation", "Ventricular fibrillation", "rhythm"),
     Concept("bradycardia", "Bradycardia", "rhythm"),
     Concept("av_block_first_degree", "First-degree AV block", "intervals"),
     Concept("av_block_second_degree_mobitz_i", "Mobitz I AV block", "intervals"),
@@ -144,7 +152,16 @@ PRACTICE_GROUPS = [
     {
         "id": "tachyarrhythmias",
         "label": "Tachyarrhythmias",
-        "concepts": ["atrial_fibrillation", "atrial_flutter", "supraventricular_tachycardia", "wide_complex_tachycardia"],
+        "concepts": [
+            "atrial_fibrillation",
+            "atrial_flutter",
+            "supraventricular_tachycardia",
+            "wide_complex_tachycardia",
+            "ventricular_tachycardia",
+            "polymorphic_ventricular_tachycardia",
+            "ventricular_flutter",
+            "ventricular_fibrillation",
+        ],
     },
     {"id": "af_flutter", "label": "AF/flutter", "concepts": ["atrial_fibrillation", "atrial_flutter"]},
     {

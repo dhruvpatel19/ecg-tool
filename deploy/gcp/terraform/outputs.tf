@@ -23,6 +23,16 @@ output "artifact_repository_url" {
   value       = local.backend_repository_url
 }
 
+output "github_actions_workload_identity_provider" {
+  description = "Full Workload Identity provider resource for the GitHub repository variable, or null when the optional publisher is disabled."
+  value       = try(google_iam_workload_identity_pool_provider.github_actions[0].name, null)
+}
+
+output "github_actions_service_account_email" {
+  description = "GitHub Actions backend-image publisher service-account email for the repository variable, or null when disabled."
+  value       = try(google_service_account.github_actions_publisher[0].email, null)
+}
+
 output "corpus_bucket_uri" {
   description = "Private release-corpus bucket. Upload the archive outside Terraform."
   value       = "gs://${google_storage_bucket.corpus.name}"

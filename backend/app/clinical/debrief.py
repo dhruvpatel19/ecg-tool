@@ -19,6 +19,22 @@ from .provenance import assert_learner_item_provenance
 
 def _grade_objectives(answer: dict[str, Any]) -> tuple[list[str], list[str]]:
     grade = answer.get("grade") if isinstance(answer.get("grade"), dict) else {}
+    outcomes = grade.get("competencyOutcomes") or []
+    if isinstance(outcomes, list) and outcomes:
+        by_concept: dict[str, list[bool]] = defaultdict(list)
+        for outcome in outcomes:
+            if not isinstance(outcome, dict):
+                continue
+            concept = str(outcome.get("concept") or "")
+            if concept:
+                by_concept[concept].append(bool(outcome.get("correct")))
+        correct = [
+            concept for concept, values in by_concept.items() if values and all(values)
+        ]
+        missed = [
+            concept for concept, values in by_concept.items() if not values or not all(values)
+        ]
+        return correct, missed
     correct = [str(value) for value in grade.get("correctObjectives") or [] if value]
     missed = [str(value) for value in grade.get("missedObjectives") or [] if value]
     return list(dict.fromkeys(correct)), list(dict.fromkeys(missed))
@@ -203,9 +219,12 @@ def build_shift_debrief(
         else None
     )
     ai_prompt = (
-        "Use only the server-owned completed-shift evidence. Identify one recurring reasoning pattern, "
-        "walk me through the cross-concept bridge if one is present, and ask one concise transfer question. "
-        "Do not add diagnoses, measurements, or mastery claims."
+        "Use only the server-owned completed-set evidence. Structure the feedback as Situation, Behavior, "
+        "Impact, and one specific Next step: state the completed case setting; describe an observable reasoning "
+        "pattern from the grades; explain its patient-care or learning consequence without inventing outcomes; "
+        "then give one bounded action grounded in the listed destinations and the learner's independent evidence. "
+        "Walk through the cross-concept bridge only when one is present, and end with one concise transfer question. "
+        "Do not add diagnoses, measurements, personality judgments, or mastery claims."
     )
     return {
         "evidenceBoundary": "completed_server_grades_plus_independent_competency_state",

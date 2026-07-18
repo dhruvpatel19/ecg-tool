@@ -12,7 +12,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 
-from ..clinical.item_reference import is_public_item_reference, public_item_reference
+from ..clinical.item_reference import (
+    is_public_item_reference,
+    legacy_public_item_reference,
+)
 from ..clinical.schemas import ClinicalCaseItem
 
 
@@ -151,7 +154,7 @@ class ClinicalItemStore:
                     (
                         candidate
                         for candidate in candidates
-                        if public_item_reference(str(candidate["item_id"])) == item_id
+                        if legacy_public_item_reference(str(candidate["item_id"])) == item_id
                     ),
                     None,
                 )
@@ -254,7 +257,16 @@ class ClinicalItemStore:
             return False, "clinical_bank_below_release_minimum"
         if any(item.validation_status != "harness_pass" for item in items):
             return False, "clinical_bank_contains_unvalidated_item"
-        ecg_ids = [str(item.ecg_id) for item in items]
+        # A prior is a learner-visible, answer-bearing tracing too.  Treat every
+        # primary/prior slot as one global release identity so a comparison ECG
+        # cannot also masquerade as an unseen standalone case (or as another
+        # case's prior) inside the same published bank.
+        ecg_ids = [
+            str(ecg_id)
+            for item in items
+            for ecg_id in (item.ecg_id, item.prior_ecg_id)
+            if ecg_id
+        ]
         if len(ecg_ids) != len(set(ecg_ids)):
             return False, "clinical_bank_reuses_ecg"
         identifiers = [

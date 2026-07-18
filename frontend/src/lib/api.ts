@@ -9,6 +9,7 @@ import type {
   MeResponse,
   RegionGradeResult,
   RapidRoundPayload,
+  RapidTaskPacket,
   TrainingCampaignPayload,
   TutorMessageResponse,
   TutorResponse,
@@ -124,6 +125,9 @@ function waveformPath(scope: WaveformScope | undefined, ecgRef: EcgCapability): 
   if (scope?.kind === "clinical") {
     return `/clinical/shift/${encodeURIComponent(scope.sessionId)}/waveform/${encodedRef}`;
   }
+  if (scope?.kind === "review") {
+    return `/learning/sessions/${encodeURIComponent(scope.sessionRef)}/attempts/${encodeURIComponent(String(scope.attemptIndex))}/waveform/${encodedRef}`;
+  }
   return `/cases/${encodedRef}/waveform`;
 }
 
@@ -183,6 +187,11 @@ export type LearningActivityItem = {
   assistance: "unassisted" | "assisted" | "unknown";
   evidence: "formative" | "independent" | "legacy_unverified";
   reviewRecommended: boolean;
+  review: {
+    sessionRef: string;
+    attemptIndex: number;
+    sessionStatus: "complete" | "abandoned";
+  } | null;
 };
 
 export type LearningActivityPage = {
@@ -190,6 +199,148 @@ export type LearningActivityPage = {
   items: LearningActivityItem[];
   nextCursor: string | null;
   hasMore: boolean;
+};
+
+export type LearningSessionMode = "training" | "rapid" | "clinical";
+
+export type LearningSessionCompetency = {
+  objectiveId: string;
+  subskill: string;
+  mappingSource: "committed_event" | "session_focus";
+};
+
+export type LearningSessionSummary = {
+  sessionRef: string;
+  mode: LearningSessionMode;
+  status: "complete" | "abandoned";
+  attempted: number;
+  total: number;
+  score: number | null;
+  correctCount: number | null;
+  flaggedCount: number;
+  focusCompetencies: LearningSessionCompetency[];
+  startedAt: string;
+  completedAt: string;
+  reviewAvailable: boolean;
+};
+
+export type LearningSessionAttempt = {
+  index: number;
+  score: number | null;
+  competencies: Array<LearningSessionCompetency & { score: number | null }>;
+  confidence: number | null;
+  assistance: { hintsUsed: number } | null;
+  flagged: boolean;
+};
+
+export type LearningSessionPage = {
+  version: "learning-sessions-v1";
+  items: LearningSessionSummary[];
+  hasMore: boolean;
+  nextOffset: number | null;
+  totalSavedItems: number;
+};
+
+export type LearningSessionReview = {
+  version: "learning-session-review-v1";
+  session: LearningSessionSummary;
+  attempts: LearningSessionAttempt[];
+};
+
+export type LearningSessionFlagResult = {
+  sessionRef: string;
+  attemptIndex: number;
+  flagged: boolean;
+  flaggedCount: number;
+};
+
+export type LearningReplayWaveformPresentation = {
+  kind: "twelve_lead" | "rhythm_strip";
+  leads: string[];
+};
+
+export type LearningReplayTaskFeedback = {
+  taskId: string;
+  type?: string;
+  topicId?: string;
+  skillId?: string;
+  objectiveId?: string;
+  complete?: boolean;
+  correct?: boolean;
+  score?: number;
+  timedOut?: boolean;
+  formativeOnly?: boolean;
+  feedback?: string;
+  referenceLabel?: string;
+  correctAnswer?: string;
+  correctChoiceId?: string;
+  expectedValue?: number;
+  tolerance?: number;
+  unit?: string;
+  supportingFieldsReviewed?: string[];
+  supportingFieldsEvidence?: string;
+  absoluteError?: number;
+  noTarget?: boolean;
+  matchedRoi?: Record<string, unknown>;
+};
+
+export type LearningSessionReplay = {
+  version: "learning-session-replay-v1";
+  fidelity: "reconstructed";
+  sessionRef: string;
+  attemptIndex: number;
+  mode: LearningSessionMode;
+  sessionStatus: "complete" | "abandoned";
+  displayId: string;
+  submittedAt: string;
+  ecgRef: EcgCapability;
+  waveformAvailable: boolean;
+  waveformPresentation: LearningReplayWaveformPresentation;
+  comparison: {
+    role: "prior";
+    label: string;
+    ecgRef: EcgCapability;
+    waveformAvailable: boolean;
+    waveformPresentation: LearningReplayWaveformPresentation;
+    provenance: "same_patient_time_ordered_real_ecgs";
+  } | null;
+  question: Record<string, unknown> & {
+    kind: LearningSessionMode;
+    taskPacket?: RapidTaskPacket;
+  };
+  submission: Record<string, unknown> & {
+    taskResponses?: Record<string, unknown>;
+  };
+  feedback: Record<string, unknown> & {
+    taskFeedback?: LearningReplayTaskFeedback[];
+  };
+  answerGuide: Record<string, unknown>;
+  provenance: {
+    tracing: "real_deidentified_ecg";
+    context?: "authored_simulation";
+    comparison?: "same_patient_time_ordered_real_ecgs";
+    learningEvidence: string;
+    contentLabel?: string;
+  };
+};
+
+export type CompetencyTrendPoint = {
+  occurredAt: string;
+  score: number;
+  mode: "guided" | "training" | "rapid" | "clinical";
+  evidenceLevel: "guided" | "formative" | "independent_transfer" | "legacy_unverified";
+  independent: boolean;
+  recordStatus: "verified" | "legacy";
+};
+
+export type CompetencyTrend = {
+  version: "competency-trend-v1";
+  objectiveId: string;
+  subskill: string;
+  points: CompetencyTrendPoint[];
+  pointCount: number;
+  hasMore: boolean;
+  interpretation: string;
 };
 
 export type LearningTrainingStage =
@@ -223,7 +374,133 @@ export type LearningPreferences = {
 
 export type LearningPreferencesUpdate = Partial<Omit<LearningPreferences, "updatedAt">>;
 
+export type StudyCalendarSettings = {
+  timeZone: string;
+  weekStartsOn: 0 | 1;
+  saved: boolean;
+  updatedAt: string | null;
+};
+
+export type StudyCalendarCompetency = {
+  objectiveId: string;
+  objectiveLabel: string;
+  subskill: string;
+  caseConcept: string;
+  mode: "train" | "rapid";
+  sourceDueAt: string;
+  currentDueAt: string | null;
+  sourceCurrent: boolean;
+  launchHref: string | null;
+};
+
+export type StudyCalendarMode = "guided" | "train" | "rapid" | "clinical";
+
+export type StudyCalendarActivity = {
+  kind: "manual_mode" | "retention_review" | "study_plan";
+  mode: StudyCalendarMode;
+  objectiveId: string | null;
+  objectiveLabel: string | null;
+  subskill: string | null;
+  caseConcept: string | null;
+  sourceCurrent: boolean | null;
+  launchHref: string | null;
+};
+
+export type StudyCalendarItem = {
+  itemId: string;
+  source: "manual" | "retention_review" | "study_plan";
+  title: string;
+  notes: string;
+  scheduledDate: string;
+  startMinute: number | null;
+  durationMinutes: number | null;
+  status: "scheduled" | "completed";
+  completionSource: "manual" | "verified_practice" | null;
+  completedAt: string | null;
+  competency: StudyCalendarCompetency | null;
+  activity: StudyCalendarActivity | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type StudyCalendarReviewItem = {
+  key: string;
+  objectiveId: string;
+  objectiveLabel: string;
+  subskill: string;
+  nextDueAt: string;
+  dueState: "due" | "overdue" | "scheduled";
+  overdueDays: number;
+  plannedFor: string | null;
+  scheduledItemId: string | null;
+  launchHref: string | null;
+  planPriority: number | null;
+};
+
+export type StudyCalendarReviewDay = {
+  date: string;
+  total: number;
+  overdue: number;
+  items: StudyCalendarReviewItem[];
+};
+
+export type StudyCalendarSnapshot = {
+  version: "study-calendar-v1";
+  generatedAt: string;
+  range: { startDate: string; endDate: string };
+  settings: StudyCalendarSettings;
+  today: string;
+  items: StudyCalendarItem[];
+  reviewDays: StudyCalendarReviewDay[];
+};
+
+export type StudyCalendarItemCreate = {
+  title: string;
+  notes?: string;
+  scheduledDate: string;
+  startMinute?: number | null;
+  durationMinutes?: number | null;
+  mode?: StudyCalendarMode | null;
+  clientRequestId: string;
+};
+
+export type StudyCalendarPlanCreate = {
+  expectedActionKey: string;
+  scheduledDate: string;
+  startMinute?: number | null;
+  durationMinutes?: number | null;
+  notes?: string;
+  clientRequestId: string;
+};
+
+export type StudyCalendarCompetencyCreate = {
+  objectiveId: string;
+  subskill: string;
+  expectedNextDueAt: string;
+  scheduledDate: string;
+  startMinute?: number | null;
+  durationMinutes?: number | null;
+  notes?: string;
+  clientRequestId: string;
+};
+
+export type StudyCalendarItemUpdate = {
+  revision: number;
+  title?: string;
+  notes?: string;
+  scheduledDate?: string;
+  startMinute?: number | null;
+  durationMinutes?: number | null;
+};
+
 export type CompetencyState = "unseen" | "acquiring" | "developing" | "consolidating" | "durable";
+
+export type CompetencyCalendarProjection = {
+  timeZone: string;
+  today: string;
+  reviewDays: Array<{ date: string; total: number }>;
+};
 
 export type CompetencyObjective = {
   objectiveId: string;
@@ -288,9 +565,24 @@ export type AdaptivePriority = {
   reason: string;
 };
 
+export type AdaptiveCalendarAction = {
+  version: "calendar-plan-action-v1";
+  actionKey: string;
+  relationship: "starting_check" | "follow_up" | "next_step";
+  title: string;
+  mode: "train" | "rapid";
+  objectiveId: string;
+  objectiveLabel: string | null;
+  subskill: string;
+  caseConcept: string;
+  launchHref: string;
+  suggestedDurationMinutes: number;
+};
+
 export type AdaptivePlan = {
   learnerId: string;
   coachContext: AdaptiveTutorContextRef;
+  calendarAction: AdaptiveCalendarAction | null;
   generatedAt: string;
   plannerKind: "verified_competency_scheduler";
   generativeTutorUsed: false;
@@ -710,10 +1002,18 @@ export const api = {
       body: JSON.stringify({ learnerId, items, source, merge: true }),
     },
   ),
-  competencies: (learnerId = "demo") =>
-    request<{ learnerId: string; registryVersion: string; objectives: CompetencyObjective[] }>(
+  competencies: (learnerId = "demo", timeZone?: string) => {
+    return request<{ learnerId: string; registryVersion: string; objectives: CompetencyObjective[]; calendarProjection: CompetencyCalendarProjection }>(
       `/learners/${encodeURIComponent(learnerId)}/competencies`,
-    ),
+      timeZone ? { headers: { "X-ECG-Time-Zone": timeZone } } : undefined,
+    );
+  },
+  competencyTrend: (objectiveId: string, subskill: string, limit = 20, learnerId = "demo") => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    return request<CompetencyTrend>(
+      `/learners/${encodeURIComponent(learnerId)}/competencies/${encodeURIComponent(objectiveId)}/${encodeURIComponent(subskill)}/trend?${params.toString()}`,
+    );
+  },
   learningResume: () => request<LearningResumeSnapshot>("/learning/resume"),
   learningActivity: (
     mode: LearningActivityMode = "all",
@@ -724,12 +1024,72 @@ export const api = {
     if (cursor) params.set("cursor", cursor);
     return request<LearningActivityPage>(`/learning/activity?${params.toString()}`);
   },
+  learningSessions: (limit = 10, offset = 0, savedOnly = false) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (savedOnly) params.set("savedOnly", "true");
+    return request<LearningSessionPage>(`/learning/sessions?${params.toString()}`);
+  },
+  learningSession: (sessionRef: string) =>
+    request<LearningSessionReview>(`/learning/sessions/${encodeURIComponent(sessionRef)}`),
+  learningSessionReplay: (sessionRef: string, attemptIndex: number) =>
+    request<LearningSessionReplay>(
+      `/learning/sessions/${encodeURIComponent(sessionRef)}/attempts/${encodeURIComponent(String(attemptIndex))}/replay`,
+    ),
+  setLearningSessionFlag: (sessionRef: string, attemptIndex: number, flagged: boolean) =>
+    request<LearningSessionFlagResult>(
+      `/learning/sessions/${encodeURIComponent(sessionRef)}/attempts/${encodeURIComponent(String(attemptIndex))}/flag`,
+      { method: flagged ? "PUT" : "DELETE" },
+    ),
   learningPreferences: () => request<LearningPreferences>("/learning/preferences"),
   updateLearningPreferences: (body: LearningPreferencesUpdate) =>
     request<LearningPreferences>("/learning/preferences", {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  learningCalendar: (startDate: string, endDate: string, timeZone: string) => {
+    const params = new URLSearchParams({ startDate, endDate, timeZone });
+    return request<StudyCalendarSnapshot>(`/learning/calendar?${params.toString()}`);
+  },
+  updateLearningCalendarSettings: (body: { timeZone: string; weekStartsOn: 0 | 1 }) =>
+    request<StudyCalendarSettings>("/learning/calendar/settings", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  createLearningCalendarItem: (body: StudyCalendarItemCreate) =>
+    request<StudyCalendarItem>("/learning/calendar/items", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  createLearningCalendarItemFromCompetency: (body: StudyCalendarCompetencyCreate) =>
+    request<StudyCalendarItem>("/learning/calendar/items/from-competency", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  createLearningCalendarItemFromPlan: (body: StudyCalendarPlanCreate) =>
+    request<StudyCalendarItem>("/learning/calendar/items/from-plan", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateLearningCalendarItem: (itemId: string, body: StudyCalendarItemUpdate) =>
+    request<StudyCalendarItem>(`/learning/calendar/items/${encodeURIComponent(itemId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteLearningCalendarItem: (itemId: string, revision: number) =>
+    request<{ deleted: true; itemId: string }>(
+      `/learning/calendar/items/${encodeURIComponent(itemId)}?revision=${encodeURIComponent(String(revision))}`,
+      { method: "DELETE" },
+    ),
+  completeLearningCalendarItem: (itemId: string, revision: number) =>
+    request<StudyCalendarItem>(`/learning/calendar/items/${encodeURIComponent(itemId)}/completion`, {
+      method: "PUT",
+      body: JSON.stringify({ revision }),
+    }),
+  reopenLearningCalendarItem: (itemId: string, revision: number) =>
+    request<StudyCalendarItem>(
+      `/learning/calendar/items/${encodeURIComponent(itemId)}/completion?revision=${encodeURIComponent(String(revision))}`,
+      { method: "DELETE" },
+    ),
   adaptivePlan: () => request<AdaptivePlan>("/adaptive/plan"),
   tutorial: (
     lessonId: string,

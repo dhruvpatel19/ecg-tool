@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import hashlib
 import hmac
 import json
+import math
 from threading import RLock
 from typing import Any, Callable, Literal
 from urllib.parse import parse_qs, parse_qsl, urlencode
@@ -28,7 +29,7 @@ from .config import get_settings
 from .data_sources import case_summary
 from .ecg_capability import issue_ecg_capability, matches_ecg_capability
 from .grading import grade_attempt, grade_click_answer
-from .ontology import CONCEPT_BY_ID
+from .ontology import CONCEPT_BY_ID, CONCEPTS, PRACTICE_GROUPS, concept_label
 from .objectives import REGISTRY_VERSION, objective_definition
 from .assessment_contracts import (
     RAPID_SYNTHESIS_RECEIPT_UNAVAILABLE_REASON,
@@ -58,6 +59,17 @@ PacketTransformer = Callable[[dict[str, Any]], dict[str, Any]]
 
 PACE_SECONDS: dict[str, int | None] = {"ward": 120, "emergency": 20, "untimed": None}
 PACE_SCOPE = {"ward": "full_read", "emergency": "dominant_finding", "untimed": "full_read"}
+MIXED_PACE_SECONDS: dict[str, dict[str, int | None]] = {
+    "quick": {"ward": 60, "emergency": 25, "untimed": None},
+    "focused": {"ward": 120, "emergency": 45, "untimed": None},
+    "complete": {"ward": 180, "emergency": 75, "untimed": None},
+}
+EMERGENCY_RHYTHM_CONCEPTS = frozenset({
+    "ventricular_fibrillation",
+    "ventricular_flutter",
+    "ventricular_tachycardia",
+    "polymorphic_ventricular_tachycardia",
+})
 ALLOWED_SUBSKILLS = {
     "recognize", "localize", "measure", "discriminate", "explain_mechanism",
     "synthesize", "apply_in_context", "calibrate_confidence",
@@ -78,6 +90,9 @@ class RapidRoundStartBody(BaseModel):
     focusSubskill: str | None = Field(default=None, max_length=80)
     contextKey: str = Field(default="", max_length=1000)
     exclusions: list[str] = Field(default_factory=list, max_length=5000)
+    contractVersion: Literal["legacy-v1", "mixed-v2"] = "legacy-v1"
+    practiceMode: Literal["adaptive", "mixed", "emergency"] = "mixed"
+    questionDepth: Literal["quick", "focused", "complete"] = "focused"
 
 
 class RapidNextBody(BaseModel):
@@ -87,13 +102,21 @@ class RapidNextBody(BaseModel):
 class RapidSubmitBody(BaseModel):
     caseId: str = Field(min_length=1, max_length=160)
     structuredAnswer: StructuredInterpretation = Field(default_factory=StructuredInterpretation)
-    freeTextAnswer: str = Field(default="", max_length=10_000)
+    freeTextAnswer: str = Field(default="", max_length=6_000)
     confidence: int = Field(default=3, ge=1, le=5)
     traceEvidence: dict[str, Any] | None = None
+    taskResponses: dict[str, Any] = Field(default_factory=dict, max_length=5)
 
 
 _INTEGRATION_ROSTER_VERSION = "rapid-integration-roster-v1"
 _INTEGRATION_ROSTER_PARAM = "__integrationRoster"
+_CONTRACT_VERSION_PARAM = "__rapidContractVersion"
+_PRACTICE_MODE_PARAM = "__rapidPracticeMode"
+_QUESTION_DEPTH_PARAM = "__rapidQuestionDepth"
+_ROUND_CONTRACT_PARAMS = frozenset(
+    {_CONTRACT_VERSION_PARAM, _PRACTICE_MODE_PARAM, _QUESTION_DEPTH_PARAM}
+)
+_MIXED_TASK_PACKET_VERSION = "rapid-task-packet-v1"
 
 
 def _b64encode(value: bytes) -> str:
@@ -156,6 +179,53 @@ def _query_pairs(context_key: str) -> list[tuple[str, str]]:
     return parse_qsl(str(context_key or "").lstrip("?"), keep_blank_values=True)
 
 
+def _with_round_contract(
+    context_key: str,
+    *,
+    contract_version: str,
+    practice_mode: str,
+    question_depth: str,
+) -> str:
+    pairs = [
+        (key, value)
+        for key, value in _query_pairs(context_key)
+        if key not in _ROUND_CONTRACT_PARAMS
+    ]
+    pairs.extend(
+        (
+            (_CONTRACT_VERSION_PARAM, contract_version),
+            (_PRACTICE_MODE_PARAM, practice_mode),
+            (_QUESTION_DEPTH_PARAM, question_depth),
+        )
+    )
+    query = urlencode(pairs)
+    return f"?{query}" if str(context_key or "").startswith("?") else query
+
+
+def _round_contract(session: dict[str, Any]) -> dict[str, str]:
+    values = parse_qs(str(session.get("contextKey") or ""), keep_blank_values=False)
+    contract_version = str((values.get(_CONTRACT_VERSION_PARAM) or ["legacy-v1"])[0])
+    practice_mode = str((values.get(_PRACTICE_MODE_PARAM) or ["mixed"])[0])
+    question_depth = str((values.get(_QUESTION_DEPTH_PARAM) or ["focused"])[0])
+    return {
+        "contractVersion": contract_version if contract_version == "mixed-v2" else "legacy-v1",
+        "practiceMode": (
+            practice_mode
+            if practice_mode in {"adaptive", "mixed", "emergency"}
+            else "mixed"
+        ),
+        "questionDepth": (
+            question_depth
+            if question_depth in {"quick", "focused", "complete"}
+            else "focused"
+        ),
+    }
+
+
+def _mixed_v2(session: dict[str, Any]) -> bool:
+    return _round_contract(session)["contractVersion"] == "mixed-v2"
+
+
 def _requested_secondary_concept(context_key: str) -> str | None:
     values = [value.strip() for key, value in _query_pairs(context_key) if key == "secondaryConcept"]
     if not values:
@@ -180,7 +250,7 @@ def _public_context_key(context_key: str) -> str:
     pairs = [
         (key, value)
         for key, value in _query_pairs(context_key)
-        if key != _INTEGRATION_ROSTER_PARAM
+        if key != _INTEGRATION_ROSTER_PARAM and key not in _ROUND_CONTRACT_PARAMS
     ]
     query = urlencode(pairs)
     if not query:
@@ -269,6 +339,613 @@ def _synthesis_task_complete(answer: StructuredInterpretation) -> bool:
         and bool(answer.selectedConcepts)
 
 
+def _task_id(
+    session: dict[str, Any],
+    case_id: str,
+    index: int,
+    task_type: str,
+    objective_id: str,
+) -> str:
+    """Return an opaque, restart-stable id without disclosing the answer key."""
+
+    material = (
+        f"{session.get('roundId')}:{session.get('position')}:{case_id}:"
+        f"{index}:{task_type}:{objective_id}"
+    )
+    return "task_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _task_topic_id(objective_id: str) -> str:
+    concept = CONCEPT_BY_ID.get(objective_id)
+    if concept is not None:
+        return concept.group
+    return "waveform" if objective_id == "qrs_complex" else "ecg_interpretation"
+
+
+def _public_task_packet(packet: Any) -> dict[str, Any] | None:
+    """Project a private frozen task packet through an explicit allow-list."""
+
+    if not isinstance(packet, dict) or packet.get("version") != _MIXED_TASK_PACKET_VERSION:
+        return None
+    display = packet.get("display") or {}
+    if not isinstance(display, dict):
+        return None
+    public_display: dict[str, Any] = {
+        "kind": str(display.get("kind") or "twelve_lead")
+    }
+    leads = display.get("leads")
+    if isinstance(leads, list):
+        public_display["leads"] = [
+            str(lead) for lead in leads if isinstance(lead, str) and lead
+        ][:12]
+
+    tasks: list[dict[str, Any]] = []
+    allowed_task_keys = (
+        "id",
+        "type",
+        "prompt",
+        "options",
+        "unit",
+        "minValue",
+        "maxValue",
+        "step",
+        "placeholder",
+        "bloomLevel",
+        "topicId",
+        "skillId",
+        "required",
+    )
+    for task in packet.get("tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        projected = {
+            key: task[key]
+            for key in allowed_task_keys
+            if key in task
+        }
+        options = projected.get("options")
+        if isinstance(options, list):
+            projected["options"] = [
+                {"id": str(option.get("id") or ""), "label": str(option.get("label") or "")}
+                for option in options
+                if isinstance(option, dict)
+                and str(option.get("id") or "")
+                and str(option.get("label") or "")
+            ][:6]
+        tasks.append(projected)
+
+    public: dict[str, Any] = {
+        "version": str(packet["version"]),
+        "display": public_display,
+        "tasks": tasks,
+    }
+    estimated = packet.get("estimatedSeconds")
+    if isinstance(estimated, int) and estimated > 0:
+        public["estimatedSeconds"] = estimated
+    return public
+
+
+def _ordered_task_targets(
+    case: dict[str, Any], focus_concept: str | None
+) -> list[str]:
+    eligible = list(dict.fromkeys(_rapid_packet_targets(case)))
+    if focus_concept in eligible:
+        return [str(focus_concept), *[value for value in eligible if value != focus_concept]]
+    return eligible
+
+
+def _choice_distractors(case: dict[str, Any], objective_id: str) -> list[str]:
+    """Choose nearby, unsupported distractors so each option remains plausible."""
+
+    supported = {str(value) for value in case.get("supported_objectives") or []}
+    nearby: list[str] = []
+    matching_groups = [
+        group
+        for group in PRACTICE_GROUPS
+        if objective_id in {str(value) for value in group.get("concepts") or []}
+    ]
+    matching_groups.sort(
+        key=lambda group: (
+            -len(group.get("concepts") or []),
+            str(group.get("id") or ""),
+        )
+    )
+    for group in matching_groups:
+        nearby.extend(str(value) for value in group.get("concepts") or [])
+    target = CONCEPT_BY_ID.get(objective_id)
+    if target is not None:
+        nearby.extend(concept.id for concept in CONCEPTS if concept.group == target.group)
+    nearby.extend(concept.id for concept in CONCEPTS)
+    return list(
+        dict.fromkeys(
+            value
+            for value in nearby
+            if value != objective_id
+            and value in CONCEPT_BY_ID
+            and value not in supported
+        )
+    )[:3]
+
+
+def _single_choice_task(
+    case: dict[str, Any],
+    session: dict[str, Any],
+    objective_id: str,
+    index: int,
+) -> dict[str, Any] | None:
+    distractors = _choice_distractors(case, objective_id)
+    if len(distractors) < 3:
+        return None
+    task_id = _task_id(session, str(case.get("case_id") or ""), index, "single_choice", objective_id)
+    keyed_rows = [(objective_id, concept_label(objective_id))] + [
+        (value, concept_label(value)) for value in distractors
+    ]
+    keyed_rows.sort(
+        key=lambda row: hashlib.sha256(
+            f"{task_id}:{row[0]}".encode("utf-8")
+        ).digest()
+    )
+    options: list[dict[str, str]] = []
+    correct_option = ""
+    for option_index, (key, label) in enumerate(keyed_rows, start=1):
+        option_id = f"option_{option_index}"
+        options.append({"id": option_id, "label": label})
+        if key == objective_id:
+            correct_option = option_id
+    return {
+        "id": task_id,
+        "type": "single_choice",
+        "prompt": "Which finding is best supported by this ECG?",
+        "options": options,
+        "bloomLevel": "analyze",
+        "topicId": _task_topic_id(objective_id),
+        "skillId": "recognize",
+        "required": True,
+        "grading": {
+            "kind": "single_choice",
+            "objectiveId": objective_id,
+            "subskill": "recognize",
+            "correctOptionId": correct_option,
+        },
+    }
+
+
+def _ordered_private_options(
+    *, task_id: str, rows: list[tuple[str, str]], correct_key: str
+) -> tuple[list[dict[str, str]], str]:
+    ordered = sorted(
+        rows,
+        key=lambda row: hashlib.sha256(
+            f"{task_id}:{row[0]}".encode("utf-8")
+        ).digest(),
+    )
+    options: list[dict[str, str]] = []
+    correct_option_id = ""
+    for index, (key, label) in enumerate(ordered, start=1):
+        option_id = f"option_{index}"
+        options.append({"id": option_id, "label": label})
+        if key == correct_key:
+            correct_option_id = option_id
+    return options, correct_option_id
+
+
+def _emergency_rhythm_context_task(
+    case: dict[str, Any], session: dict[str, Any], index: int
+) -> dict[str, Any]:
+    """Author one formative ACLS question from a separate patient state.
+
+    The source strip contributes only the rhythm pattern.  The no-pulse state
+    is explicitly authored in the prompt, and the task cannot mint management
+    evidence because the packet's eligible subskills remain recognition and
+    discrimination only.
+    """
+
+    task_id = _task_id(
+        session,
+        str(case.get("case_id") or ""),
+        index,
+        "single_choice",
+        "resuscitation_source_boundary",
+    )
+    options, correct_option_id = _ordered_private_options(
+        task_id=task_id,
+        correct_key="shockable_arrest",
+        rows=[
+            (
+                "shockable_arrest",
+                "Continue high-quality CPR and use the shockable-arrest pathway, including prompt defibrillation",
+            ),
+            (
+                "synchronized",
+                "Use synchronized cardioversion because the rhythm is fast",
+            ),
+            (
+                "stable_workup",
+                "Treat this as stable tachycardia and delay electricity until after a 12-lead ECG",
+            ),
+            (
+                "nonshockable",
+                "Use the nonshockable asystole/PEA pathway",
+            ),
+        ],
+    )
+    return {
+        "id": task_id,
+        "type": "single_choice",
+        "prompt": (
+            "Separate simulation context: an adult is unresponsive, has no pulse, and this ventricular "
+            "rhythm persists on the monitor. Which pathway is indicated next?"
+        ),
+        "options": options,
+        "bloomLevel": "apply",
+        "topicId": "immediate_action_and_data_needs",
+        "skillId": "apply_in_context",
+        "required": True,
+        "grading": {
+            "kind": "single_choice",
+            "objectiveId": "resuscitation_source_boundary",
+            "subskill": "apply_in_context",
+            "correctOptionId": correct_option_id,
+            "formativeOnly": True,
+            "feedbackCorrect": (
+                "Correct. The authored no-pulse state—not the strip alone—places this rhythm in the "
+                "2025 AHA shockable cardiac-arrest pathway."
+            ),
+            "feedbackIncorrect": (
+                "The authored patient state is pulseless arrest. Continue high-quality CPR and use the "
+                "2025 AHA shockable-rhythm pathway; synchronized cardioversion is not used in pulseless arrest."
+            ),
+            "referenceLabel": "2025 AHA Adult Cardiac Arrest Algorithm · formative only",
+        },
+    }
+
+
+def _emergency_rhythm_boundary_task(
+    case: dict[str, Any], session: dict[str, Any], index: int
+) -> dict[str, Any]:
+    task_id = _task_id(
+        session,
+        str(case.get("case_id") or ""),
+        index,
+        "single_choice",
+        "resuscitation_source_boundary",
+    )
+    options, correct_option_id = _ordered_private_options(
+        task_id=task_id,
+        correct_key="patient_state",
+        rows=[
+            ("patient_state", "Whether the patient has a pulse or is hemodynamically stable"),
+            ("channel", "That the displayed sample is a single modified lead-II channel"),
+            ("rhythm", "The reviewed source-labelled ventricular rhythm family being practiced"),
+            ("duration", "That this is a short rhythm fragment rather than a full 12-lead ECG"),
+        ],
+    )
+    return {
+        "id": task_id,
+        "type": "single_choice",
+        "prompt": "Which conclusion still cannot be made from this rhythm strip alone?",
+        "options": options,
+        "bloomLevel": "analyze",
+        "topicId": "evidence_limits_and_uncertainty",
+        "skillId": "calibrate_confidence",
+        "required": True,
+        "grading": {
+            "kind": "single_choice",
+            "objectiveId": "resuscitation_source_boundary",
+            "subskill": "calibrate_confidence",
+            "correctOptionId": correct_option_id,
+            "formativeOnly": True,
+            "feedbackCorrect": (
+                "Correct. Pulse, perfusion, symptoms, and stability come from the patient assessment, "
+                "not waveform shape."
+            ),
+            "feedbackIncorrect": (
+                "The strip supports a rhythm-pattern exercise, but it cannot establish pulse, perfusion, "
+                "symptoms, or hemodynamic stability."
+            ),
+            "referenceLabel": "ECG evidence boundary · formative only",
+        },
+    }
+
+
+def _numeric_spec(
+    objective_id: str,
+) -> tuple[tuple[str, ...], str, str, float, float, float] | None:
+    if objective_id == "rate":
+        return ("heart_rate",), "Estimate the ventricular rate.", "bpm", 20.0, 250.0, 5.0
+    if objective_id == "qtc_prolongation":
+        return ("qtc_ms", "qtc"), "Estimate the corrected QT interval (QTc).", "ms", 150.0, 900.0, 35.0
+    if "qt" in objective_id:
+        return ("qt_ms",), "Measure the QT interval.", "ms", 150.0, 900.0, 35.0
+    if "av_block" in objective_id or objective_id.startswith("pr_"):
+        return ("pr_ms",), "Measure the PR interval.", "ms", 60.0, 500.0, 20.0
+    if any(token in objective_id for token in ("qrs", "bundle", "conduction")):
+        return ("qrs_ms",), "Measure the QRS duration.", "ms", 40.0, 300.0, 20.0
+    return None
+
+
+def _numeric_task(
+    case: dict[str, Any],
+    session: dict[str, Any],
+    index: int,
+    *,
+    preferred_objective: str | None = None,
+) -> dict[str, Any] | None:
+    plus = case.get("ptbxl_plus") or {}
+    features = {
+        **((plus.get("features") or {}) if isinstance(plus, dict) else {}),
+        **((plus.get("measurements") or {}) if isinstance(plus, dict) else {}),
+    }
+    candidates = list(dict.fromkeys(eligible_packet_objectives(case, "rapid", "measure")))
+    if preferred_objective in candidates:
+        candidates = [str(preferred_objective), *[value for value in candidates if value != preferred_objective]]
+    candidates.sort(
+        key=lambda objective_id: (
+            0 if objective_id == preferred_objective else 1,
+            0 if objective_id == "rate" else 1,
+            objective_id,
+        )
+    )
+    for objective_id in candidates:
+        spec = _numeric_spec(objective_id)
+        if spec is None:
+            continue
+        feature_names, prompt, unit, minimum, maximum, tolerance = spec
+        value = next(
+            (
+                features.get(feature)
+                for feature in feature_names
+                if isinstance(features.get(feature), (int, float))
+                and not isinstance(features.get(feature), bool)
+                and math.isfinite(float(features.get(feature)))
+            ),
+            None,
+        )
+        if value is None or not minimum <= float(value) <= maximum:
+            continue
+        task_id = _task_id(
+            session,
+            str(case.get("case_id") or ""),
+            index,
+            "numeric_fill_in",
+            objective_id,
+        )
+        return {
+            "id": task_id,
+            "type": "numeric_fill_in",
+            "prompt": prompt,
+            "unit": unit,
+            "minValue": minimum,
+            "maxValue": maximum,
+            "step": 1,
+            "placeholder": "Enter one number",
+            "bloomLevel": "apply",
+            "topicId": _task_topic_id(objective_id),
+            "skillId": "measure",
+            "required": True,
+            "grading": {
+                "kind": "numeric_fill_in",
+                "objectiveId": objective_id,
+                "subskill": "measure",
+                "expectedValue": float(value),
+                "tolerance": tolerance,
+                "minimum": minimum,
+                "maximum": maximum,
+                "unit": unit,
+            },
+        }
+    return None
+
+
+def _localization_task(
+    case: dict[str, Any],
+    session: dict[str, Any],
+    index: int,
+    *,
+    preferred_objective: str | None = None,
+) -> dict[str, Any] | None:
+    candidates = [
+        value
+        for value in (preferred_objective, "qrs_complex")
+        if value
+    ]
+    objective_id = next(
+        (
+            str(value)
+            for value in dict.fromkeys(candidates)
+            if packet_allows_learning_evidence(
+                case, "rapid", str(value), "localize"
+            ).allowed
+        ),
+        "",
+    )
+    if not objective_id:
+        return None
+    task_id = _task_id(
+        session,
+        str(case.get("case_id") or ""),
+        index,
+        "point_localization",
+        objective_id,
+    )
+    return {
+        "id": task_id,
+        "type": "point_localization",
+        "prompt": (
+            "Place one point directly on a QRS complex."
+            if objective_id == "qrs_complex"
+            else f"Place one point directly on a {concept_label(objective_id)} feature."
+        ),
+        "bloomLevel": "apply",
+        "topicId": _task_topic_id(objective_id),
+        "skillId": "localize",
+        "required": True,
+        "grading": {
+            "kind": "point_localization",
+            "objectiveId": objective_id,
+            "subskill": "localize",
+        },
+    }
+
+
+def _build_mixed_task_packet(
+    case: dict[str, Any],
+    session: dict[str, Any],
+    *,
+    focus_concept: str | None,
+) -> dict[str, Any]:
+    contract = _round_contract(session)
+    depth = contract["questionDepth"]
+    target_only = _target_only_source(case)
+    task_limit = (
+        {"quick": 1, "focused": 2, "complete": 3}[depth]
+        if target_only
+        else {"quick": 1, "focused": 3, "complete": 5}[depth]
+    )
+    targets = _ordered_task_targets(case, focus_concept)
+    if not targets:
+        raise ValueError("No reliable recognition target exists for this mixed Rapid item.")
+
+    tasks: list[dict[str, Any]] = []
+    primary = targets[0]
+    primary_type = (
+        "full_interpretation"
+        if depth == "complete" and not target_only
+        else "short_answer"
+    )
+    tasks.append(
+        {
+            "id": _task_id(
+                session,
+                str(case.get("case_id") or ""),
+                0,
+                primary_type,
+                primary,
+            ),
+            "type": primary_type,
+            "prompt": (
+                "Give a concise ECG impression. Rate, rhythm, conduction, and ST-T notes are optional and formative."
+                if primary_type == "full_interpretation"
+                else "Give the single most important ECG finding in one concise phrase."
+            ),
+            "placeholder": "e.g. a concise rhythm or morphology diagnosis",
+            "bloomLevel": "apply",
+            "topicId": _task_topic_id(primary),
+            "skillId": "recognize",
+            "required": True,
+            "grading": {
+                "kind": "concept_text",
+                "objectiveId": primary,
+                "subskill": "recognize",
+            },
+        }
+    )
+    if target_only and len(tasks) < task_limit:
+        tasks.append(_emergency_rhythm_context_task(case, session, len(tasks)))
+    if target_only and len(tasks) < task_limit:
+        tasks.append(_emergency_rhythm_boundary_task(case, session, len(tasks)))
+    if task_limit > 1:
+        for target in targets[1:]:
+            choice = _single_choice_task(case, session, target, len(tasks))
+            if choice is not None:
+                tasks.append(choice)
+                break
+
+    preferred_measure = (
+        str(focus_concept)
+        if session.get("focusSubskill") == "measure" and focus_concept
+        else None
+    )
+    preferred_localization = (
+        str(focus_concept)
+        if session.get("focusSubskill") == "localize" and focus_concept
+        else None
+    )
+    localization_available = _localization_task(
+        case,
+        session,
+        len(tasks),
+        preferred_objective=preferred_localization,
+    )
+    localization_first = bool(
+        preferred_localization
+        or (
+            not preferred_measure
+            and depth == "focused"
+            and localization_available
+            and int(
+                hashlib.sha256(
+                    f"{session.get('roundId')}:{case.get('case_id')}:localize".encode("utf-8")
+                ).hexdigest(),
+                16,
+            )
+            % 4
+            == 0
+        )
+    )
+    for candidate_kind in (
+        ("localize", "numeric") if localization_first else ("numeric", "localize")
+    ):
+        if len(tasks) >= task_limit:
+            break
+        candidate = (
+            _numeric_task(
+                case,
+                session,
+                len(tasks),
+                preferred_objective=preferred_measure,
+            )
+            if candidate_kind == "numeric"
+            else _localization_task(
+                case,
+                session,
+                len(tasks),
+                preferred_objective=preferred_localization,
+            )
+        )
+        if candidate is not None and not any(
+            task.get("skillId") == candidate.get("skillId")
+            and (task.get("grading") or {}).get("objectiveId")
+            == (candidate.get("grading") or {}).get("objectiveId")
+            for task in tasks
+        ):
+            tasks.append(candidate)
+
+    if depth == "complete" and len(tasks) < task_limit:
+        already_tested = {
+            str((task.get("grading") or {}).get("objectiveId") or "")
+            for task in tasks
+            if (task.get("grading") or {}).get("subskill") == "recognize"
+        }
+        for target in targets:
+            if target in already_tested:
+                continue
+            choice = _single_choice_task(case, session, target, len(tasks))
+            if choice is not None:
+                tasks.append(choice)
+                already_tested.add(target)
+            if len(tasks) >= task_limit:
+                break
+
+    waveform = case.get("waveform") or {}
+    display: dict[str, Any] = {
+        "kind": "rhythm_strip" if _target_only_source(case) else "twelve_lead"
+    }
+    if display["kind"] == "rhythm_strip" and isinstance(waveform, dict):
+        leads = [str(value) for value in waveform.get("leads") or [] if str(value)]
+        if leads:
+            display["leads"] = leads[:3]
+    estimated = session.get("deadlineSeconds")
+    packet: dict[str, Any] = {
+        "version": _MIXED_TASK_PACKET_VERSION,
+        "display": display,
+        "tasks": tasks[:task_limit],
+    }
+    if isinstance(estimated, int) and estimated > 0:
+        packet["estimatedSeconds"] = estimated
+    return packet
+
+
 def _manifest_for_pending_case(
     case: dict[str, Any],
     session: dict[str, Any],
@@ -276,6 +953,46 @@ def _manifest_for_pending_case(
     focus_concept: str | None,
 ) -> dict[str, Any]:
     """Create the private assessment contract frozen with one pending ECG."""
+
+    if _mixed_v2(session):
+        task_packet = _build_mixed_task_packet(
+            case,
+            session,
+            focus_concept=focus_concept,
+        )
+        objectives = []
+        for task in task_packet.get("tasks") or []:
+            grading = task.get("grading") or {}
+            objective_id = str(grading.get("objectiveId") or "")
+            subskill = str(grading.get("subskill") or "")
+            if not objective_id or not subskill:
+                continue
+            objectives.append(
+                {
+                    "objectiveId": objective_id,
+                    "subskill": subskill,
+                    "role": "required",
+                    "source": "mixed_v2_task",
+                    "lapseEligible": True,
+                    "negativeDiscrimination": False,
+                    "taskId": str(task.get("id") or ""),
+                }
+            )
+        return {
+            "version": RAPID_TESTED_OBJECTIVE_MANIFEST_VERSION,
+            "caseId": str(case.get("case_id") or case.get("caseId") or ""),
+            "assessmentScope": str(session.get("assessmentScope") or "full_read"),
+            "taskKind": "mixed_v2",
+            "objectives": objectives,
+            "allowSelectedExtras": False,
+            "selectedSupportedExtras": [],
+            "overcallPolicy": "only_asked_tasks_are_graded",
+            "contractVersion": "mixed-v2",
+            # This packet is private while pending. ``_public_task_packet``
+            # exposes only prompts and response affordances; grading keys are
+            # released with the committed answer feedback.
+            "taskPacket": task_packet,
+        }
 
     focus_subskill = str(session.get("focusSubskill") or "") if focus_concept else ""
     receipt_concept = _receipt_concept(session) if focus_concept else ""
@@ -434,7 +1151,11 @@ def _broad_corpus_selection(
     if candidates is None:
         candidates = _stable_round_order(repo.candidates(None), seed)
     if not candidates:
-        return {"case": None, "reason": "The eligible unique ECG pool is exhausted.", "targetObjectives": []}
+        return {
+            "case": None,
+            "reason": "The eligible unique ECG pool is exhausted.",
+            "targetObjectives": [],
+        }
     for selected in candidates:
         case_id = str(selected["case_id"])
         if case_id in excluded or case_id in rejected:
@@ -454,6 +1175,51 @@ def _broad_corpus_selection(
     return {
         "case": None,
         "reason": "No remaining ECG passes the audited Rapid source and evidence contract.",
+        "targetObjectives": [],
+    }
+
+
+def _emergency_rhythm_selection(
+    repo: Any,
+    excluded: set[str],
+    seed: str,
+    focus_concept: str | None = None,
+) -> dict[str, Any]:
+    """Select only from the manifest-gated single-lead emergency rhythm pool."""
+
+    provider = getattr(repo, "rapid_rhythm_candidates", None)
+    if not callable(provider):
+        return {
+            "case": None,
+            "reason": "Emergency rhythm drills are not included in this corpus release.",
+            "targetObjectives": [],
+        }
+    try:
+        candidates = _stable_round_order(list(provider(focus_concept)), seed)
+    except (AttributeError, TypeError, ValueError):
+        candidates = []
+    for selected in candidates:
+        case_id = str(selected.get("case_id") or "")
+        if not case_id or case_id in excluded:
+            continue
+        case = repo.get_case(case_id)
+        if not _target_only_source(case) or not _case_can_enter_rapid(
+            case, False, allow_target_only=True
+        ):
+            continue
+        targets = _rapid_packet_targets(case)
+        if not targets:
+            continue
+        return {
+            "case": case_summary(case),
+            "reason": (
+                "Selected without replacement from the reviewed high-risk ventricular-rhythm supplement."
+            ),
+            "targetObjectives": targets[:3],
+        }
+    return {
+        "case": None,
+        "reason": "The reviewed emergency-rhythm pool is unavailable or exhausted for this round.",
         "targetObjectives": [],
     }
 
@@ -495,7 +1261,28 @@ def _focused_corpus_selection(
             not require_trace_proof
             or packet_allows_learning_evidence(case, "rapid", "qrs_complex", "localize").allowed
         )
-        if exact.allowed and trace_ok and isinstance(case, dict):
+        mixed_task_ready = True
+        if isinstance(case, dict) and _mixed_v2(session) and subskill == "measure":
+            task = _numeric_task(
+                case,
+                session,
+                0,
+                preferred_objective=focus,
+            )
+            mixed_task_ready = bool(
+                task and (task.get("grading") or {}).get("objectiveId") == focus
+            )
+        elif isinstance(case, dict) and _mixed_v2(session) and subskill == "localize":
+            task = _localization_task(
+                case,
+                session,
+                0,
+                preferred_objective=focus,
+            )
+            mixed_task_ready = bool(
+                task and (task.get("grading") or {}).get("objectiveId") == focus
+            )
+        if exact.allowed and trace_ok and mixed_task_ready and isinstance(case, dict):
             return {
                 "case": case_summary(case),
                 "reason": "Selected an exact source-contracted focused Rapid ECG.",
@@ -504,7 +1291,97 @@ def _focused_corpus_selection(
         if not case_id or case_id in rejected:
             break
         rejected.add(case_id)
-        last_reason = exact.reason if not exact.allowed else "The case lacks server-grade trace proof."
+        last_reason = (
+            exact.reason
+            if not exact.allowed
+            else "The case lacks a grounded prompt for the requested mixed-practice skill."
+            if not mixed_task_ready
+            else "The case lacks server-grade trace proof."
+        )
+    return {"case": None, "reason": last_reason, "targetObjectives": []}
+
+
+def _adaptive_mixed_selection(
+    repo,
+    store,
+    session: dict[str, Any],
+    excluded: set[str],
+    *,
+    requested_focus: str | None = None,
+) -> dict[str, Any]:
+    """Re-rank every adaptive slot from the learner's latest durable profile."""
+
+    rejected = set(excluded)
+    try:
+        maximum = len(repo.candidates(None)) + 1
+    except Exception:
+        maximum = 10_000
+    requested_subskill = (
+        str(session.get("focusSubskill") or "recognize")
+        if requested_focus
+        else "recognize"
+    )
+    last_reason = "No adaptive Rapid Practice item is available."
+    for _ in range(maximum):
+        selected = next_case(
+            repo,
+            store,
+            learner_id=str(session["learnerId"]),
+            concept_id=requested_focus,
+            subskill_id=requested_subskill,
+            exclude_case_ids=rejected,
+            selector_context="rapid",
+        )
+        summary = selected.get("case")
+        if not summary:
+            last_reason = str(selected.get("reason") or last_reason)
+            break
+        case_id = str(summary.get("caseId") or "")
+        case = repo.get_case(case_id) if case_id else None
+        proposed_targets = [
+            str(value)
+            for value in selected.get("targetObjectives") or []
+            if str(value)
+        ]
+        if requested_focus:
+            proposed_targets = [requested_focus, *proposed_targets]
+        target = next(
+            (
+                value
+                for value in dict.fromkeys(proposed_targets)
+                if packet_allows_learning_evidence(
+                    case,
+                    "rapid",
+                    value,
+                    requested_subskill if value == requested_focus else "recognize",
+                ).allowed
+            ),
+            None,
+        )
+        if target and _case_can_enter_rapid(
+            case,
+            False,
+            allow_target_only=True,
+        ):
+            return {
+                "case": case_summary(case),
+                "reason": str(
+                    selected.get("reason")
+                    or "Selected from the learner's current objective and retention priorities."
+                ),
+                "targetObjectives": [
+                    target,
+                    *[
+                        value
+                        for value in _rapid_packet_targets(case)
+                        if value != target
+                    ],
+                ][:3],
+            }
+        if not case_id or case_id in rejected:
+            break
+        rejected.add(case_id)
+        last_reason = "The next adaptive candidate lacked an exact assessable task contract."
     return {"case": None, "reason": last_reason, "targetObjectives": []}
 
 
@@ -587,7 +1464,13 @@ def _public_round(
     # It remains durable in the server session and is released only with the
     # committed answer.
     public.pop("pendingTestedObjectiveManifest", None)
+    # The receipt objective was explicitly requested by the learner-facing
+    # launch contract. Returning it lets the client distinguish an exact
+    # personalized handoff from a different resumable round without exposing
+    # any ECG answer key.
+    public["receiptConcept"] = _receipt_concept(session) or None
     public["contextKey"] = _public_context_key(str(public.get("contextKey") or ""))
+    public.update(_round_contract(session))
     for key in ("pendingCaseId", "feedbackCaseId"):
         canonical_id = public.get(key)
         public[key] = case_reference(str(canonical_id)) if canonical_id else None
@@ -661,9 +1544,9 @@ def _grade_claimed_rapid_submission(
                 "overcalledObjectives": grade.get("overcalledObjectives", []),
                 "unassessedClaims": unassessed,
                 "feedback": (
-                    f"Focused expert-label check: {str(focus_objective).replace('_', ' ')} matched."
+                    f"Focused source-label check: {str(focus_objective).replace('_', ' ')} matched."
                     if correct_focus
-                    else f"Focused expert-label check: review {str(focus_objective).replace('_', ' ')}."
+                    else f"Focused source-label check: review {str(focus_objective).replace('_', ' ')}."
                 )
                 + (
                     " Other 12-lead claims cannot receive finding credit from this target-only source; non-A/B-supported selections still prevent a precision pass."
@@ -715,6 +1598,361 @@ def _grade_claimed_rapid_submission(
         "revealedDiagnosis": grade.get("revealedDiagnosis", ""),
     }
     return trace_grade, grade, result
+
+
+def _mixed_task_response_value(response: Any, *keys: str) -> Any:
+    if isinstance(response, dict):
+        return next((response.get(key) for key in keys if key in response), None)
+    return response
+
+
+def _validate_mixed_task_responses(
+    task_packet: dict[str, Any],
+    responses: dict[str, Any],
+    *,
+    allow_missing: bool,
+) -> tuple[bool, str, str]:
+    """Validate only public response structure; correctness stays post-claim."""
+
+    try:
+        serialized = json.dumps(responses, separators=(",", ":"))
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False, "rapid_task_responses_invalid", "Task responses must be valid JSON values."
+    if len(serialized.encode("utf-8")) > 32_000:
+        return False, "rapid_task_responses_too_large", "Task responses exceed the 32 KB limit."
+
+    tasks = {
+        str(task.get("id") or ""): task
+        for task in task_packet.get("tasks") or []
+        if isinstance(task, dict) and str(task.get("id") or "")
+    }
+    extras = set(responses) - set(tasks)
+    if extras:
+        return False, "rapid_task_response_unknown", "A response does not belong to this frozen ECG item."
+    missing = {
+        task_id
+        for task_id, task in tasks.items()
+        if task.get("required") is True and task_id not in responses
+    }
+    if missing and not allow_missing:
+        return False, "rapid_task_response_required", "Answer each required prompt before submitting."
+
+    for task_id, response in responses.items():
+        task = tasks[task_id]
+        task_type = str(task.get("type") or "")
+        if task_type == "short_answer":
+            value = _mixed_task_response_value(response, "text", "value", "answer")
+            if not isinstance(value, str) or not value.strip() or len(value) > 500:
+                return False, "rapid_short_answer_invalid", "Short answers must contain 1 to 500 characters."
+        elif task_type == "full_interpretation":
+            allowed_fields = {"impression", "rate", "rhythm", "conduction", "stT"}
+            if not isinstance(response, dict) or set(response) - allowed_fields:
+                return (
+                    False,
+                    "rapid_full_interpretation_invalid",
+                    "Complete interpretation responses contain an impression and only the supported optional fields.",
+                )
+            impression = response.get("impression")
+            optional_values = [
+                response.get(key)
+                for key in ("rate", "rhythm", "conduction", "stT")
+                if key in response
+            ]
+            if (
+                not isinstance(impression, str)
+                or not impression.strip()
+                or len(impression) > 500
+                or any(
+                    not isinstance(value, str) or len(value) > 300
+                    for value in optional_values
+                )
+            ):
+                return (
+                    False,
+                    "rapid_full_interpretation_invalid",
+                    "Enter a concise impression; each optional interpretation field is limited to 300 characters.",
+                )
+        elif task_type == "single_choice":
+            value = _mixed_task_response_value(response, "choiceId", "optionId", "value")
+            option_ids = {
+                str(option.get("id") or "")
+                for option in task.get("options") or []
+                if isinstance(option, dict)
+            }
+            if not isinstance(value, str) or value not in option_ids:
+                return False, "rapid_choice_invalid", "Choose one option from the current prompt."
+        elif task_type == "numeric_fill_in":
+            value = _mixed_task_response_value(response, "value", "numericValue", "answer")
+            grading = task.get("grading") or {}
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not float(grading.get("minimum", -math.inf))
+                <= float(value)
+                <= float(grading.get("maximum", math.inf))
+            ):
+                return False, "rapid_numeric_answer_invalid", "Enter one physiologically plausible numeric value."
+        elif task_type == "point_localization":
+            point = response.get("point") if isinstance(response, dict) and "point" in response else response
+            if not isinstance(point, dict):
+                return False, "rapid_localization_invalid", "Place one point on the ECG trace."
+            lead = point.get("lead")
+            time_sec = point.get("timeSec")
+            amplitude_mv = point.get("amplitudeMv")
+            if (
+                not isinstance(lead, str)
+                or not lead
+                or len(lead) > 8
+                or isinstance(time_sec, bool)
+                or not isinstance(time_sec, (int, float))
+                or not math.isfinite(float(time_sec))
+                or float(time_sec) < 0
+                or isinstance(amplitude_mv, bool)
+                or not isinstance(amplitude_mv, (int, float))
+                or not math.isfinite(float(amplitude_mv))
+                or abs(float(amplitude_mv)) > 10
+            ):
+                return False, "rapid_localization_invalid", "Place one valid point on the ECG trace."
+        else:
+            return False, "rapid_task_type_invalid", "This frozen prompt type is not supported."
+    return True, "", ""
+
+
+def _grade_claimed_mixed_submission(
+    *,
+    case: dict[str, Any],
+    session: dict[str, Any],
+    body: RapidSubmitBody,
+    tested_manifest: dict[str, Any],
+    timed_out: bool,
+) -> tuple[None, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Grade exactly the server-authored mixed tasks after lease reservation."""
+
+    task_packet = tested_manifest.get("taskPacket") or {}
+    responses = body.taskResponses
+    feedback_rows: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
+
+    for task in task_packet.get("tasks") or []:
+        task_id = str(task.get("id") or "")
+        task_type = str(task.get("type") or "")
+        grading = task.get("grading") or {}
+        objective_id = str(grading.get("objectiveId") or "")
+        subskill = str(grading.get("subskill") or "")
+        response = responses.get(task_id)
+        complete = task_id in responses
+        correct = False
+        score = 0.0
+        feedback = "No response was recorded before the item closed."
+        reveal: dict[str, Any] = {}
+        misconceptions: list[str] = []
+
+        if task_type in {"short_answer", "full_interpretation"} and complete:
+            text_answer = str(
+                response.get("impression")
+                if task_type == "full_interpretation" and isinstance(response, dict)
+                else _mixed_task_response_value(response, "text", "value", "answer")
+                or ""
+            ).strip()
+            scoped_attempt = AttemptRequest(
+                learnerId=str(session["learnerId"]),
+                caseId=str(case.get("case_id") or ""),
+                mode="rapid_practice",
+                assessmentScope="dominant_finding",
+                focusObjective=objective_id,
+                structuredAnswer=StructuredInterpretation(),
+                freeTextAnswer=text_answer,
+                confidence=body.confidence,
+                hintsUsed=0,
+            )
+            scoped_grade = grade_attempt(case, scoped_attempt)
+            correct = objective_id in set(scoped_grade.get("correctObjectives") or [])
+            score = 1.0 if correct else 0.0
+            misconceptions = [str(value) for value in scoped_grade.get("misconceptions") or []]
+            feedback = (
+                "Your concise interpretation matched the tested finding."
+                if correct
+                else f"The tested finding was {concept_label(objective_id)}. Compare its defining ECG evidence with your phrase."
+            )
+            reveal["correctAnswer"] = concept_label(objective_id)
+            if task_type == "full_interpretation" and isinstance(response, dict):
+                supporting = [
+                    key
+                    for key in ("rate", "rhythm", "conduction", "stT")
+                    if str(response.get(key) or "").strip()
+                ]
+                reveal.update(
+                    {
+                        "supportingFieldsReviewed": supporting,
+                        "supportingFieldsEvidence": "formative_only",
+                    }
+                )
+        elif task_type == "single_choice" and complete:
+            choice_id = str(
+                _mixed_task_response_value(response, "choiceId", "optionId", "value") or ""
+            )
+            correct_choice = str(grading.get("correctOptionId") or "")
+            correct = bool(choice_id and choice_id == correct_choice)
+            score = 1.0 if correct else 0.0
+            feedback = str(
+                grading.get("feedbackCorrect" if correct else "feedbackIncorrect")
+                or (
+                    "You selected the best-supported finding."
+                    if correct
+                    else f"The best-supported finding was {concept_label(objective_id)}."
+                )
+            )
+            reveal["correctChoiceId"] = correct_choice
+        elif task_type == "numeric_fill_in" and complete:
+            numeric_value = float(
+                _mixed_task_response_value(response, "value", "numericValue", "answer")
+            )
+            expected = float(grading.get("expectedValue"))
+            tolerance = float(grading.get("tolerance"))
+            absolute_error = abs(numeric_value - expected)
+            correct = absolute_error <= tolerance
+            score = 1.0 if correct else 0.5 if absolute_error <= 2 * tolerance else 0.0
+            feedback = (
+                "Your measurement was within the accepted trace-based range."
+                if correct
+                else "Recheck the relevant onset, offset, and ECG-grid calculation."
+            )
+            reveal.update(
+                {
+                    "expectedValue": expected,
+                    "tolerance": tolerance,
+                    "unit": str(grading.get("unit") or ""),
+                    "absoluteError": round(absolute_error, 3),
+                }
+            )
+        elif task_type == "point_localization" and complete:
+            point = response.get("point") if isinstance(response, dict) and "point" in response else response
+            location_grade = grade_click_answer(
+                case,
+                str(point["lead"]),
+                float(point["timeSec"]),
+                float(point["amplitudeMv"]),
+                objective_id,
+            )
+            correct = bool(location_grade.get("correct"))
+            score = 1.0 if correct else 0.0
+            feedback = str(location_grade.get("feedback") or "Review the highlighted target region.")
+            reveal.update(
+                {
+                    "matchedRoi": location_grade.get("matchedRoi"),
+                    "noTarget": bool(location_grade.get("noTarget")),
+                }
+            )
+
+        evidence_correct = bool(correct and not timed_out)
+        if timed_out:
+            feedback = "The server deadline elapsed. Review this response, but it cannot earn positive evidence."
+        feedback_rows.append(
+            {
+                "taskId": task_id,
+                "type": task_type,
+                "topicId": str(task.get("topicId") or ""),
+                "skillId": subskill,
+                "objectiveId": objective_id,
+                "complete": complete,
+                "correct": correct,
+                "score": round(score, 3),
+                "timedOut": timed_out,
+                "formativeOnly": bool(grading.get("formativeOnly")),
+                "feedback": feedback,
+                **(
+                    {"referenceLabel": str(grading.get("referenceLabel"))}
+                    if grading.get("referenceLabel")
+                    else {}
+                ),
+                **reveal,
+            }
+        )
+        outcomes.append(
+            {
+                "taskId": task_id,
+                "objectiveId": objective_id,
+                "subskill": subskill,
+                "complete": complete,
+                "correct": evidence_correct,
+                "displayCorrect": correct,
+                "score": score if not timed_out else 0.0,
+                "formativeOnly": bool(grading.get("formativeOnly")),
+                "misconceptions": misconceptions,
+            }
+        )
+
+    # A timed-out prompt can still reveal whether the submitted response would
+    # have been correct, but it must not inflate the scored round summary.  The
+    # receipt path already records the timeout as a lapse; keep the visible
+    # aggregate aligned with that same server-owned deadline contract.
+    scored_outcomes = [row for row in outcomes if not row.get("formativeOnly")]
+    aggregate_score = (
+        sum(float(row["score"]) for row in scored_outcomes) / len(scored_outcomes)
+        if scored_outcomes
+        else 0.0
+    )
+    recognition = [row for row in outcomes if row["subskill"] == "recognize"]
+    correct_recognition = [
+        str(row["objectiveId"]) for row in recognition if row["correct"]
+    ]
+    missed_recognition = [
+        str(row["objectiveId"]) for row in recognition if not row["correct"]
+    ]
+    misconception_values = list(
+        dict.fromkeys(
+            value
+            for row in outcomes
+            for value in row.get("misconceptions") or []
+            if value
+        )
+    )
+    grade = {
+        "caseId": str(case.get("case_id") or body.caseId),
+        "score": round(aggregate_score, 3),
+        "correctObjectives": correct_recognition,
+        "missedObjectives": missed_recognition,
+        "overcalledObjectives": [],
+        "misconceptions": misconception_values,
+        "masteryDelta": {},
+        "legacyObjectiveMasterySuppressed": True,
+        "feedback": (
+            "The server deadline elapsed. Responses are shown for review, but this ECG scored 0 and cannot earn positive evidence."
+            if timed_out
+            else (
+                f"{sum(1 for row in feedback_rows if row['correct'] and not row['formativeOnly'])} of "
+                f"{len(scored_outcomes)} assessed prompt(s) correct. "
+                f"{sum(1 for row in feedback_rows if row['formativeOnly'])} additional prompt(s) were formative."
+            )
+        ),
+        "teachingPoints": case.get("teaching_points", []),
+        "revealedDiagnosis": (case.get("ptbxl") or {}).get("report", ""),
+        "assessmentScope": str(session.get("assessmentScope") or "full_read"),
+        "testedObjectiveManifest": tested_manifest,
+        "taskFeedback": feedback_rows,
+    }
+    result = {
+        "caseId": body.caseId,
+        "displayId": case.get("display_id") or body.caseId,
+        "score": grade["score"],
+        "correctObjectives": correct_recognition,
+        "missedObjectives": missed_recognition,
+        "overcalledObjectives": [],
+        "misconceptions": misconception_values,
+        "revealedDiagnosis": grade["revealedDiagnosis"],
+        "competencyOutcomes": [
+            {
+                "objectiveId": str(row["objectiveId"]),
+                "subskill": str(row["subskill"]),
+                "correct": bool(row["correct"]),
+                "score": round(float(row["score"]), 3),
+                "formativeOnly": bool(row.get("formativeOnly")),
+            }
+            for row in outcomes
+        ],
+    }
+    return None, grade, result, outcomes
 
 
 def build_rapid_router(
@@ -805,9 +2043,46 @@ def build_rapid_router(
             return max(1, int(session.get("position") or 0))
         return int(session.get("position") or 0) + 1
 
+    def rhythm_supplement_status() -> dict[str, Any]:
+        provider = getattr(repo, "rapid_rhythm_status", None)
+        if not callable(provider):
+            return {"available": False, "count": 0, "targetCounts": {}}
+        try:
+            value = provider()
+        except (AttributeError, TypeError, ValueError):
+            return {"available": False, "count": 0, "targetCounts": {}}
+        return value if isinstance(value, dict) else {
+            "available": False,
+            "count": 0,
+            "targetCounts": {},
+        }
+
+    def presentation_summary(case: dict[str, Any]) -> dict[str, Any]:
+        """Keep the learner view useful without exposing supplement identity."""
+
+        summary = blind_summary(case_summary(case))
+        if _target_only_source(case):
+            summary["source"] = "audited_rhythm_stream"
+        return summary
+
+    def presentation_packet(
+        case: dict[str, Any], *, blinded: bool
+    ) -> dict[str, Any]:
+        packet = packet_provider(case)
+        if blinded:
+            packet = blind_packet(packet)
+        if _target_only_source(case):
+            packet = {**packet, "source": "audited_rhythm_stream"}
+        return packet
+
     def payload(session: dict[str, Any] | None) -> dict[str, Any]:
         if not session:
-            return {"round": None, "current": None, "results": []}
+            return {
+                "round": None,
+                "current": None,
+                "results": [],
+                "rhythmSupplement": rhythm_supplement_status(),
+            }
         result_count = store.rapid_answer_count(session["roundId"])
         answers = store.get_recent_rapid_answers(session["roundId"], limit=100)
         current: dict[str, Any] | None = None
@@ -823,18 +2098,26 @@ def build_rapid_router(
                 current = {
                     "kind": "pending",
                     "case": public_case_summary(
-                        blind_summary(case_summary(case)),
+                        presentation_summary(case),
                         case_reference=reference,
                         display_id=display_id,
                     ),
                     "packet": public_case_packet(
-                        blind_packet(packet_provider(case)),
+                        presentation_packet(case, blinded=True),
                         case_reference=reference,
                         display_id=display_id,
                     ),
                     "startedAt": session.get("pendingStartedAt"),
                     "deadlineAt": session.get("pendingDeadlineAt"),
                 }
+                if _mixed_v2(session):
+                    task_packet = _public_task_packet(
+                        (session.get("pendingTestedObjectiveManifest") or {}).get(
+                            "taskPacket"
+                        )
+                    )
+                    if task_packet is not None:
+                        current["taskPacket"] = task_packet
         elif feedback_id:
             answer = store.get_rapid_answer(session["roundId"], feedback_id)
             case = repo.get_case(feedback_id)
@@ -845,17 +2128,23 @@ def build_rapid_router(
                 current = {
                     "kind": "feedback",
                     "case": public_case_summary(
-                        blind_summary(case_summary(case)),
+                        presentation_summary(case),
                         case_reference=reference,
                         display_id=display_id,
                     ),
                     "packet": public_case_packet(
-                        packet_provider(case),
+                        presentation_packet(case, blinded=False),
                         case_reference=reference,
                         display_id=display_id,
                     ),
                     "answer": public_answer(session, answer, ordinal),
                 }
+                if _mixed_v2(session):
+                    task_packet = _public_task_packet(
+                        (answer.get("testedObjectiveManifest") or {}).get("taskPacket")
+                    )
+                    if task_packet is not None:
+                        current["taskPacket"] = task_packet
         result_start = max(0, result_count - len(answers))
         return {
             "round": _public_round(
@@ -871,6 +2160,7 @@ def build_rapid_router(
             ],
             "resultCount": result_count,
             "resultsTruncated": result_count > len(answers),
+            "rhythmSupplement": rhythm_supplement_status(),
         }
 
     @router.post("")
@@ -881,15 +2171,135 @@ def build_rapid_router(
     ) -> dict[str, Any]:
         if len(set(body.exclusions)) != len(body.exclusions) or any(len(item) > 160 for item in body.exclusions):
             raise HTTPException(status_code=422, detail="Rapid exclusions must be unique bounded case ids")
+        if body.practiceMode == "emergency":
+            supplement = rhythm_supplement_status()
+            if body.contractVersion != "mixed-v2":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "rapid_emergency_contract_required",
+                        "message": "Emergency rhythm drills require the current Rapid question contract.",
+                    },
+                )
+            focused_emergency = bool(body.focusConcept)
+            if (
+                body.secondaryConcept
+                or body.focusConcept not in ({None} | EMERGENCY_RHYTHM_CONCEPTS)
+                or body.focusSubskill not in {None, "recognize"}
+                or (body.focusSubskill == "recognize" and not focused_emergency)
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "rapid_emergency_handoff_conflict",
+                        "message": (
+                            "Emergency rhythm handoffs support one exact ventricular-rhythm "
+                            "recognition target and no secondary concept."
+                        ),
+                    },
+                )
+            if supplement.get("available") is not True:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_emergency_rhythm_unavailable",
+                        "message": "Emergency rhythm drills are not included in the active audited corpus release.",
+                    },
+                )
+        if body.focusSubskill is not None and body.focusSubskill not in ALLOWED_SUBSKILLS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_focus_subskill_invalid",
+                    "message": "Choose a supported Rapid Practice skill.",
+                },
+            )
+        if (
+            body.contractVersion == "mixed-v2"
+            and body.focusSubskill not in {None, "recognize", "measure", "localize", "synthesize"}
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_mixed_focus_subskill_unavailable",
+                    "message": (
+                        "This mixed Rapid contract currently supports exact recognition, "
+                        "measurement, localization, and complete-interpretation handoffs."
+                    ),
+                },
+            )
+        if (
+            body.contractVersion == "mixed-v2"
+            and body.focusSubskill == "synthesize"
+            and (
+                body.questionDepth != "complete"
+                or PACE_SCOPE[body.pace] != "full_read"
+            )
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_mixed_synthesis_depth_required",
+                    "message": "Complete-interpretation handoffs require complete depth with a standard or untimed full read.",
+                },
+            )
+        if body.contractVersion == "mixed-v2" and body.focusSubskill == "synthesize":
+            receipt_values = [
+                value.strip()
+                for key, value in _query_pairs(body.contextKey)
+                if key == "receiptConcept" and value.strip()
+            ]
+            focus_concept = str(body.focusConcept or "").strip()
+            receipt_concept = receipt_values[0] if receipt_values else focus_concept
+            focus_definition = objective_definition(focus_concept)
+            receipt_definition = objective_definition(receipt_concept)
+            if (
+                not focus_concept
+                or len(receipt_values) > 1
+                or not focus_definition
+                or "synthesize" not in focus_definition.allowed_subskills
+                or not receipt_definition
+                or "synthesize" not in receipt_definition.allowed_subskills
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "rapid_mixed_synthesis_target_invalid",
+                        "message": (
+                            "Choose one registered ECG focus and one registered synthesis receipt target."
+                        ),
+                    },
+                )
+        if (
+            body.contractVersion == "mixed-v2"
+            and body.questionDepth == "quick"
+            and body.focusSubskill in {"measure", "localize"}
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_mixed_focus_depth_too_shallow",
+                    "message": "Choose focused or complete depth for an exact measurement or localization handoff.",
+                },
+            )
         learner = resolve_learner(authorization, body.learnerId, session_cookie)
         live_exposures = assessments.live_exposure_ids(learner)
         selection_exclusions = set(body.exclusions) | live_exposures
-        if any(key == _INTEGRATION_ROSTER_PARAM for key, _ in _query_pairs(body.contextKey)):
+        context_pairs = _query_pairs(body.contextKey)
+        if any(key == _INTEGRATION_ROSTER_PARAM for key, _ in context_pairs):
             raise HTTPException(
                 status_code=422,
                 detail={
                     "code": "rapid_integration_roster_client_owned",
                     "message": "The integration roster is created only by the server.",
+                },
+            )
+        if any(key in _ROUND_CONTRACT_PARAMS for key, _ in context_pairs):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "rapid_internal_context_client_owned",
+                    "message": "Internal Rapid round context is created only by the server.",
                 },
             )
         try:
@@ -950,7 +2360,9 @@ def build_rapid_router(
                 "assessmentScope": PACE_SCOPE[body.pace],
                 "contextKey": body.contextKey,
             }
-            require_trace_proof = body.pace != "emergency"
+            require_trace_proof = (
+                body.pace != "emergency" and body.contractVersion != "mixed-v2"
+            )
             primary_slot = _focused_corpus_selection(
                 repo,
                 store,
@@ -1018,14 +2430,26 @@ def build_rapid_router(
                 ),
             )
 
+        context_key = _with_round_contract(
+            context_key,
+            contract_version=body.contractVersion,
+            practice_mode=body.practiceMode,
+            question_depth=body.questionDepth,
+        )
+        deadline_seconds = (
+            MIXED_PACE_SECONDS[body.questionDepth][body.pace]
+            if body.contractVersion == "mixed-v2"
+            else PACE_SECONDS[body.pace]
+        )
+
         session = assessments.create_round(
             learner_id=learner,
             pace=body.pace,
             length=body.length,
             assessment_scope=PACE_SCOPE[body.pace],
-            deadline_seconds=PACE_SECONDS[body.pace],
+            deadline_seconds=deadline_seconds,
             focus_concept=body.focusConcept,
-            focus_subskill=body.focusSubskill if body.focusSubskill in ALLOWED_SUBSKILLS else None,
+            focus_subskill=body.focusSubskill,
             context_key=context_key,
             exclusions=body.exclusions,
         )
@@ -1211,8 +2635,10 @@ def build_rapid_router(
             | set(session.get("served") or [])
             | assessments.live_exposure_ids(str(session["learnerId"]))
         )
+        round_contract = _round_contract(session)
+        mixed_v2 = round_contract["contractVersion"] == "mixed-v2"
         focus = session.get("focusConcept") if session["position"] == 0 else None
-        require_trace_proof = session["pace"] != "emergency"
+        require_trace_proof = session["pace"] != "emergency" and not mixed_v2
         try:
             integration_roster = _decode_integration_roster(
                 str(session.get("contextKey") or ""),
@@ -1256,6 +2682,21 @@ def build_rapid_router(
             # receipt or pretend a Guided integration prompt was independently
             # graded against two concepts at once.
             manifest_focus = frozen_target if primary_slot else None
+        elif mixed_v2 and round_contract["practiceMode"] == "emergency":
+            selected = _emergency_rhythm_selection(
+                repo,
+                exclusions,
+                f"{round_id}:{session.get('position')}",
+                str(focus) if focus else None,
+            )
+            manifest_focus = next(
+                (
+                    str(value)
+                    for value in selected.get("targetObjectives") or []
+                    if str(value)
+                ),
+                None,
+            )
         elif focus and session["position"] == 0:
             # Focused selection owns a different, exact-contract query. Defer
             # the 21k broad permutation until a later mixed slot actually needs
@@ -1266,6 +2707,21 @@ def build_rapid_router(
                 session,
                 exclusions,
                 require_trace_proof=require_trace_proof,
+            )
+        elif mixed_v2 and round_contract["practiceMode"] == "adaptive":
+            selected = _adaptive_mixed_selection(
+                repo,
+                store,
+                session,
+                exclusions,
+            )
+            manifest_focus = next(
+                (
+                    str(value)
+                    for value in selected.get("targetObjectives") or []
+                    if str(value)
+                ),
+                None,
             )
         else:
             order, rejected = broad_orders.get(round_id)
@@ -1318,7 +2774,16 @@ def build_rapid_router(
                 },
             ) from exc
         response = payload(claimed)
-        response["selectionReason"] = selected.get("reason")
+        response["selectionReason"] = (
+            "Selected from the reviewed high-risk ventricular-rhythm supplement; patient-state questions use separate authored simulation context."
+            if mixed_v2 and round_contract["practiceMode"] == "emergency"
+            else
+            "Selected from your current practice priorities, spacing history, and eligible ECG pool."
+            if mixed_v2 and round_contract["practiceMode"] == "adaptive"
+            else "Selected without replacement from the audited Rapid ECG pool."
+            if mixed_v2
+            else selected.get("reason")
+        )
         return response
 
     @router.post("/{round_id}/submit")
@@ -1431,19 +2896,55 @@ def build_rapid_router(
                     "message": "The server could not recover this item's assessment contract.",
                 },
             )
-        selected_concepts = list(
-            dict.fromkeys(body.structuredAnswer.selectedConcepts)
-        )
+        mixed_v2 = _mixed_v2(session)
+        selected_concepts = list(dict.fromkeys(body.structuredAnswer.selectedConcepts))
         tested_manifest = finalize_rapid_tested_objective_manifest(
             frozen_manifest,
             case,
             selected_concepts,
         )
 
+        if (
+            mixed_v2
+            and session.get("deadlineSeconds") is not None
+            and not session.get("pendingStartedAt")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "rapid_item_not_ready",
+                    "message": "Start the timer only after the ECG and prompts are fully ready.",
+                },
+            )
         pre_submit_timed_out = _deadline_elapsed(session, submission_received_at)
+        if mixed_v2:
+            private_task_packet = tested_manifest.get("taskPacket") or {}
+            if (
+                not isinstance(private_task_packet, dict)
+                or private_task_packet.get("version") != _MIXED_TASK_PACKET_VERSION
+                or not isinstance(private_task_packet.get("tasks"), list)
+                or not private_task_packet.get("tasks")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "rapid_task_packet_missing",
+                        "message": "The frozen prompt contract could not be verified.",
+                    },
+                )
+            valid_responses, response_code, response_message = _validate_mixed_task_responses(
+                private_task_packet,
+                body.taskResponses,
+                allow_missing=pre_submit_timed_out,
+            )
+            if not valid_responses:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": response_code, "message": response_message},
+                )
         trace = body.traceEvidence or {}
         point = trace.get("point") if trace.get("mode") == "point" else None
-        if session["pace"] != "emergency":
+        if not mixed_v2 and session["pace"] != "emergency":
             if not pre_submit_timed_out and not isinstance(point, dict):
                 # Presence is a structural completion gate, not correctness
                 # feedback. A wrong but well-formed point is committed below so
@@ -1461,6 +2962,8 @@ def build_rapid_router(
             # become an answer oracle before durable commitment.
 
         if (
+            not mixed_v2
+            and
             session["assessmentScope"] == "full_read"
             and not pre_submit_timed_out
             and not _synthesis_task_complete(body.structuredAnswer)
@@ -1494,7 +2997,7 @@ def build_rapid_router(
             if target_only
             else None
         )
-        if target_only and not focus_objective:
+        if target_only and not focus_objective and not mixed_v2:
             raise HTTPException(
                 status_code=409,
                 detail="A target-only rhythm source requires an explicit focused Rapid objective.",
@@ -1549,18 +3052,36 @@ def build_rapid_router(
                 },
             )
 
+        mixed_outcomes: list[dict[str, Any]] = []
         try:
-            trace_grade, grade, result = _grade_claimed_rapid_submission(
-                case=case,
-                session=session,
-                body=body,
-                tested_manifest=tested_manifest,
-                selected_concepts=selected_concepts,
-                point=point,
-                assessment_scope=assessment_scope,
-                focus_objective=focus_objective,
-                target_only=target_only,
-            )
+            if mixed_v2:
+                trace_grade, grade, result, mixed_outcomes = (
+                    _grade_claimed_mixed_submission(
+                        case=case,
+                        session=session,
+                        body=body,
+                        tested_manifest=tested_manifest,
+                        timed_out=pre_submit_timed_out,
+                    )
+                )
+                selected_concepts = [
+                    str(outcome.get("objectiveId") or "")
+                    for outcome in mixed_outcomes
+                    if outcome.get("subskill") == "recognize"
+                    and outcome.get("correct")
+                ]
+            else:
+                trace_grade, grade, result = _grade_claimed_rapid_submission(
+                    case=case,
+                    session=session,
+                    body=body,
+                    tested_manifest=tested_manifest,
+                    selected_concepts=selected_concepts,
+                    point=point,
+                    assessment_scope=assessment_scope,
+                    focus_objective=focus_objective,
+                    target_only=target_only,
+                )
         except Exception:
             assessments.release_answer_submission(
                 round_id=round_id,
@@ -1731,7 +3252,78 @@ def build_rapid_router(
                 ),
             })
 
-        if trace_grade and trace_grade.get("correct"):
+        # Mixed-v2 tasks other than recognition have their own exact frozen
+        # competency cells. They never inherit credit from a complete sweep or
+        # an unasked packet co-label.
+        seen_mixed_cells: set[tuple[str, str]] = set()
+        for outcome in mixed_outcomes:
+            concept = str(outcome.get("objectiveId") or "")
+            subskill = str(outcome.get("subskill") or "")
+            cell = (concept, subskill)
+            if not concept or not subskill or subskill == "recognize" or cell in seen_mixed_cells:
+                continue
+            seen_mixed_cells.add(cell)
+            exact_policy = committed_evidence_policy(concept, subskill)
+            if not exact_policy.allowed:
+                receipts.append(
+                    {
+                        "concept": concept,
+                        "subskill": subskill,
+                        "accepted": False,
+                        "evidenceLevel": "none",
+                        "reason": exact_policy.reason,
+                    }
+                )
+                continue
+            correct = bool(outcome.get("correct"))
+            event = {
+                "eventKey": (
+                    f"rapid:{round_id}:{body.caseId}:{subskill}:{concept}:"
+                    f"{outcome.get('taskId')}"
+                ),
+                "moduleId": "rapid",
+                "sceneId": f"{session['pace']}:mixed-v2",
+                "interactionId": f"{body.caseId}:{outcome.get('taskId')}",
+                "concept": concept,
+                "subskills": [subskill],
+                "score": float(outcome.get("score") or 0.0),
+                "correct": correct,
+                "attempts": 1,
+                "assistance": "independent",
+                "hintsUsed": 0,
+                "confidence": body.confidence,
+                "evidenceLevel": "independent_transfer",
+                "caseId": body.caseId,
+                "caseProvenance": "real_eligible",
+                "caseEligible": True,
+                "misconceptions": outcome.get("misconceptions") or [],
+                "_retentionVerified": True,
+                "_retentionMorphologyKey": morphology_key,
+                "_serverVerifiedScoring": True,
+            }
+            append_event_receipt(
+                event,
+                {
+                    "concept": concept,
+                    "subskill": subskill,
+                    "accepted": True,
+                    "correct": correct,
+                    "evidenceLevel": "independent_transfer",
+                    **(
+                        {
+                            "reason": (
+                                "The server deadline elapsed; this asked task records a lapse."
+                                if timed_out
+                                else "The frozen task response did not meet its deterministic grading contract."
+                            )
+                        }
+                        if not correct
+                        else {}
+                    ),
+                },
+            )
+
+        if not mixed_v2 and trace_grade and trace_grade.get("correct"):
             trace_policy = committed_evidence_policy(
                 "qrs_complex", "localize"
             )
@@ -1787,8 +3379,15 @@ def build_rapid_router(
             "",
         )
         focused_synthesis_attempt = bool(
-            durable_manifest.get("taskKind") == "focused_handoff"
-            and session.get("focusSubskill") == "synthesize"
+            session.get("focusSubskill") == "synthesize"
+            and (
+                durable_manifest.get("taskKind") == "focused_handoff"
+                or (
+                    mixed_v2
+                    and int(session.get("position") or 0) == 0
+                    and _round_contract(session)["questionDepth"] == "complete"
+                )
+            )
         )
         if tested_synthesis_target or focused_synthesis_attempt:
             # The complete read remains useful formative practice, but field
@@ -1823,6 +3422,7 @@ def build_rapid_router(
                 "freeTextAnswer": body.freeTextAnswer,
                 "confidence": body.confidence,
                 "traceEvidence": body.traceEvidence,
+                "taskResponses": body.taskResponses,
             },
             grade=grade,
             # Per-case grading is deliberately provider-independent. Learners

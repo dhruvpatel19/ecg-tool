@@ -46,8 +46,12 @@ test.describe("public trust and policy pages", () => {
 
   test("data attribution links target versioned official dataset records", async ({ page }) => {
     await page.goto("/data-sources");
-    await expect(page.getByRole("link", { name: "Official PhysioNet record" })).toHaveCount(4);
+    await expect(page.getByRole("link", { name: "Official PhysioNet record" })).toHaveCount(6);
     await expect(page.getByRole("link", { name: "Official PhysioNet record" }).first())
       .toHaveAttribute("href", "https://physionet.org/content/ptb-xl/1.0.3/");
+    await expect(page.getByRole("heading", { name: "ECG Fragment Database for the Exploration of Dangerous Arrhythmia 1.0.0" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "STAFF III Database 1.0.0" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open Data Commons Attribution License v1.0" }))
+      .toHaveAttribute("href", "https://physionet.org/content/ecg-fragment-high-risk-label/view-license/1.0.0/");
   });
 });

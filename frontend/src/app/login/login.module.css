@@ -527,8 +527,8 @@
 
 .submitButton:disabled {
   color: #edf4f1;
-  background: #77958a;
-  border-color: #77958a;
+  background: #4f6f65;
+  border-color: #4f6f65;
   box-shadow: none;
   cursor: wait;
 }

@@ -288,7 +288,9 @@ def build_clinical_tutor_context(
     manifest = item.evidence_manifest
     public_reference = {
         **expected_reference,
-        "itemId": public_item_reference(str(expected_reference["itemId"])),
+        "itemId": public_item_reference(
+            str(item.item_id), learner_id=learner_id, session_id=session_id
+        ),
     }
     ecg_reference = issue_ecg_capability(
         get_settings().registration_rate_limit_secret,
@@ -312,7 +314,9 @@ def build_clinical_tutor_context(
                 ),
                 1,
             ),
-            "itemRef": public_item_reference(str(item.item_id)),
+            "itemRef": public_item_reference(
+                str(item.item_id), learner_id=learner_id, session_id=session_id
+            ),
             "ecgRef": ecg_reference,
             "situation": item.situation,
             "questionType": item.question_type,
@@ -414,7 +418,9 @@ def build_clinical_shift_tutor_context(
         safe_cases.append(
             {
                 "caseNumber": case_number,
-                "itemRef": public_item_reference(str(item.item_id)),
+                "itemRef": public_item_reference(
+                    str(item.item_id), learner_id=learner_id, session_id=session_id
+                ),
                 "ecgRef": issue_ecg_capability(
                     get_settings().registration_rate_limit_secret,
                     learner_id,

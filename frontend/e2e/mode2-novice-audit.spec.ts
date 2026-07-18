@@ -1,4 +1,4 @@
-import { test, expect, type Page, type TestInfo } from "@playwright/test";
+import { test, expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { registerVerifiedE2ELearner, signInVerifiedE2ELearner } from "./helpers";
 
 const password = "Novice-Audit-2026!";
@@ -24,14 +24,14 @@ type CampaignPayload = {
 
 async function register(page: Page, username: string, displayName: string) {
   await registerVerifiedE2ELearner(page, { username, password, displayName });
-  await page.goto("/dashboard");
-  await expect(page.getByRole("heading", { name: "Build a read you can trust." })).toBeVisible({ timeout: 30_000 });
+  await page.goto("/home");
+  await expect(page.getByRole("heading", { name: `Welcome back, ${displayName.split(/\s+/)[0]}.` })).toBeVisible({ timeout: 30_000 });
 }
 
 async function signIn(page: Page, username: string) {
   await signInVerifiedE2ELearner(page, { username, password });
-  await page.goto("/dashboard");
-  await expect(page.getByRole("heading", { name: "Build a read you can trust." })).toBeVisible({ timeout: 30_000 });
+  await page.goto("/home");
+  await expect(page.getByRole("heading", { name: "Welcome back, Novice." })).toBeVisible({ timeout: 30_000 });
 }
 
 async function signOut(page: Page) {
@@ -42,21 +42,43 @@ async function signOut(page: Page) {
   await expect(page.getByRole("link", { name: "Sign in" })).toBeVisible();
 }
 
-async function readRbbbStartedSkills(page: Page, displayName: string) {
-  await page.goto("/profile?tab=competencies");
-  await expect(page.getByRole("heading", { name: `${displayName}’s learning` })).toBeVisible({ timeout: 30_000 });
-  await page.getByRole("searchbox", { name: "Search competencies" }).fill("right bundle branch block");
-  const trackedObjective = page.locator(".profile-objective").filter({
+async function openRbbbCompetency(page: Page, displayName: string): Promise<Locator> {
+  await page.goto("/home?panel=competencies");
+  await expect(page.getByRole("heading", { name: `Welcome back, ${displayName.split(/\s+/)[0]}.` })).toBeVisible({ timeout: 30_000 });
+
+  const panel = page.getByRole("tabpanel", { name: "Progress" });
+  await expect(panel.getByRole("heading", { name: "See what's strong and what to practice next" })).toBeVisible({ timeout: 30_000 });
+  await panel.getByRole("searchbox", { name: "Search skills" }).fill("right bundle branch block");
+
+  const competencyMap = panel
+    .getByRole("heading", { name: "Browse all skills" })
+    .locator("xpath=ancestor::section[1]");
+  const matchingDetails = competencyMap.locator("details").filter({
     has: page.getByText("Right bundle branch block", { exact: true }),
   });
-  await expect(trackedObjective).toBeVisible({ timeout: 30_000 });
-  const skillCount = trackedObjective.locator("summary small");
-  await expect(skillCount).toHaveText(/^.+ · \d+\/\d+ skills started$/);
-  const match = (await skillCount.innerText()).match(/(\d+)\/\d+ skills started$/);
-  if (!match) throw new Error("The RBBB competency summary did not expose its started-skill count.");
-  await page.goto("/dashboard");
-  await expect(page.getByRole("heading", { name: "Build a read you can trust." })).toBeVisible({ timeout: 30_000 });
-  return Number(match[1]);
+  const domain = matchingDetails.first();
+  await expect(domain.locator(":scope > summary")).toBeVisible({ timeout: 30_000 });
+  await domain.locator(":scope > summary").click();
+
+  const objective = domain.locator("details").filter({
+    has: page.getByText("Right bundle branch block", { exact: true }),
+  }).first();
+  await expect(objective.locator(":scope > summary")).toBeVisible({ timeout: 30_000 });
+  return objective;
+}
+
+async function readRbbbStartedSkills(page: Page, displayName: string) {
+  const trackedObjective = await openRbbbCompetency(page, displayName);
+  const skillCount = trackedObjective.locator(":scope > summary small");
+  const summary = await skillCount.innerText();
+  const match = summary.match(/^(\d+)(?: of \d+)? skills? (?:with evidence|practiced)$/);
+  const evidenceCount = ["No recorded skill evidence", "No skills practiced yet"].includes(summary)
+    ? 0
+    : Number(match?.[1]);
+  if (!Number.isFinite(evidenceCount)) throw new Error("The RBBB finding summary did not expose its skill-evidence count.");
+  await page.goto("/home");
+  await expect(page.getByRole("heading", { name: `Welcome back, ${displayName.split(/\s+/)[0]}.` })).toBeVisible({ timeout: 30_000 });
+  return evidenceCount;
 }
 
 async function captureAuditScreenshot(
@@ -65,6 +87,7 @@ async function captureAuditScreenshot(
   name: string,
   fullPage = true,
 ) {
+  await expect(page.locator('[data-route-accessibility-ready="true"]')).toHaveCount(1);
   await page.screenshot({ path: testInfo.outputPath(name), fullPage });
 }
 
@@ -192,18 +215,16 @@ test.describe.serial("novice Mode 2 audit", () => {
     console.log("AUDIT restored learner A RBBB skills", restoredA);
     expect(restoredA).not.toBeNull();
     expect(restoredA!).toBeGreaterThan(initialB ?? 0);
-    await page.goto("/profile");
-    await expect(page.getByRole("heading", { name: "Novice A’s learning" })).toBeVisible({ timeout: 30_000 });
-    await page.getByRole("tab", { name: "Competency map" }).click();
-    await page.getByRole("searchbox", { name: "Search competencies" }).fill("right bundle branch block");
-    const trackedObjective = page.locator(".profile-objective").filter({
-      has: page.getByText("Right bundle branch block", { exact: true }),
-    });
-    await expect(trackedObjective).toBeVisible();
-    await expect(trackedObjective).toContainText("1/8 skills started");
-    await expect(trackedObjective).toContainText("Real-ECG check available");
-    await expect(trackedObjective).toContainText("Formative practice recorded; no independent estimate yet.");
-    await expect(trackedObjective).not.toContainText("Checked on real ECGs");
+    const trackedObjective = await openRbbbCompetency(page, "Novice A");
+    const objectiveSummary = trackedObjective.locator(":scope > summary");
+    await expect(objectiveSummary).toContainText("1 of 8 skills practiced");
+    await expect(objectiveSummary).toContainText("Scored check available");
+    await expect(objectiveSummary).not.toContainText("Checked on real ECGs");
+    await objectiveSummary.click();
+    await expect(trackedObjective.getByText(
+      "You've completed formative practice for this skill. Complete a scored ECG check to measure your progress.",
+      { exact: true },
+    )).toBeVisible();
     await captureAuditScreenshot(page, testInfo, "profile-after-attempt.png");
   });
 
