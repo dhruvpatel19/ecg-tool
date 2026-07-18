@@ -14,6 +14,12 @@ from app.ecg_capability import (
     issue_ecg_capability,
     matches_ecg_capability,
 )
+from app.clinical.item_reference import (
+    is_public_item_reference,
+    is_public_option_reference,
+    public_item_reference,
+    public_option_reference,
+)
 from app.main import app, clinical_item_store, store
 
 
@@ -45,6 +51,33 @@ def _keys(value: Any) -> set[str]:
     if isinstance(value, list):
         return set().union(*(_keys(child) for child in value)) if value else set()
     return set()
+
+
+def test_clinical_item_and_option_references_are_opaque_and_owner_session_bound() -> None:
+    item_id = "clinical-svt-vagal-response"
+    option_id = "svt_vagal"
+    owner_reference = public_item_reference(
+        item_id, learner_id="owner-a", session_id="session-a"
+    )
+    other_owner_reference = public_item_reference(
+        item_id, learner_id="owner-b", session_id="session-a"
+    )
+    other_session_reference = public_item_reference(
+        item_id, learner_id="owner-a", session_id="session-b"
+    )
+    option_reference = public_option_reference(
+        item_id,
+        option_id,
+        learner_id="owner-a",
+        session_id="session-a",
+    )
+
+    assert is_public_item_reference(owner_reference)
+    assert is_public_option_reference(option_reference)
+    assert len({owner_reference, other_owner_reference, other_session_reference}) == 3
+    assert item_id not in owner_reference
+    assert item_id not in option_reference
+    assert option_id not in option_reference
 
 
 def _assert_public(value: Any, *internal_values: str) -> None:
@@ -168,7 +201,8 @@ def test_clinical_lifecycle_waveform_feedback_and_report_never_expose_raw_ids() 
         started = started_response.json()
         session_id = started["session"]["sessionId"]
         item_id = started["next"]["itemId"]
-        item = clinical_item_store.get_item(item_id)
+        durable_item_id = store.get_shift_session(session_id)["pendingItemId"]
+        item = clinical_item_store.get_item(durable_item_id)
         assert item is not None
         canonical = str(item.ecg_id)
         internal_item_id = str(item.item_id)
@@ -244,7 +278,7 @@ def test_clinical_lifecycle_waveform_feedback_and_report_never_expose_raw_ids() 
         assert graded["tutorContext"]["itemId"] == item_id
         _assert_public(graded, canonical, internal_item_id)
 
-        internal_answer = store.get_shift_answer(session_id, item_id)
+        internal_answer = store.get_shift_answer(session_id, durable_item_id)
         assert internal_answer is not None
         assert internal_answer["ecgId"] == canonical
         assert internal_answer["grade"]["caseId"] == internal_item_id

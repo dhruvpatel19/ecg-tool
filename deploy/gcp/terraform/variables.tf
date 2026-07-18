@@ -395,6 +395,23 @@ variable "artifact_repository_id" {
   }
 }
 
+variable "enable_github_actions_publisher" {
+  description = "Create the least-privilege GitHub Actions OIDC publisher identity for the reviewed backend-image workflow."
+  type        = bool
+  default     = false
+}
+
+variable "github_actions_repository" {
+  description = "The one GitHub owner/repository allowed to exchange OIDC tokens for the backend-image publisher identity."
+  type        = string
+  default     = "dhruvpatel19/ecg-tool"
+
+  validation {
+    condition     = var.github_actions_repository == "dhruvpatel19/ecg-tool"
+    error_message = "github_actions_repository is release-locked to dhruvpatel19/ecg-tool. A repository migration requires a reviewed code change."
+  }
+}
+
 variable "backend_image" {
   description = "Immutable Artifact Registry backend image reference ending in @sha256:<64 hex>. Required when provision_instance=true; tags are rejected."
   type        = string

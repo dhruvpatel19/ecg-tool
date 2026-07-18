@@ -27,7 +27,7 @@ Current repair state:
 | Clinical timed mobile workflow | At 320/390 px the server clock, ECG, task, confidence, and submit controls remain reachable without document-level scrolling; focused mobile, progressive-flow, and desktop workspace checks pass. | verified locally |
 | Dashboard / My Learning coherence | The existing functional contracts remain intact, but user review rejected the current information architecture, visual hierarchy, and separation between dashboard, objectives, mastery, and coaching. A consolidated student home and evidence-aware coach redesign is now in progress. | in progress |
 | Student authentication | Account-required routes, verified-email registration, username-or-email sign-in, generic password recovery, optional email-code protection, email/password change, session inventory/revocation, legacy-record migration, export/deletion, and owner boundaries are implemented. The focused email/auth/retention/readiness backend gate passes 49 checks; final combined browser regression is in progress. Sender-domain/provider activation, institutional SSO, and production edge smoke remain external. | implemented / combined test pending |
-| Clinical content depth | 103 distinct real PTB-XL ECGs exist, but they currently derive from 22 base templates / 34 surfaces rather than 100 materially distinct governed clinical decisions. | open |
+| Clinical content depth | 103 patient cases backed by 106 distinct real PTB-XL ECGs exist, but they currently derive from 22 base templates / 34 surfaces rather than 100 materially distinct governed clinical decisions. | open |
 | Clinical bedside realism | Stable/unstable perfusion variation, preserved vitals, authentic serial pairs, validated rhythm streams for resuscitation, and drug/lab timing joins are not all available. | open / external data gate |
 | Clinical governance | Named clinician review/version manifest and policy sign-off are absent; learner UI must continue to call the cases supervised formative prototypes. | external gate |
 | Public entry and onboarding | Signed-out `/` is now a real public landing page rather than the private dashboard, with clear student-oriented mode explanations, an explicit account requirement, responsive navigation, and distinct focused sign-in versus contextual registration. Focused landing/public trust checks pass locally; final email-state and full-browser regression is in progress. In-product first-run guidance remains open. | implemented / combined test pending |
@@ -112,7 +112,7 @@ Current repair state:
 
 | # | Issue / acceptance condition | Status |
 |---:|---|---|
-| 55 | At least 100 distinct real-ECG cases are learner-serving | verified (103 distinct real PTB-XL ECGs) |
+| 55 | At least 100 distinct real-ECG cases are learner-serving | verified (103 cases backed by 106 distinct real PTB-XL ECGs) |
 | 56 | ECG-first commitment occurs before symptoms/context cross the API boundary | verified |
 | 57 | Server owns stage, deadlines, answer keys, scoring, and context reveal | verified |
 | 58 | First-look category and confidence receive explicit feedback | verified |

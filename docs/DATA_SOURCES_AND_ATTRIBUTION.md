@@ -14,10 +14,13 @@ deployment that serves source-derived ECGs.
 | PTB-XL+ 1.0.1 | Algorithm-derived measurements, features, fiducials, median beats, and diagnostic statements joined by PTB-XL ECG identifier | [PhysioNet dataset](https://physionet.org/content/ptb-xl-plus/1.0.1/) · [version DOI 10.13026/g6h6-7g88](https://doi.org/10.13026/g6h6-7g88) | [CC BY 4.0 on PhysioNet](https://physionet.org/content/ptb-xl-plus/view-license/1.0.1/) · [canonical license](https://creativecommons.org/licenses/by/4.0/) |
 | Leipzig Heart Center ECG-Database 1.0.0 | Expert-labelled rhythm windows used only in the source-permitted focused Training/Rapid lanes | [PhysioNet dataset](https://physionet.org/content/leipzig-heart-center-ecg/1.0.0/) · [version DOI 10.13026/7a4j-vn37](https://doi.org/10.13026/7a4j-vn37) | [ODC-By 1.0 on PhysioNet](https://physionet.org/content/leipzig-heart-center-ecg/view-license/1.0.0/) · [canonical license](https://opendatacommons.org/licenses/by/1-0/) |
 | MIT-BIH Malignant Ventricular Ectopy Database 1.0.0 | Foundation-only, checksum-gated two-channel rhythm windows for a future reviewed resuscitation-rhythm lane; not connected to current student routes or action mastery | [PhysioNet dataset](https://physionet.org/content/vfdb/1.0.0/) · [version DOI 10.13026/C22P44](https://doi.org/10.13026/C22P44) | [ODC-By 1.0 on PhysioNet](https://physionet.org/content/vfdb/view-license/1.0.0/) · [canonical license](https://opendatacommons.org/licenses/by/1-0/) |
+| STAFF III Database 1.0.0 | Review-gated baseline → controlled balloon-occlusion → recovery 12-lead comparison candidates; protocol phase is source truth, but morphology answers and clinical management require separate adjudication | [PhysioNet dataset](https://physionet.org/content/staffiii/1.0.0/) · [version DOI 10.13026/C20P4H](https://doi.org/10.13026/C20P4H) | [ODC-By 1.0 on PhysioNet](https://physionet.org/content/staffiii/view-license/1.0.0/) · [canonical license](https://opendatacommons.org/licenses/by/1-0/) |
+| ECG Fragment Database for the Exploration of Dangerous Arrhythmia 1.0.0 | Review-gated short MLII rhythm recognition/discrimination fragments; never patient stability, shockability, treatment, or management truth | [PhysioNet dataset](https://physionet.org/content/ecg-fragment-high-risk-label/1.0.0/) · [version DOI 10.13026/kpfg-xs25](https://doi.org/10.13026/kpfg-xs25) | [ODC-By 1.0 on PhysioNet](https://physionet.org/content/ecg-fragment-high-risk-label/view-license/1.0.0/) · [canonical license](https://opendatacommons.org/licenses/by/1-0/) |
 
 PTB-XL and PTB-XL+ are **Creative Commons Attribution 4.0**, not ODC-By.
-Leipzig and VFDB remain **Open Data Commons Attribution 1.0**. The executable
-source registry uses `CC-BY-4.0` and `ODC-BY-1.0`, respectively.
+Leipzig, VFDB, STAFF III, and the dangerous-arrhythmia fragment database are
+**Open Data Commons Attribution 1.0**. The executable source registry uses
+`CC-BY-4.0` and `ODC-BY-1.0`, respectively.
 
 ## Requested citations
 
@@ -43,7 +46,15 @@ source registry uses `CC-BY-4.0` and `ODC-BY-1.0`, respectively.
    [https://doi.org/10.13026/C22P44](https://doi.org/10.13026/C22P44).
    Also cite the source-requested Greenwald work shown on the versioned dataset
    page.
-5. Goldberger AL, Amaral LAN, Glass L, et al. PhysioBank, PhysioToolkit, and
+5. Martínez JP, Pahlm O, Ringborn M, Warren S, Laguna P, Sörnmo L.
+   *The STAFF III Database: ECGs Recorded During Acutely Induced Myocardial
+   Ischemia*. Comput Cardiol. 2017. Dataset version DOI:
+   [https://doi.org/10.13026/C20P4H](https://doi.org/10.13026/C20P4H).
+6. Nemirko A, Manilo L, Tatarinova A, Alekseev B, Evdakova E. *ECG Fragment
+   Database for the Exploration of Dangerous Arrhythmia* (version 1.0.0).
+   PhysioNet. 2022. RRID:SCR_007345.
+   [https://doi.org/10.13026/kpfg-xs25](https://doi.org/10.13026/kpfg-xs25).
+7. Goldberger AL, Amaral LAN, Glass L, et al. PhysioBank, PhysioToolkit, and
    PhysioNet: Components of a new research resource for complex physiologic
    signals. *Circulation*. 2000;101(23):e215-e220.
    [https://doi.org/10.1161/01.CIR.101.23.E215](https://doi.org/10.1161/01.CIR.101.23.E215).
@@ -62,6 +73,16 @@ source registry uses `CC-BY-4.0` and `ODC-BY-1.0`, respectively.
   inside one expert rhythm interval. They remain in a dedicated disconnected
   rhythm store and do not supply pulse, perfusion, arrest state, treatment, or
   action-sequence truth.
+- STAFF III source artifacts are checksum-verified offline. TRACE derives
+  opaque 10-second 12-lead frames at 250 Hz, with augmented limb leads derived
+  from I/II, and groups them by verified protocol order. Source-declared
+  possible lead/sign-reversal patients are excluded. Candidate artifacts do
+  not contain raw patient or record identifiers and remain disconnected until
+  morphology changes and unchanged regions are independently reviewed.
+- Dangerous-arrhythmia fragments are checksum-verified, retain the
+  source-author rhythm code, and are stored as short single-channel MLII samples with
+  content-addressed identities. Their labels cannot establish pulse,
+  perfusion, arrest, shockability, stability, treatment, or management.
 - TRACE-authored clinical stems did not occur with the people represented by
   the source ECGs. They are visibly formative teaching context and must not be
   attributed to PTB-XL, PTB-XL+, Leipzig, PhysioNet, or the source authors.

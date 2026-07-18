@@ -2,7 +2,8 @@
 """Build the deterministic, real-PTB corpus used by clean CI runners.
 
 The asset contains exactly the distinct PTB-XL ECGs bound to the authored
-Clinical bank. It is a source-test dependency, not the production corpus or a
+Clinical bank, including every authenticated prior used by a longitudinal
+episode. It is a source-test dependency, not the production corpus or a
 substitute for the exhaustive 22,497-case release audit.
 """
 
@@ -24,7 +25,11 @@ import tempfile
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
-from app.clinical.real_items import REAL_ECGS_BY_SCENARIO, vetted_real_items  # noqa: E402
+from app.clinical.real_items import (  # noqa: E402
+    AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT,
+    REAL_ECGS_BY_SCENARIO,
+    vetted_real_items,
+)
 from app.store import CaseStore, LocalWaveformStore  # noqa: E402
 
 
@@ -40,20 +45,55 @@ PRIVATE_METADATA_KEYS = {
 }
 
 
-def sanitized_packet(packet: dict) -> dict:
+def sanitized_packet(
+    packet: dict,
+    *,
+    longitudinal_metadata: dict[str, str] | None = None,
+) -> dict:
     cleaned = deepcopy(packet)
     identity = cleaned.get("record_identity") or {}
-    identity.pop("patientId", None)
+    for key in ("patientId", "recordingDate", "recordedAt"):
+        identity.pop(key, None)
     provenance = cleaned.get("source_provenance") or {}
-    provenance.pop("patientId", None)
+    for key in ("patientId", "recordingDate", "recordedAt"):
+        provenance.pop(key, None)
     ptbxl = cleaned.get("ptbxl") or {}
     metadata = ptbxl.get("metadata") or {}
     ptbxl["metadata"] = {
         key: value for key, value in metadata.items() if key not in PRIVATE_METADATA_KEYS
     }
     nested_provenance = ptbxl.get("source_provenance") or {}
-    nested_provenance.pop("patientId", None)
+    for key in ("patientId", "recordingDate", "recordedAt"):
+        nested_provenance.pop(key, None)
+    if longitudinal_metadata is not None:
+        # Clean CI must exercise the same fail-closed pair checks as production,
+        # without committing a source patient id or acquisition date. These
+        # fixture-scoped handles and timestamps encode only same-pair membership
+        # and prior/current order; they are not derived from either source value.
+        identity.update(longitudinal_metadata)
+        provenance.update(longitudinal_metadata)
     return cleaned
+
+
+def ci_longitudinal_metadata() -> dict[str, dict[str, str]]:
+    members: dict[str, dict[str, str]] = {}
+    for index, (current_id, prior_id) in enumerate(
+        sorted(
+            AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT.items(),
+            key=lambda pair: int(pair[0]),
+        ),
+        start=1,
+    ):
+        pair_handle = f"ci-longitudinal-pair-{index:02d}"
+        members[prior_id] = {
+            "patientId": pair_handle,
+            "recordedAt": f"2000-{index:02d}-01T00:00:00Z",
+        }
+        members[current_id] = {
+            "patientId": pair_handle,
+            "recordedAt": f"2000-{index:02d}-02T00:00:00Z",
+        }
+    return members
 
 
 def write_deterministic_archive(corpus_root: Path, destination: Path) -> None:
@@ -96,10 +136,21 @@ def main() -> None:
     source_store = CaseStore(source / "corpus.db", read_only=True)
     source_waveforms = LocalWaveformStore(source / "waveforms")
     source_manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    clinical_case_ids = {
+        case_id for values in REAL_ECGS_BY_SCENARIO.values() for case_id in values
+    }
+    comparison_case_ids = set(AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT.values())
+    if clinical_case_ids & comparison_case_ids:
+        raise RuntimeError("longitudinal prior ECGs must be distinct from served Clinical ECGs")
     case_ids = sorted(
-        {case_id for values in REAL_ECGS_BY_SCENARIO.values() for case_id in values},
+        clinical_case_ids | comparison_case_ids,
         key=int,
     )
+    longitudinal_metadata = ci_longitudinal_metadata()
+    if set(longitudinal_metadata) != (
+        set(AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT) | comparison_case_ids
+    ):
+        raise RuntimeError("CI longitudinal metadata does not cover every pair member")
 
     with tempfile.TemporaryDirectory(prefix="ecg-ci-corpus-") as temporary:
         corpus = Path(temporary)
@@ -110,12 +161,24 @@ def main() -> None:
             signal = source_waveforms.read(case_id)
             if packet is None or len(signal) != 12:
                 raise RuntimeError(f"complete source packet/waveform missing for Clinical ECG {case_id}")
-            target_store.upsert_case(sanitized_packet(packet))
+            target_store.upsert_case(
+                sanitized_packet(
+                    packet,
+                    longitudinal_metadata=longitudinal_metadata.get(case_id),
+                )
+            )
             target_waveforms.write(case_id, signal)
 
         clinical = vetted_real_items(target_store.get_packet)
-        if len(clinical) != len(case_ids):
+        if len(clinical) != len(clinical_case_ids):
             raise RuntimeError("CI subset no longer satisfies the complete Clinical bank contract")
+        longitudinal_pairs = {
+            str(item.ecg_id): str(item.prior_ecg_id)
+            for item in clinical
+            if item.prior_ecg_id
+        }
+        if longitudinal_pairs != AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT:
+            raise RuntimeError("CI subset no longer satisfies the longitudinal pair contract")
         with target_store.connect() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("VACUUM")
@@ -142,6 +205,9 @@ def main() -> None:
             "ciFixture": {
                 "purpose": "clean-runner source tests only",
                 "clinicalCaseCount": len(clinical),
+                "comparisonEcgCount": len(comparison_case_ids),
+                "distinctRealEcgCount": len(case_ids),
+                "longitudinalLinkage": "fixture-scoped opaque pair handles and synthetic order only",
                 "patientIdentifiersRemoved": True,
                 "productionCorpus": False,
             },

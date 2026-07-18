@@ -200,18 +200,24 @@ Playwright student-flow suite against the checked real-PTB CI corpus, a
 non-root/read-only Docker smoke test, and a secret scan. The
 manual `publish-backend.yml` workflow intentionally fails unless it is run from
 a protected `main` or `release/*` branch whose exact commit has successful CI.
-Configure a reviewer-protected `backend-release` GitHub environment, Workload
-Identity secrets `GCP_WORKLOAD_IDENTITY_PROVIDER` and
-`GCP_DEPLOY_SERVICE_ACCOUNT`, and repository variables `GCP_PROJECT_ID`,
-`GCP_REGION`, and `GCP_ARTIFACT_REPOSITORY`. The workflow publishes a unique
-tag and reports the verified immutable digest; it does not apply Terraform or
-change the running VM.
+Configure a reviewer-protected `backend-release` GitHub environment and the
+non-secret repository variables `GCP_WORKLOAD_IDENTITY_PROVIDER`,
+`GCP_DEPLOY_SERVICE_ACCOUNT`, `GCP_PROJECT_ID`, `GCP_REGION`, and
+`GCP_ARTIFACT_REPOSITORY`; do not store either Workload Identity resource name
+as a secret. With `enable_github_actions_publisher = true`, Terraform outputs
+the first two values. Its provider admits only `dhruvpatel19/ecg-tool` tokens
+from `main` or `release/*`, and the dedicated service account can write only the
+`ecg-tool-backend` Artifact Registry repository. See
+`terraform/README.md#optional-keyless-github-image-publisher` for the reviewed
+setup commands. The workflow publishes a unique tag and reports the verified
+immutable digest; it does not apply Terraform or change the running VM.
 
 Clean GitHub runners verify the authored Clinical bank against the committed,
-checksum-pinned 103-tracing **real PTB-derived** test corpus documented in
+checksum-pinned 106-tracing **real PTB-derived** test corpus documented in
 `backend/tests/assets/PTB_CI_CORPUS_ATTRIBUTION.md`; it contains no synthetic
-learner ECGs. This small source-test dependency does not relax or replace the
-22,497-case production corpus audit below.
+learner ECGs. The fixture contains 103 encounter tracings plus three
+de-identified longitudinal priors. This small source-test dependency does not
+relax or replace the 22,497-case production corpus audit below.
 
 Package the complete corpus and opt in to upload it:
 

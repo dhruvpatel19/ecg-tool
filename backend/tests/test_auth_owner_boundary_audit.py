@@ -6,7 +6,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, clinical_item_store
+from app.main import app, clinical_item_store, store
 
 
 PASSWORD = "Boundary-Audit-Pw-9!"
@@ -56,7 +56,9 @@ def test_clinical_precommit_handles_do_not_disclose_authored_diagnosis_ids() -> 
         assert payload["session"]["pendingItemId"] == public_id
         assert payload["next"]["item"]["item_id"] == public_id
 
-        authored = clinical_item_store.get_item(public_id)
+        durable = store.get_shift_session(session_id)
+        assert durable is not None
+        authored = clinical_item_store.get_item(durable["pendingItemId"])
         assert authored is not None
         assert authored.item_id != public_id
         assert authored.item_id not in response.text

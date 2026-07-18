@@ -24,6 +24,7 @@ NEVER_LEARNER_SERVE_SOURCES = frozenset(
 )
 STUDENT_TIERS = frozenset({"A", "B"})
 SURFACE_12_LEADS = frozenset({"I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"})
+RHYTHM_STREAM_LEADS = SURFACE_12_LEADS | frozenset({"MLII", "ECG1", "ECG2"})
 SYNTHETIC_CASE_ID_PREFIXES = ("fixture-", "seed-")
 
 
@@ -38,13 +39,40 @@ def _waveform_is_audited(packet: dict[str, Any]) -> bool:
     waveform = packet.get("waveform") or {}
     if not isinstance(waveform, dict):
         return False
-    leads = waveform.get("leads") or []
-    if (
-        not isinstance(leads, list)
-        or not all(isinstance(lead, str) for lead in leads)
-        or not SURFACE_12_LEADS <= set(leads)
-    ):
+
+    leads = waveform.get("leads")
+    if isinstance(leads, list):
+        lead_ids = leads
+    else:
+        channels = waveform.get("channels")
+        if not isinstance(channels, list) or not all(
+            isinstance(channel, dict) and isinstance(channel.get("id"), str)
+            for channel in channels
+        ):
+            return False
+        lead_ids = [str(channel["id"]) for channel in channels]
+    if not lead_ids or len(set(lead_ids)) != len(lead_ids):
         return False
+
+    source = str(packet.get("source") or "")
+    descriptor = KNOWN_SOURCES.get(source)
+    eligibility = packet.get("educational_eligibility") or {}
+    educational_use = (
+        str(eligibility.get("educationalUse") or "")
+        if isinstance(eligibility, dict)
+        else ""
+    )
+    is_audited_rhythm_stream = bool(
+        descriptor
+        and educational_use == "rhythm_stream"
+        and educational_use in descriptor.educational_uses
+    )
+    if is_audited_rhythm_stream:
+        if not set(lead_ids) <= RHYTHM_STREAM_LEADS:
+            return False
+    elif not SURFACE_12_LEADS <= set(lead_ids):
+        return False
+
     try:
         sampling_frequency = float(waveform.get("sampling_frequency"))
         duration_sec = float(waveform.get("duration_sec"))
@@ -97,6 +125,24 @@ def _normalized_envelope(packet: dict[str, Any], mode: LearningMode) -> PacketPo
     modes = {str(value).casefold() for value in eligibility.get("eligibleModes") or []}
     educational_use = str(eligibility.get("educationalUse") or "")
     subskills = eligibility.get("eligibleSubskills") or {}
+    if (
+        "current_student_serving_eligible" in packet
+        and packet.get("current_student_serving_eligible") is not True
+    ):
+        return PacketPolicyDecision(
+            False,
+            "The packet has not been promoted for current student serving.",
+            "rejected",
+        )
+    if (
+        "currentRuntimeModeConnected" in eligibility
+        and eligibility.get("currentRuntimeModeConnected") is not True
+    ):
+        return PacketPolicyDecision(
+            False,
+            "The packet's reviewed learner-mode connection is not active.",
+            "rejected",
+        )
     if (
         mode not in modes
         or educational_use not in descriptor.educational_uses
@@ -250,6 +296,15 @@ def packet_allows_learning_evidence(
 
     if mode_decision.source_kind == "normalized":
         eligibility = packet.get("educational_eligibility") or {}
+        if (
+            "masteryEvidenceEligible" in eligibility
+            and eligibility.get("masteryEvidenceEligible") is not True
+        ):
+            return PacketPolicyDecision(
+                False,
+                "The reviewed source contract does not permit mastery evidence.",
+                "rejected",
+            )
         rows = eligibility.get("eligibleSubskills") or {}
         allowed = rows.get(concept) if isinstance(rows, dict) else None
         if not isinstance(allowed, list) or subskill not in {str(value) for value in allowed}:
@@ -293,8 +348,13 @@ def retention_morphology_key(packet: dict[str, Any]) -> str | None:
     source_labels = packet.get("source_labels") or {}
     rhythm = source_labels.get("rhythm") if isinstance(source_labels, dict) else {}
     rhythm = rhythm or {}
-    if isinstance(rhythm, dict) and rhythm.get("canonicalConceptId"):
-        return f"{source}:{rhythm.get('canonicalConceptId')}:{rhythm.get('rhythmCode') or 'label'}"
+    canonical_rhythm = (
+        rhythm.get("canonicalConceptId") or rhythm.get("canonicalRhythmId")
+        if isinstance(rhythm, dict)
+        else None
+    )
+    if canonical_rhythm:
+        return f"{source}:{canonical_rhythm}:{rhythm.get('rhythmCode') or 'label'}"
     ptbxl = packet.get("ptbxl") or {}
     subclasses = ptbxl.get("diagnostic_subclass") if isinstance(ptbxl, dict) else []
     subclasses = subclasses or []

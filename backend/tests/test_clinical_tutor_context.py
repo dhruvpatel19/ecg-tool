@@ -83,7 +83,9 @@ def test_clinical_tutor_context_is_postcommit_owner_bound_and_key_safe(monkeypat
         session_id = started["session"]["sessionId"]
         item_id = started["next"]["itemId"]
         ecg_ref = started["next"]["item"]["ecg_ref"]
-        internal_item = clinical_item_store.get_item(item_id)
+        internal_item = clinical_item_store.get_item(
+            store.get_shift_session(session_id)["pendingItemId"]
+        )
         assert internal_item is not None
         ecg_id = internal_item.ecg_id
         assert "tutorContext" not in started
@@ -266,8 +268,8 @@ def test_clinical_tutor_context_is_postcommit_owner_bound_and_key_safe(monkeypat
         assert "serverContext" not in tutor.json()
 
         context = captured["serverContext"]
-        item = clinical_item_store.get_item(item_id)
-        stored = store.get_shift_answer(session_id, item_id)
+        item = internal_item
+        stored = store.get_shift_answer(session_id, internal_item.item_id)
         assert captured["profile"]["learnerId"] == owner_user["userId"]
         assert captured["casePacket"]["case_id"] == ecg_ref
         assert captured["casePacket"]["display_id"] != ecg_id
@@ -312,7 +314,9 @@ def test_clinical_tutor_context_is_postcommit_owner_bound_and_key_safe(monkeypat
         assert context["storedFeedback"]["score"] == stored["grade"]["score"]
         assert "invented_browser_answer" not in context["storedFeedback"]["correctObjectives"]
         if options:
-            selected = next(option.text for option in item.options if option.id == options[0]["id"])
+            # Public option references are intentionally opaque and preserve the
+            # authored option order for server-side remapping.
+            selected = item.options[0].text
             assert context["learnerAnswer"]["selectedResponse"] == selected
 
         raw_key_fields = {

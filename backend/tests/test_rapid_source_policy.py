@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+import hashlib
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,6 +12,12 @@ from app.assessment_contracts import rapid_tested_objective_manifest
 from app.fixtures import build_fixture_cases
 from app.ecg_capability import is_ecg_capability
 from app.ingest.leipzig import SURFACE_LEADS, WindowSpec, build_window_packet
+from app.ingest.dangerous_arrhythmia import (
+    FragmentSpec,
+    HeaderSummary,
+    SOURCE_FS as DANGEROUS_ARRHYTHMIA_FS,
+    build_fragment_packet,
+)
 from app.rapid_routes import _broad_corpus_selection, build_rapid_router
 from app.source_policy import packet_allows_learning_evidence, packet_mode_policy
 from app.storage import LearningStore
@@ -106,6 +113,20 @@ def _leipzig_case() -> dict:
         for lead in SURFACE_LEADS
     }
     return build_window_packet(spec, signal)
+
+
+def _single_lead_rhythm_case() -> dict:
+    spec = FragmentSpec(
+        relative_record_path="1_Dangerous_VFL_VF/frag/418_C_VF_277s_frag",
+        source_parent_record="418_C",
+        source_offset_text="277",
+        source_class="1_Dangerous_VFL_VF",
+        rhythm_code="VF",
+        header_sha256=hashlib.sha256(b"header").hexdigest(),
+        data_sha256=hashlib.sha256(b"waveform").hexdigest(),
+    )
+    header = HeaderSummary(DANGEROUS_ARRHYTHMIA_FS, 250, "1")
+    return build_fragment_packet(spec, [0.0] * header.sample_count, header)
 
 
 def _point(packet: dict) -> dict:
@@ -257,6 +278,56 @@ def test_broad_selection_rejects_forged_and_research_only_new_sources() -> None:
         FakeRepo([forged, research, mimic_waveform]), set(), "forged-only"
     )
     assert selection["case"] is None
+
+
+def test_normalized_future_rhythm_source_requires_runtime_and_mastery_promotion() -> None:
+    runtime_locked = _leipzig_case()
+    runtime_locked["current_student_serving_eligible"] = False
+    runtime_locked["educational_eligibility"]["currentRuntimeModeConnected"] = False
+    runtime_locked["educational_eligibility"]["masteryEvidenceEligible"] = False
+
+    mode_decision = packet_mode_policy(runtime_locked, "rapid")
+    assert mode_decision.allowed is False
+    assert "student serving" in mode_decision.reason
+
+    evidence_locked = _leipzig_case()
+    evidence_locked["educational_eligibility"]["masteryEvidenceEligible"] = False
+    assert packet_mode_policy(evidence_locked, "rapid").allowed is True
+    evidence_decision = packet_allows_learning_evidence(
+        evidence_locked,
+        "rapid",
+        "supraventricular_tachycardia",
+        "recognize",
+    )
+    assert evidence_decision.allowed is False
+    assert "mastery evidence" in evidence_decision.reason
+
+
+def test_reviewed_single_lead_rhythm_packet_is_shape_ready_but_promotion_gated() -> None:
+    packet = _single_lead_rhythm_case()
+    assert packet["waveform"]["leads"] == ["MLII"]
+    assert packet_mode_policy(packet, "rapid").allowed is False
+
+    promoted = deepcopy(packet)
+    promoted["current_student_serving_eligible"] = True
+    promoted["educational_eligibility"].update(
+        {
+            "eligibleModes": ["rapid"],
+            "currentRuntimeModeConnected": True,
+            "masteryEvidenceEligible": True,
+        }
+    )
+    assert packet_mode_policy(promoted, "rapid").allowed is True
+    assert packet_allows_learning_evidence(
+        promoted,
+        "rapid",
+        "ventricular_fibrillation",
+        "recognize",
+    ).allowed is True
+
+    malformed = deepcopy(promoted)
+    malformed["waveform"]["leads"] = ["not-a-reviewed-ecg-channel"]
+    assert packet_mode_policy(malformed, "rapid").allowed is False
 
 
 def test_leipzig_exact_rapid_recognition_contract_is_admitted(tmp_path) -> None:

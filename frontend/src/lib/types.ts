@@ -11,7 +11,8 @@ export type WaveformScope =
   | { kind: "guided"; lessonId: string }
   | { kind: "training"; campaignId: string }
   | { kind: "rapid"; roundId: string }
-  | { kind: "clinical"; sessionId: string };
+  | { kind: "clinical"; sessionId: string }
+  | { kind: "review"; sessionRef: string; attemptIndex: number };
 
 export type ConceptConfidence = {
   score: number;
@@ -125,10 +126,14 @@ export type RapidRound = {
   roundId: string;
   learnerId: string;
   pace: "ward" | "emergency" | "untimed";
+  contractVersion?: "legacy-v1" | "mixed-v2";
+  practiceMode?: "adaptive" | "mixed" | "emergency";
+  questionDepth?: "quick" | "focused" | "complete";
   length: number;
   assessmentScope: "full_read" | "dominant_finding";
   focusConcept: string | null;
   focusSubskill: string | null;
+  receiptConcept: string | null;
   contextKey: string;
   exclusions: string[];
   servedCount: number;
@@ -149,6 +154,53 @@ export type RapidEvidenceReceipt = {
   correct?: boolean;
   evidenceLevel: string;
   reason?: string;
+};
+
+export type RapidTaskOption = {
+  id: string;
+  label: string;
+};
+
+export type RapidTaskPrompt = {
+  id: string;
+  type:
+    | "single_choice"
+    | "multiple_choice"
+    | "short_text"
+    | "short_answer"
+    | "fill_in"
+    | "numeric"
+    | "numeric_fill_in"
+    | "matching"
+    | "trace_point"
+    | "point_localization"
+    | "trace_region"
+    | "full_interpretation";
+  prompt: string;
+  options?: RapidTaskOption[];
+  unit?: string | null;
+  minValue?: number | null;
+  maxValue?: number | null;
+  step?: number | null;
+  responseLabel?: string | null;
+  placeholder?: string | null;
+  bloomLevel?: "remember" | "understand" | "apply" | "analyze" | "evaluate" | "create" | string;
+  topicId?: string | null;
+  objectiveId?: string | null;
+  skillId?: string | null;
+  subskill?: string | null;
+  required?: boolean;
+};
+
+export type RapidTaskPacket = {
+  version: string;
+  display: {
+    kind: "twelve_lead" | "rhythm_strip" | "lead_subset" | "single_beat" | "serial_compare";
+    leads?: string[];
+    label?: string | null;
+  };
+  estimatedSeconds?: number | null;
+  tasks: RapidTaskPrompt[];
 };
 
 export type RapidRoundAnswer = {
@@ -172,6 +224,7 @@ export type RapidRoundPayload = {
     packet: CasePacket;
     startedAt?: string | null;
     deadlineAt?: string | null;
+    taskPacket?: RapidTaskPacket | null;
     answer?: RapidRoundAnswer;
   };
   results: Array<Record<string, unknown>>;
@@ -182,6 +235,15 @@ export type RapidRoundPayload = {
   replay?: boolean;
   selectionReason?: string;
   targetObjectives?: string[];
+  rhythmSupplement?: {
+    available: boolean;
+    count: number;
+    targetCounts: Record<string, number>;
+    runtimeScope?: string;
+    singleLead?: string;
+    algorithmVersion?: string;
+    managementQuestionsFormativeOnly?: boolean;
+  };
 };
 
 export type TrainingPhase = "target" | "mimic" | "negative" | "transfer";

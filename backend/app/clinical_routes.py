@@ -17,8 +17,9 @@ from pydantic import BaseModel, Field
 from .auth import SESSION_COOKIE_NAME
 from .clinical import shift
 from .clinical import integrity as clinical_integrity
-from .clinical.item_reference import public_item_reference
+from .clinical.item_reference import public_item_reference, public_option_reference
 from .clinical.real_items import (
+    AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT,
     CLINICAL_FAMILY_BY_SCENARIO,
     REAL_ECGS_BY_SCENARIO,
     normalized_scenario_signature,
@@ -31,6 +32,7 @@ from .ecg_capability import (
     issue_ecg_capability,
     matches_ecg_capability,
 )
+from .learning_sessions import issue_learning_session_ref
 
 PacketProvider = Callable[[str], dict[str, Any] | None]
 WaveformProvider = Callable[..., dict[str, Any] | None]
@@ -75,11 +77,13 @@ def build_clinical_router(
     waveform_provider: WaveformProvider | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/clinical", tags=["clinical-decisions"])
-    capability_secret = get_settings().adaptive_plan_context_secret
+    settings = get_settings()
+    capability_secret = settings.adaptive_plan_context_secret
+    review_session_secret = settings.registration_rate_limit_secret
 
     def reference_maps(
         session: dict[str, Any],
-    ) -> tuple[dict[str, str], set[str]]:
+    ) -> tuple[dict[str, str], dict[str, str]]:
         """Rebuild public references from durable owner-scoped canonical state.
 
         Nothing here is decoded from a browser reference.  This also keeps
@@ -88,7 +92,7 @@ def build_clinical_router(
         deterministic reference at the response boundary.
         """
 
-        item_ids = {
+        item_candidates = {
             str(value)
             for value in (
                 *(session.get("served") or []),
@@ -103,16 +107,26 @@ def build_clinical_router(
         answers = store.get_shift_answers(str(session["sessionId"]))
         for answer in answers:
             if answer.get("itemId"):
-                item_ids.add(str(answer["itemId"]))
+                item_candidates.add(str(answer["itemId"]))
             if answer.get("ecgId"):
                 canonical_ids.add(str(answer["ecgId"]))
 
-        for item_id in tuple(item_ids):
-            item = item_store.get_item(item_id)
+        learner_id = str(session["learnerId"])
+        session_id = str(session["sessionId"])
+        item_references: dict[str, str] = {}
+        for candidate in tuple(item_candidates):
+            item = item_store.get_item(candidate)
             if item is None:
                 continue
-            item_ids.add(str(item.item_id))
-            item_ids.add(public_item_reference(str(item.item_id)))
+            canonical_item_id = str(item.item_id)
+            reference = public_item_reference(
+                canonical_item_id,
+                learner_id=learner_id,
+                session_id=session_id,
+            )
+            item_references[candidate] = reference
+            item_references[canonical_item_id] = reference
+            item_references[reference] = reference
             canonical_ids.add(str(item.ecg_id))
             if item.prior_ecg_id:
                 canonical_ids.add(str(item.prior_ecg_id))
@@ -127,12 +141,44 @@ def build_clinical_router(
             )
             for canonical_id in canonical_ids
         }
-        return references, item_ids
+        return references, item_references
 
     def public_payload(session: dict[str, Any], value: Any) -> Any:
         """Remove canonical ECG/item identifiers from a Clinical response."""
 
-        ecg_references, item_ids = reference_maps(session)
+        ecg_references, item_references = reference_maps(session)
+        learner_id = str(session["learnerId"])
+        session_id = str(session["sessionId"])
+
+        def item_reference(value: Any) -> str | None:
+            if value is None:
+                return None
+            text = str(value)
+            existing = item_references.get(text)
+            if existing is not None:
+                return existing
+            item = item_store.get_item(text)
+            if item is None:
+                return None
+            reference = public_item_reference(
+                str(item.item_id),
+                learner_id=learner_id,
+                session_id=session_id,
+            )
+            item_references[text] = reference
+            item_references[str(item.item_id)] = reference
+            item_references[reference] = reference
+            return reference
+        review_session_ref = (
+            issue_learning_session_ref(
+                secret=review_session_secret,
+                learner_id=str(session["learnerId"]),
+                mode="clinical",
+                session_id=str(session["sessionId"]),
+            )
+            if session.get("status") == "complete" and int(session.get("position") or 0) > 0
+            else None
+        )
         ecg_key_names = {
             "ecg_id": "ecg_ref",
             "ecgId": "ecgRef",
@@ -193,7 +239,9 @@ def build_clinical_router(
                         if text in ecg_references:
                             result["ecgRef"] = ecg_references[text]
                         elif raw_value is not None:
-                            result[key] = public_item_reference(text)
+                            reference = item_reference(text)
+                            if reference is not None:
+                                result[key] = reference
                         continue
                     if key in {
                         "item_id",
@@ -201,13 +249,32 @@ def build_clinical_router(
                         "pendingItemId",
                         "feedbackItemId",
                     }:
-                        result[key] = (
-                            public_item_reference(str(raw_value))
-                            if raw_value is not None
-                            else None
-                        )
+                        result[key] = item_reference(raw_value)
                         continue
                     result[key] = visit(raw_value)
+                if (
+                    review_session_ref is not None
+                    and child.get("status") == "complete"
+                    and child.get("sessionId") == session.get("sessionId")
+                    and int(child.get("answered") or 0) > 0
+                    and "performanceDomains" in child
+                ):
+                    result["reviewSessionRef"] = review_session_ref
+                    result["reviewHref"] = f"/home/review/{review_session_ref}"
+                attempt_index = child.get("attemptIndex")
+                if (
+                    review_session_ref is not None
+                    and child.get("reviewAvailable") is True
+                    and isinstance(attempt_index, int)
+                    and attempt_index > 0
+                ):
+                    result["reviewHref"] = (
+                        f"/home/review/{review_session_ref}/attempt/{attempt_index}"
+                    )
+                    result["replayHref"] = (
+                        f"/learning/sessions/{review_session_ref}/attempts/"
+                        f"{attempt_index}/replay"
+                    )
                 return result
             if isinstance(child, list):
                 return [visit(entry) for entry in child]
@@ -216,8 +283,8 @@ def build_clinical_router(
             if isinstance(child, str):
                 if child in ecg_references:
                     return ecg_references[child]
-                if child in item_ids:
-                    return public_item_reference(child)
+                if child in item_references:
+                    return item_references[child]
             return child
 
         return visit(value)
@@ -234,15 +301,56 @@ def build_clinical_router(
             for value in (session.get("pendingItemId"), session.get("feedbackItemId"))
             if value
         )
+        learner_id = str(session["learnerId"])
+        session_id = str(session["sessionId"])
         for candidate in dict.fromkeys(str(value) for value in candidates):
-            if hmac.compare_digest(public_item_reference(candidate), supplied):
+            item = item_store.get_item(candidate)
+            if item is None:
+                continue
+            reference = public_item_reference(
+                str(item.item_id),
+                learner_id=learner_id,
+                session_id=session_id,
+            )
+            if hmac.compare_digest(reference, supplied):
                 return candidate
         # Preserve the ordinary not-pending response without ever accepting a
         # diagnosis-bearing internal id supplied by the browser.
         return "invalid-clinical-item-reference"
 
-    def public_pending(value: Any) -> str | None:
-        return public_item_reference(str(value)) if value else None
+    def submitted_answer(
+        session: dict[str, Any], item_id: str, answer: ClinicalAnswer
+    ) -> ClinicalAnswer:
+        """Resolve only this pending item's scoped option handle."""
+
+        supplied = answer.selected_option_id
+        if supplied is None:
+            return answer
+        item = item_store.get_item(item_id)
+        if item is None:
+            return answer.model_copy(
+                update={"selected_option_id": "invalid-clinical-option-reference"}
+            )
+        learner_id = str(session["learnerId"])
+        session_id = str(session["sessionId"])
+        for option in item.options:
+            reference = public_option_reference(
+                str(item.item_id),
+                str(option.id),
+                learner_id=learner_id,
+                session_id=session_id,
+            )
+            if hmac.compare_digest(reference, supplied):
+                return answer.model_copy(update={"selected_option_id": option.id})
+        return answer.model_copy(
+            update={"selected_option_id": "invalid-clinical-option-reference"}
+        )
+
+    def public_pending(session: dict[str, Any], value: Any) -> str | None:
+        if not value:
+            return None
+        _, item_references = reference_maps(session)
+        return item_references.get(str(value))
 
     def owned_session(
         session_id: str, authorization: str | None, session_cookie: str | None
@@ -282,12 +390,24 @@ def build_clinical_router(
         """
 
         counts: dict[str, int] = {}
+        seen_ecgs: set[tuple[str, str]] = set()
         for item in items:
             # Status is an audit surface, so it must fail closed just like
             # serving and grading if a stale fixture row enters the pool.
-            packet = assert_learner_item_provenance(item, packet_provider)
-            source = str((packet or {}).get("source") or "").strip()
-            if source:
+            current_packet = assert_learner_item_provenance(item, packet_provider)
+            packets = [current_packet]
+            if item.prior_ecg_id:
+                prior_packet = packet_provider(item.prior_ecg_id)
+                if prior_packet is None:
+                    raise RuntimeError("Clinical comparison ECG packet is missing.")
+                packets.append(prior_packet)
+            for packet in packets:
+                source = str((packet or {}).get("source") or "").strip()
+                case_id = str((packet or {}).get("case_id") or "").strip()
+                identity = (source, case_id)
+                if not source or not case_id or identity in seen_ecgs:
+                    continue
+                seen_ecgs.add(identity)
                 counts[source] = counts.get(source, 0) + 1
         return sorted(counts), dict(sorted(counts.items()))
 
@@ -313,6 +433,15 @@ def build_clinical_router(
         counts_by_setting = Counter(
             item.chips.setting or "unspecified" for item in served
         )
+        waveform_ids = {
+            str(ecg_id)
+            for item in served
+            for ecg_id in (item.ecg_id, item.prior_ecg_id)
+            if ecg_id
+        }
+        longitudinal_episode_count = sum(
+            1 for item in served if item.prior_ecg_id
+        )
         counts_by_situation_and_question_type: dict[str, dict[str, int]] = {}
         for situation in sorted(counts_by_situation):
             row = Counter(
@@ -322,7 +451,12 @@ def build_clinical_router(
         return {
             "counts": item_store.count_by_status(),
             "servingItemCount": len(served),
-            "distinctRealEcgs": len({item.ecg_id for item in served}),
+            "distinctRealEcgs": len(waveform_ids),
+            "longitudinalEpisodeCount": longitudinal_episode_count,
+            "authenticatedComparisonEcgs": len({
+                str(item.prior_ecg_id) for item in served if item.prior_ecg_id
+            }),
+            "longitudinalPairRegistrySize": len(AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT),
             "countsBySituation": dict(sorted(counts_by_situation.items())),
             "countsByQuestionType": dict(sorted(counts_by_question_type.items())),
             "countsBySituationAndQuestionType": counts_by_situation_and_question_type,
@@ -558,8 +692,9 @@ def build_clinical_router(
         session = owned_session(session_id, authorization, session_cookie)
         reject_abandoned(session, "accept an answer")
         item_id = submitted_item_id(session, body.itemId)
+        answer = submitted_answer(session, item_id, body.answer)
         result = shift.grade_and_record(
-            store, item_store, packet_provider, session_id, item_id, body.answer
+            store, item_store, packet_provider, session_id, item_id, answer
         )
         if result is None:
             raise HTTPException(status_code=404, detail="shift session or item not found")
@@ -569,7 +704,7 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_item_not_pending",
                     "message": "Only the current pending Clinical item can be answered.",
-                    "pendingItemId": public_pending(result.get("pendingItemId")),
+                    "pendingItemId": public_pending(session, result.get("pendingItemId")),
                 },
             )
         if result.get("error") == "context_not_revealed":
@@ -578,6 +713,14 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_context_not_revealed",
                     "message": "Commit the ECG-only first look before submitting the clinical decision.",
+                },
+            )
+        if result.get("error") == "phase_not_activated":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_decide_not_activated",
+                    "message": "The decision clock starts only after the revealed case and ECG viewer are ready.",
                 },
             )
         if result.get("error") == "stepwise_incomplete":
@@ -621,7 +764,7 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_item_not_pending",
                     "message": "Only the current pending Clinical item can activate a phase.",
-                    "pendingItemId": public_pending(result.get("pendingItemId")),
+                    "pendingItemId": public_pending(session, result.get("pendingItemId")),
                 },
             )
         if result.get("error") in {"phase_not_ready", "invalid_phase"}:
@@ -656,7 +799,7 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_item_not_pending",
                     "message": "Only the current pending Clinical item can reveal context.",
-                    "pendingItemId": public_pending(result.get("pendingItemId")),
+                    "pendingItemId": public_pending(session, result.get("pendingItemId")),
                 },
             )
         if result.get("error") == "first_look_required":
@@ -664,7 +807,7 @@ def build_clinical_router(
                 status_code=422,
                 detail={
                     "code": "clinical_first_look_required",
-                    "message": "A finding category and confidence are required before context reveal.",
+                    "message": "Choose a first-look finding category before revealing the case question.",
                 },
             )
         if result.get("error") == "phase_not_activated":
@@ -714,6 +857,14 @@ def build_clinical_router(
                 detail={
                     "code": "clinical_context_not_revealed",
                     "message": "Commit the ECG-only first look before the stepwise decision.",
+                },
+            )
+        if error == "phase_not_activated":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clinical_decide_not_activated",
+                    "message": "The decision clock starts only after the revealed case and ECG viewer are ready.",
                 },
             )
         if error in {"not_stepwise", "invalid_step", "step_locked", "step_out_of_order"}:

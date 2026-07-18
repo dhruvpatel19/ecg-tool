@@ -91,6 +91,51 @@ def test_adaptive_plan_coach_explains_verified_queue_without_scoring_or_viewer_a
     assert "cannot score" in " ".join(data["uncertaintyWarnings"]).lower()
 
 
+def test_mock_clinical_shift_debrief_uses_only_deterministic_evidence() -> None:
+    raw = MockProvider().generate(
+        [{"role": "user", "content": "What should I work on next?"}],
+        {
+            "casePacket": None,
+            "mode": "practice",
+            "viewerState": {"activity": "clinical_shift_debrief"},
+            "serverOwnedContext": {
+                "kind": "clinical_shift_debrief",
+                "session": {"answered": 2, "lane": "ward"},
+                "debrief": {
+                    "priorityConcept": {
+                        "concept": "atrial_fibrillation",
+                        "label": "Atrial fibrillation",
+                        "correctCount": 1,
+                        "missedCount": 1,
+                    },
+                    "crossConceptBridge": {
+                        "primaryLabel": "Atrial fibrillation",
+                        "secondaryLabel": "Atrial flutter",
+                        "prompt": "Compare the atrial activity and ventricular response.",
+                    },
+                    "nextCaseProposal": {
+                        "label": "Atrial fibrillation",
+                        "reason": "A different reviewed ECG is available.",
+                    },
+                },
+            },
+        },
+    )
+    data = json.loads(raw)
+
+    assert "Situation:" in data["tutorMessage"]
+    assert "Behavior:" in data["tutorMessage"]
+    assert "Impact:" in data["tutorMessage"]
+    assert "Next step:" in data["tutorMessage"]
+    assert data["viewerActions"] == []
+    assert data["objectiveUpdates"] == []
+    assert data["citedEvidence"] == [
+        "For Atrial fibrillation, the record shows 1 supported application(s) and 1 decision(s) that needed revision.",
+        "Compare the atrial activity and ventricular response.",
+        "A different reviewed ECG is available.",
+    ]
+
+
 def test_adaptive_plan_coach_combines_priority_reason_with_curated_primary_guidance() -> None:
     guidance = curated_general_teaching("sinus_rhythm")
     assert guidance

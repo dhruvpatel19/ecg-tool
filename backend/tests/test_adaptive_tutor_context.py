@@ -12,7 +12,14 @@ import pytest
 
 from app import llm as llm_module
 from app import main as main_module
-from app.adaptive_tutor_context import CONTEXT_TTL, TUTOR_SCOPE, issue_adaptive_tutor_context
+from app.adaptive_tutor_context import (
+    CONTEXT_TTL,
+    TUTOR_SCOPE,
+    build_adaptive_tutor_context,
+    deterministic_adaptive_tutor_response,
+    enforce_adaptive_tutor_response,
+    issue_adaptive_tutor_context,
+)
 from app.config import Settings
 from app.main import app, settings, store
 
@@ -52,6 +59,197 @@ def test_production_adaptive_context_signing_requires_a_strong_secret() -> None:
         ).adaptive_plan_context_secret
         == "x" * 32
     )
+
+
+def test_adaptive_context_aligns_guided_priority_preferences_and_retention_timing() -> None:
+    plan = {
+        "generatedAt": "2026-07-16T12:00:00+00:00",
+        "explanation": "A confident miss puts a short concept rebuild first.",
+        "basis": {"planStage": "remediation", "baselineNeeded": False},
+        "preferenceContext": {
+            "trainingStage": "core_clerkship",
+            "primaryGoal": "clinical_reading",
+            "defaultSessionLength": 25,
+            "rapidPace": "ward",
+            "guidanceLevel": "minimal",
+            "reduceMotion": True,
+            "unrecognizedPreference": "must-not-project",
+        },
+        "primary": {
+            "caseConcept": "atrial_fibrillation",
+            "label": "Atrial Fibrillation",
+            "subskill": "recognize",
+            "reason": "One high-confidence miss supports a short rebuild.",
+            "eligibleDistinct": 20,
+            "independentAttempts": 3,
+            "independentMastery": 0.42,
+            "isDue": True,
+            "dueState": "overdue",
+            "overdueDays": 2.375,
+            "nextDueAt": "2026-07-14T03:00:00+00:00",
+            "stabilityDays": 4.5,
+            "lapses": 2,
+        },
+        "priorities": [],
+        "guidedRemediation": {
+            "mode": "guided",
+            "title": "Rebuild Atrial Fibrillation before the next check",
+            "purpose": "Use the authored rhythm scene before another check.",
+            "href": "/learn/tachyarrhythmias?scene=m06-s5",
+            "moduleId": "tachyarrhythmias",
+            "sceneId": "m06-s5",
+            "concept": "atrial_fibrillation",
+            "evidenceKind": "formative_guided",
+            "updatesIndependentMastery": False,
+            "beforeStageOrder": 1,
+            "reason": "One high-confidence miss supports a short rebuild.",
+        },
+        "stages": [{
+            "order": 1,
+            "mode": "rapid",
+            "title": "Check Atrial Fibrillation · independent recognition",
+            "purpose": "Use a new eligible ECG.",
+            "suggestedLength": 25,
+            "receiptConcept": "atrial_fibrillation",
+            "receiptSubskill": "recognize",
+        }],
+        "integration": None,
+        "clinicalApplication": None,
+    }
+
+    context = build_adaptive_tutor_context(plan)
+
+    assert context["preferenceContext"] == {
+        "trainingStage": "core_clerkship",
+        "primaryGoal": "clinical_reading",
+        "defaultSessionLength": 25,
+        "rapidPace": "ward",
+        "guidanceLevel": "minimal",
+    }
+    assert context["primary"] == {
+        "concept": "atrial_fibrillation",
+        "label": "Atrial Fibrillation",
+        "subskill": "recognize",
+        "reason": "One high-confidence miss supports a short rebuild.",
+        "eligibleDistinct": 20,
+        "independentAttempts": 3,
+        "independentMastery": 0.42,
+        "isDue": True,
+        "dueState": "overdue",
+        "overdueDays": 2.375,
+        "nextDueAt": "2026-07-14T03:00:00+00:00",
+        "stabilityDays": 4.5,
+    }
+    assert context["guidedRemediation"] == {
+        "mode": "guided",
+        "title": "Rebuild Atrial Fibrillation before the next check",
+        "purpose": "Use the authored rhythm scene before another check.",
+        "moduleId": "tachyarrhythmias",
+        "sceneId": "m06-s5",
+        "concept": "atrial_fibrillation",
+        "evidenceKind": "formative_guided",
+        "updatesIndependentMastery": False,
+        "beforeStageOrder": 1,
+        "reason": "One high-confidence miss supports a short rebuild.",
+    }
+    assert context["verifiedDestinations"][0] == {
+        "kind": "guided_remediation",
+        "title": "Rebuild Atrial Fibrillation before the next check",
+        "mode": "guided",
+        "evidenceKind": "formative_guided",
+    }
+    assert context["recommendedDestination"] == context["verifiedDestinations"][0]
+    assert "href" not in json.dumps(context)
+    assert context["governance"]["calendarWritesAllowed"] is False
+    assert context["governance"]["preferenceWritesAllowed"] is False
+    assert context["governance"]["retentionTimingReadOnly"] is True
+
+    deterministic = deterministic_adaptive_tutor_response(context)
+    assert deterministic["suggestedNextStep"] == context["guidedRemediation"]["title"]
+
+    provider_response = {
+        "tutorMessage": "The independent check follows the authored rebuild.",
+        "feedback": "The scheduler remains authoritative.",
+        "viewerActions": [],
+        "objectiveUpdates": [],
+        "misconceptions": [],
+        "uncertaintyWarnings": [],
+        "suggestedNextStep": context["prescribedStages"][0]["title"],
+        "socraticQuestion": "Which discriminator will you carry forward?",
+        "citedEvidence": [],
+        "onLessonTopic": True,
+    }
+    enforced = enforce_adaptive_tutor_response(provider_response, context)
+    assert enforced["tutorMessage"] == provider_response["tutorMessage"]
+    assert enforced["suggestedNextStep"] == context["guidedRemediation"]["title"]
+    assert enforced["objectiveUpdates"] == []
+    assert enforced["viewerActions"] == []
+
+
+def test_adaptive_context_keeps_the_first_scheduler_stage_recommended_without_guided_remediation() -> None:
+    plan = {
+        "generatedAt": "2026-07-16T12:00:00+00:00",
+        "explanation": "The verified scheduler selected a fresh recognition check.",
+        "basis": {"planStage": "practice", "baselineNeeded": False},
+        "primary": {
+            "caseConcept": "atrial_fibrillation",
+            "label": "Atrial Fibrillation",
+            "subskill": "recognize",
+            "reason": "Recognition is due for review.",
+        },
+        "priorities": [],
+        "guidedRemediation": None,
+        "stages": [
+            {
+                "order": 1,
+                "mode": "rapid",
+                "title": "Check Atrial Fibrillation · independent recognition",
+                "purpose": "Use a new eligible ECG.",
+                "suggestedLength": 10,
+                "receiptConcept": "atrial_fibrillation",
+                "receiptSubskill": "recognize",
+            },
+            {
+                "order": 2,
+                "mode": "train",
+                "title": "Build Atrial Fibrillation discrimination",
+                "purpose": "Contrast close rhythm alternatives.",
+                "suggestedLength": 10,
+                "receiptConcept": "atrial_fibrillation",
+                "receiptSubskill": "discriminate",
+            },
+        ],
+        "integration": None,
+        "clinicalApplication": {
+            "title": "Apply Atrial Fibrillation in a patient-care decision",
+            "purpose": "Transfer the pattern into context.",
+            "concept": "atrial_fibrillation",
+            "subskill": "apply_in_context",
+            "evidenceKind": "formative_application",
+            "reason": "A matching case is available.",
+        },
+    }
+
+    context = build_adaptive_tutor_context(plan)
+
+    assert context["recommendedDestination"] == context["verifiedDestinations"][0]
+    assert context["recommendedDestination"]["title"] == plan["stages"][0]["title"]
+    response = enforce_adaptive_tutor_response(
+        {
+            "tutorMessage": "Both destinations are available in the verified plan.",
+            "feedback": "Follow the scheduler order.",
+            "viewerActions": [],
+            "objectiveUpdates": [],
+            "misconceptions": [],
+            "uncertaintyWarnings": [],
+            "suggestedNextStep": plan["clinicalApplication"]["title"],
+            "socraticQuestion": "Which finding will you verify first?",
+            "citedEvidence": [],
+            "onLessonTopic": True,
+        },
+        context,
+    )
+    assert response["suggestedNextStep"] == plan["stages"][0]["title"]
 
 
 def test_adaptive_context_is_owner_bound_tamper_evident_and_time_bounded() -> None:
@@ -277,9 +475,13 @@ def test_adaptive_response_guard_preserves_explanation_with_verified_destination
         assert context["serverOwnedContext"]["governance"] == {
             "source": "verified_competency_scheduler",
             "chatCanWriteMastery": False,
+            "calendarWritesAllowed": False,
+            "preferenceWritesAllowed": False,
+            "retentionTimingReadOnly": True,
             "objectiveUpdatesAllowed": False,
             "viewerActionsAllowed": False,
             "nextStepMustMatchVerifiedDestination": True,
+            "recommendedNextStepIsSchedulerOwned": True,
         }
         return json.dumps(
             {

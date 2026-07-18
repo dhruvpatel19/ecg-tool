@@ -14,6 +14,9 @@ Terraform does **not** upload an image, corpus archive, license-restricted data,
 - one private Artifact Registry Docker repository whose disposable unique build
   tags are cleanup-managed while every deployment is pinned to a content digest;
   cleanup keeps the active digest plus explicitly declared recovery digests;
+- an optional GitHub Actions Workload Identity pool/provider and dedicated
+  image-publisher service account, restricted to `dhruvpatel19/ecg-tool` on
+  `main` or `release/*` and granted writer only on that one repository;
 - empty Secret Manager containers for the auth-rate-limit HMAC key and origin
   shared secret, a dedicated SMTP-password container when SMTP is configured,
   plus an optional LLM key container;
@@ -28,6 +31,14 @@ The VM identity receives only:
 - `roles/storage.objectCreator` and `roles/storage.objectViewer` conditionally under one backup prefix, so it can create/restore but cannot overwrite or delete backups;
 - repository-level `roles/artifactregistry.reader`;
 - secret-level `roles/secretmanager.secretAccessor` on the runtime secret containers;
+
+When `enable_github_actions_publisher = true`, the separate publisher identity
+receives only repository-level `roles/artifactregistry.writer`. Its service
+account impersonation binding admits the configured GitHub repository
+principal, while the OIDC provider independently rejects every repository other
+than `dhruvpatel19/ecg-tool` and every ref other than `refs/heads/main` or
+`refs/heads/release/*`. It receives no project-level role, runtime secret,
+Storage, Compute, or Terraform permission.
 
 The `cloud-platform` OAuth scope is intentionally broad because IAM is the permission boundary; there are no project-wide Storage, Artifact Registry, Logging, Monitoring, or Secret Manager grants.
 
@@ -50,6 +61,47 @@ Use Terraform 1.6+ and Application Default Credentials for an infrastructure ope
    the LLM API-key version. Configure the same origin value securely in the
    Vercel server environment.
 8. Set the image digest, corpus generation/SHA, DNS health hostname, ACME email, and `provision_instance = true`; plan and apply again.
+
+## Optional keyless GitHub image publisher
+
+The manual `.github/workflows/publish-backend.yml` workflow can authenticate
+without a service-account key. Set these non-secret Terraform inputs before a
+reviewed foundation plan. This follows Google Cloud's
+[deployment-pipeline federation guidance](https://cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines)
+and the pinned
+[`google-github-actions/auth` service-account federation pattern](https://github.com/google-github-actions/auth#workload-identity-federation-through-a-service-account):
+
+```hcl
+enable_github_actions_publisher = true
+github_actions_repository       = "dhruvpatel19/ecg-tool"
+```
+
+`github_actions_repository` is deliberately validated against that exact
+repository. A rename, transfer, or migration therefore requires an explicit
+reviewed code change instead of a quiet tfvars override. Enabling the publisher
+also fails planning unless `artifact_repository_id = "ecg-tool-backend"`.
+Review the plan before applying; an existing manually managed pool or service
+account must be imported rather than duplicated. Terraform enables the IAM
+Credentials and Security Token Service APIs but creates no key material.
+
+After apply, copy these Terraform outputs into GitHub **repository variables**,
+not Actions secrets:
+
+```bash
+gh variable set GCP_WORKLOAD_IDENTITY_PROVIDER \
+  --repo dhruvpatel19/ecg-tool \
+  --body "$(terraform output -raw github_actions_workload_identity_provider)"
+gh variable set GCP_DEPLOY_SERVICE_ACCOUNT \
+  --repo dhruvpatel19/ecg-tool \
+  --body "$(terraform output -raw github_actions_service_account_email)"
+```
+
+Also configure the existing non-secret repository variables
+`GCP_PROJECT_ID`, `GCP_REGION`, and `GCP_ARTIFACT_REPOSITORY`, and retain the
+reviewer-protected `backend-release` environment. The provider condition and
+repository-scoped IAM are the cloud boundary; the workflow additionally
+requires a protected `main` or `release/*` ref and successful CI for the exact
+commit. The two outputs are `null` while the optional publisher is disabled.
 
 The checked demo example uses one `e2-small` VM with 20 GiB standard boot and
 data disks in `us-east1`. It retains the complete corpus, durable SQLite state,

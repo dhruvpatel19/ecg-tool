@@ -18,6 +18,14 @@ from typing import Any
 from .config import Settings
 from .ontology import PRACTICE_GROUPS
 from .schemas import LEADS
+from .rapid_rhythm_supplement import (
+    RUNTIME_LEAD,
+    RUNTIME_MANIFEST_NAME,
+    RUNTIME_MAPPING_VERSION,
+    RUNTIME_SCOPE,
+    RapidRhythmSupplement,
+    SUPPLEMENT_DIRECTORY,
+)
 from .source_policy import NEVER_LEARNER_SERVE_SOURCES, packet_mode_policy
 from .store import CaseStore, LocalWaveformStore
 
@@ -97,6 +105,22 @@ class CorpusRepository:
                 self.manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 self.manifest = {}
+        self.rapid_rhythm_supplement: RapidRhythmSupplement | None = None
+        self.rapid_rhythm_supplement_error: str | None = None
+        supplement_reference = self.manifest.get("rapidRhythmSupplement")
+        if supplement_reference is not None:
+            try:
+                if not isinstance(supplement_reference, dict):
+                    raise ValueError("supplement reference is not an object")
+                self.rapid_rhythm_supplement = RapidRhythmSupplement(
+                    self.root / SUPPLEMENT_DIRECTORY,
+                    expected=supplement_reference,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                # Keep liveness for rollback/diagnostics, but readiness below
+                # fails closed so a partially published supplement can never
+                # be silently ignored in production.
+                self.rapid_rhythm_supplement_error = type(exc).__name__
         self.status = {
             "active_source": "corpus",
             "fixture_fallback": False,
@@ -106,6 +130,11 @@ class CorpusRepository:
             "student_facing_count": self.store.student_facing_count(),
             "tier_distribution": self.store.tier_counts(),
             "manifest": self.manifest,
+            "rapid_rhythm_supplement_count": (
+                self.rapid_rhythm_supplement.count
+                if self.rapid_rhythm_supplement is not None
+                else 0
+            ),
             "requires_real_data": settings.require_real_data,
         }
         # Expensive packet-policy reconciliation happens once at process start,
@@ -117,6 +146,16 @@ class CorpusRepository:
         # of public practice-group counts once instead of reopening the 879 MiB
         # SQLite index for every `/concepts` request.
         self._concept_ab_count_cache = self.store.concept_ab_counts()
+        # The emergency-rhythm supplement is a separate, explicitly selected
+        # pool, but its reviewed recognition inventory must still be visible to
+        # objective coverage, the mastery planner, calendar suggestions, and
+        # coach grounding.  Keep broad ``candidates()`` isolated below; only
+        # publish the supplement's manifest-verified exact target counts here.
+        if self.rapid_rhythm_supplement is not None:
+            for concept_id, count in self.rapid_rhythm_supplement.target_counts.items():
+                self._concept_ab_count_cache[concept_id] = (
+                    int(self._concept_ab_count_cache.get(concept_id, 0)) + int(count)
+                )
         for group in PRACTICE_GROUPS:
             self._group_reliable_count_cached(
                 tuple(sorted(set(str(item) for item in group.get("concepts", []))))
@@ -132,7 +171,38 @@ class CorpusRepository:
     # --- case access ------------------------------------------------------------
 
     def get_case(self, case_id: str) -> dict[str, Any] | None:
-        return self.store.get_packet(case_id)
+        packet = self.store.get_packet(case_id)
+        if packet is not None:
+            return packet
+        if self.rapid_rhythm_supplement is not None:
+            return self.rapid_rhythm_supplement.get_case(case_id)
+        return None
+
+    def rapid_rhythm_candidates(
+        self, concept_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return only the explicit emergency-rhythm supplement pool."""
+
+        if self.rapid_rhythm_supplement is None:
+            return []
+        return self.rapid_rhythm_supplement.candidates(concept_id)
+
+    def rapid_rhythm_status(self) -> dict[str, Any]:
+        if self.rapid_rhythm_supplement is None:
+            return {
+                "available": False,
+                "count": 0,
+                "targetCounts": {},
+            }
+        return {
+            "available": True,
+            "count": self.rapid_rhythm_supplement.count,
+            "targetCounts": self.rapid_rhythm_supplement.target_counts,
+            "runtimeScope": "rapid_emergency_rhythm",
+            "singleLead": "MLII",
+            "algorithmVersion": "2025 AHA CPR and ECC",
+            "managementQuestionsFormativeOnly": True,
+        }
 
     def list_cases(
         self, concept: str | None = None, include_uncertain: bool = False, query: str | None = None,
@@ -174,7 +244,15 @@ class CorpusRepository:
 
     @lru_cache(maxsize=256)
     def _group_reliable_count_cached(self, concept_ids: tuple[str, ...]) -> int:
-        return self.store.distinct_case_count(list(concept_ids))
+        main_count = self.store.distinct_case_count(list(concept_ids))
+        supplement = getattr(self, "rapid_rhythm_supplement", None)
+        if supplement is None:
+            return main_count
+        supplemental_count = sum(
+            int(supplement.target_counts.get(concept_id, 0))
+            for concept_id in concept_ids
+        )
+        return main_count + supplemental_count
 
     def deployment_readiness(self) -> tuple[bool, str]:
         """Return the cached, fail-closed release-corpus capability verdict."""
@@ -188,6 +266,12 @@ class CorpusRepository:
         then one waveform per source/mode is actually decoded. This catches a
         valid-looking SQLite file whose sources or waveform paths are unusable.
         """
+        if self.manifest.get("rapidRhythmSupplement") is not None and (
+            self.rapid_rhythm_supplement is None
+            or self.rapid_rhythm_supplement_error is not None
+        ):
+            return False, "rapid_rhythm_supplement_invalid"
+
         try:
             total = self.store.count()
             source_counts = self.store.source_counts()
@@ -240,6 +324,8 @@ class CorpusRepository:
                 < int(self.settings.min_clinical_cases)
             ):
                 return False, "corpus_release_audit_mismatch"
+            if not self._rapid_rhythm_release_audit_matches(audit):
+                return False, "rapid_rhythm_release_audit_mismatch"
 
         eligible = {"training": 0, "rapid": 0}
         representatives: dict[tuple[str, str], str] = {}
@@ -270,6 +356,111 @@ class CorpusRepository:
             return False, "representative_waveform_unreadable"
         return True, "ready"
 
+    def _rapid_rhythm_release_audit_matches(self, audit: dict[str, Any]) -> bool:
+        """Pin an advertised supplement to its exhaustive publication audit."""
+
+        reference = self.manifest.get("rapidRhythmSupplement")
+        if reference is None:
+            return True
+        reader = self.rapid_rhythm_supplement
+        if not isinstance(reference, dict) or reader is None:
+            return False
+        supplement_audit = audit.get("rapidRhythmSupplement")
+        if not isinstance(supplement_audit, dict):
+            return False
+        waveform_audit = supplement_audit.get("waveforms") or {}
+        identity_audit = supplement_audit.get("identity") or {}
+        try:
+            supplement_root = self.root / SUPPLEMENT_DIRECTORY
+            runtime_path = supplement_root / RUNTIME_MANIFEST_NAME
+            source_manifest_path = supplement_root / "manifest.json"
+            database_path = supplement_root / "rhythm_streams.db"
+            expected_top_level = {
+                "manifest.json",
+                RUNTIME_MANIFEST_NAME,
+                "rhythm_streams.db",
+                "waveforms",
+            }
+            actual_top_level = {path.name for path in supplement_root.iterdir()}
+            contains_symlink = any(path.is_symlink() for path in supplement_root.rglob("*"))
+            contains_non_npy_waveform = any(
+                path.is_file() and path.suffix != ".npy"
+                for path in reader.waveform_root.rglob("*")
+            )
+            runtime_sha = hashlib.sha256(runtime_path.read_bytes()).hexdigest()
+            source_manifest_sha = hashlib.sha256(source_manifest_path.read_bytes()).hexdigest()
+            database_sha = hashlib.sha256(database_path.read_bytes()).hexdigest()
+            waveform_files_digest = hashlib.sha256()
+            waveform_paths = sorted(
+                reader.waveform_root.rglob("*.npy"),
+                key=lambda path: path.relative_to(reader.root).as_posix(),
+            )
+            for waveform_path in waveform_paths:
+                file_sha = hashlib.sha256(waveform_path.read_bytes()).hexdigest()
+                relative = waveform_path.relative_to(reader.root).as_posix()
+                waveform_files_digest.update(
+                    f"{file_sha}  {relative}\n".encode("ascii")
+                )
+            waveform_files_sha = waveform_files_digest.hexdigest()
+            audited_targets = {
+                str(target): int(count)
+                for target, count in (
+                    supplement_audit.get("learnerTargetCounts") or {}
+                ).items()
+            }
+            reference_targets = {
+                str(target): int(count)
+                for target, count in (reference.get("learnerTargetCounts") or {}).items()
+            }
+            count = int(reference.get("fragmentCount") or 0)
+            audited_count = int(supplement_audit.get("fragmentCount") or 0)
+            audited_schema = int(supplement_audit.get("schemaVersion") or 0)
+            audited_case_files = int(waveform_audit.get("caseFilesChecked") or 0)
+            audited_npy_files = int(waveform_audit.get("npyFilesFound") or 0)
+            audited_columns = int(waveform_audit.get("expectedColumns") or 0)
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+        return (
+            supplement_audit.get("present") is True
+            and supplement_audit.get("complete") is True
+            and audited_schema == 1
+            and supplement_audit.get("path") == SUPPLEMENT_DIRECTORY
+            and supplement_audit.get("sourceId") == reference.get("sourceId")
+            and reference.get("schemaVersion") == 1
+            and reference.get("path") == SUPPLEMENT_DIRECTORY
+            and reference.get("runtimeScope") == RUNTIME_SCOPE
+            and reference.get("mappingVersion") == RUNTIME_MAPPING_VERSION
+            and actual_top_level == expected_top_level
+            and contains_symlink is False
+            and contains_non_npy_waveform is False
+            and audited_count == count
+            and count == reader.count
+            and len(waveform_paths) == count
+            and audited_targets == reference_targets == reader.target_counts
+            and supplement_audit.get("runtimeManifestSha256") == runtime_sha
+            and reference.get("runtimeManifestSha256") == runtime_sha
+            and supplement_audit.get("sourceManifestSha256") == source_manifest_sha
+            and reader.runtime_manifest.get("sourceManifestSha256") == source_manifest_sha
+            and supplement_audit.get("databaseSha256") == database_sha
+            and supplement_audit.get("contentIndexSha256")
+            == reader.runtime_manifest.get("contentIndexSha256")
+            and isinstance(waveform_audit, dict)
+            and waveform_audit.get("complete") is True
+            and audited_case_files == count
+            and audited_npy_files == count
+            and audited_columns == 1
+            and waveform_audit.get("lead") == RUNTIME_LEAD
+            and waveform_audit.get("dtype") == "int16"
+            and waveform_audit.get("filesSha256") == waveform_files_sha
+            and isinstance(identity_audit, dict)
+            and identity_audit.get("opaqueOnly") is True
+            and identity_audit.get("rawPatientIdentifiersIncluded") is False
+            and identity_audit.get("rawRecordIdentifiersIncluded") is False
+            and supplement_audit.get("clinicalManagementEligible") is False
+            and supplement_audit.get("shockabilityClassificationEligible") is False
+            and supplement_audit.get("actionQuestionsFormativeOnly") is True
+        )
+
     # --- waveform access --------------------------------------------------------
 
     def get_waveform_window(
@@ -280,6 +471,16 @@ class CorpusRepository:
         end: float | None = None,
         max_points: int = 1200,
     ) -> dict[str, Any] | None:
+        if self.rapid_rhythm_supplement is not None:
+            supplemental = self.rapid_rhythm_supplement.get_case(case_id)
+            if supplemental is not None:
+                return self.rapid_rhythm_supplement.get_waveform_window(
+                    case_id,
+                    leads=leads,
+                    start=start,
+                    end=end,
+                    max_points=max_points,
+                )
         wanted = [lead for lead in (leads or LEADS) if lead in LEADS]
         data = self.waveforms.read(case_id, wanted)
         if not data:

@@ -1,9 +1,10 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const ROUTE_NAMES: Array<[string, string]> = [
+  ["/home", "Learning dashboard"],
   ["/dashboard", "Learning dashboard"],
   ["/learn", "Guided learning"],
   ["/train", "Focused practice"],
@@ -29,22 +30,31 @@ function routeName(pathname: string) {
 
 export function RouteAccessibility({ pageNameOverride }: { pageNameOverride?: string } = {}) {
   const pathname = usePathname();
-  const previousPathname = useRef(pathname);
+  const previousPathname = useRef<string | null>(null);
+  const [announcement, setAnnouncement] = useState("");
   const pageName = pageNameOverride ?? routeName(pathname);
 
   useEffect(() => {
-    if (previousPathname.current === pathname) return;
+    const routeChanged = previousPathname.current !== null && previousPathname.current !== pathname;
     previousPathname.current = pathname;
 
     const frame = window.requestAnimationFrame(() => {
-      document.getElementById("main-content")?.focus({ preventScroll: true });
+      setAnnouncement(`${pageName} loaded`);
+      if (routeChanged) {
+        document.getElementById("main-content")?.focus({ preventScroll: true });
+      }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [pathname]);
+  }, [pageName, pathname]);
 
   return (
-    <span className="sr-only" aria-live="polite" aria-atomic="true">
-      {pageName} loaded
+    <span
+      className="sr-only"
+      aria-live="polite"
+      aria-atomic="true"
+      data-route-accessibility-ready={announcement ? "true" : "false"}
+    >
+      {announcement}
     </span>
   );
 }

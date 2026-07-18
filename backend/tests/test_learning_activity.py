@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from app.learning_activity import ActivityCursorError, get_learning_activity
+from app.learning_sessions import issue_learning_session_ref
 
 
 SECRET = "activity-test-secret"
@@ -44,8 +45,25 @@ def _database() -> sqlite3.Connection:
             receipt_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE training_campaigns (
+            campaign_id TEXT PRIMARY KEY,
+            learner_id TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+        CREATE TABLE rapid_rounds (
+            round_id TEXT PRIMARY KEY,
+            learner_id TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
+        CREATE TABLE clinical_shift_sessions (
+            session_id TEXT PRIMARY KEY,
+            learner_id TEXT NOT NULL,
+            status TEXT NOT NULL
+        );
         CREATE TABLE training_campaign_answers (
             id INTEGER PRIMARY KEY,
+            campaign_id TEXT NOT NULL DEFAULT '',
+            ordinal INTEGER NOT NULL DEFAULT 0,
             attempt_id INTEGER NOT NULL,
             receipt_json TEXT NOT NULL,
             integrity_status TEXT NOT NULL,
@@ -55,6 +73,7 @@ def _database() -> sqlite3.Connection:
         );
         CREATE TABLE rapid_round_answers (
             id INTEGER PRIMARY KEY,
+            round_id TEXT NOT NULL DEFAULT '',
             attempt_id INTEGER NOT NULL,
             receipts_json TEXT NOT NULL,
             integrity_status TEXT NOT NULL,
@@ -64,6 +83,7 @@ def _database() -> sqlite3.Connection:
         );
         CREATE TABLE clinical_shift_answers (
             id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL DEFAULT '',
             attempt_id INTEGER NOT NULL,
             receipts_json TEXT NOT NULL,
             response_json TEXT NOT NULL,
@@ -117,8 +137,14 @@ def _training_answer(
         ],
     }
     conn.execute(
-        "INSERT INTO training_campaign_answers VALUES (?, ?, ?, ?, ?, ?, ?)",
+        """
+        INSERT INTO training_campaign_answers (
+            id, campaign_id, ordinal, attempt_id, receipt_json,
+            integrity_status, response_json, grade_json, tutor_json
+        ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?)
+        """,
         (
+            row_id,
             row_id,
             attempt_id,
             json.dumps(receipt),
@@ -167,6 +193,26 @@ def test_activity_is_stably_paginated_and_answer_key_free() -> None:
         "learner-a",
     ):
         assert forbidden not in serialized
+
+
+def test_clinical_confidence_is_not_part_of_the_activity_contract() -> None:
+    conn = _database()
+    _attempt(conn, row_id=1, mode="clinical_decision")
+    conn.execute(
+        """
+        INSERT INTO clinical_shift_answers (
+            id, session_id, attempt_id, receipts_json, response_json, grade_json
+        ) VALUES (1, '', 1, '[]', '{}', '{}')
+        """
+    )
+    conn.commit()
+
+    page = get_learning_activity(
+        conn, "learner-a", secret=SECRET, mode="clinical"
+    )
+
+    assert len(page["items"]) == 1
+    assert page["items"][0]["confidence"] is None
 
 
 def test_cursor_is_tamper_resistant_owner_bound_and_filter_bound() -> None:
@@ -237,7 +283,43 @@ def test_guided_rows_are_projected_and_assessment_receipt_events_are_deduplicate
         "assistance": "assisted",
         "evidence": "formative",
         "reviewRecommended": True,
+        "review": None,
     }
+
+
+def test_guided_projection_preserves_every_valid_unique_subskill() -> None:
+    conn = _database()
+    conn.execute(
+        "INSERT INTO guided_learning_events VALUES "
+        "(1, 'learner-a', 'leads-vectors', .8, 4, 'unassisted', 1, 'axis_normal', "
+        "'[null, \"localize\", \"measure\", \"localize\", \"bad token\", "
+        "\"explain_mechanism\", 42]', 'guided', '[]', '{}', "
+        "'2026-07-13T13:00:00+00:00')"
+    )
+    conn.commit()
+
+    item = get_learning_activity(
+        conn, "learner-a", secret=SECRET, mode="guided"
+    )["items"][0]
+
+    assert item["subskill"] == "localize"
+    assert item["testedCompetencies"] == [
+        {
+            "objectiveId": "axis_normal",
+            "subskill": "localize",
+            "evidence": "formative",
+        },
+        {
+            "objectiveId": "axis_normal",
+            "subskill": "measure",
+            "evidence": "formative",
+        },
+        {
+            "objectiveId": "axis_normal",
+            "subskill": "explain_mechanism",
+            "evidence": "formative",
+        },
+    ]
 
 
 def test_legacy_incomplete_assessment_is_neutral() -> None:
@@ -271,8 +353,8 @@ def test_mode_filter_and_owner_isolation() -> None:
     _training_answer(conn, row_id=1, attempt_id=1)
     _attempt(conn, row_id=2, mode="rapid_practice")
     conn.execute(
-        "INSERT INTO rapid_round_answers VALUES "
-        "(1, 2, '[{\"concept\":\"sinus_rhythm\",\"subskill\":\"recognize\","
+        "INSERT INTO rapid_round_answers (id, round_id, attempt_id, receipts_json, integrity_status, response_json, grade_json, tested_manifest_json) VALUES "
+        "(1, '', 2, '[{\"concept\":\"sinus_rhythm\",\"subskill\":\"recognize\","
         "\"accepted\":true,\"correct\":false,\"evidenceLevel\":\"independent_transfer\"},"
         "{\"concept\":\"axis_normal\",\"subskill\":\"recognize\",\"accepted\":true,"
         "\"correct\":false,\"evidenceLevel\":\"independent_transfer\"},"
@@ -306,3 +388,69 @@ def test_mode_filter_and_owner_isolation() -> None:
         },
     ]
     assert all("learner-b" not in json.dumps(item) for item in rapid["items"])
+
+
+def test_partial_rapid_activity_links_exact_committed_attempts_with_opaque_refs() -> None:
+    conn = _database()
+    round_id = "private-partial-round"
+    conn.execute(
+        "INSERT INTO rapid_rounds VALUES (?, 'learner-a', 'abandoned')",
+        (round_id,),
+    )
+    receipt = json.dumps(
+        [
+            {
+                "concept": "atrial_fibrillation",
+                "subskill": "recognize",
+                "accepted": True,
+                "correct": True,
+                "evidenceLevel": "independent_transfer",
+            }
+        ]
+    )
+    for row_id, answer_id, occurred_at in (
+        (1, 10, "2026-07-13T12:00:00+00:00"),
+        (2, 20, "2026-07-13T12:01:00+00:00"),
+    ):
+        _attempt(
+            conn,
+            row_id=row_id,
+            learner="learner-a",
+            mode="rapid_practice",
+            occurred_at=occurred_at,
+        )
+        conn.execute(
+            """
+            INSERT INTO rapid_round_answers (
+                id, round_id, attempt_id, receipts_json, integrity_status,
+                response_json, grade_json, tested_manifest_json
+            ) VALUES (?, ?, ?, ?, 'atomic_v2', '{}', '{}', '{}')
+            """,
+            (answer_id, round_id, row_id, receipt),
+        )
+    conn.commit()
+
+    page = get_learning_activity(
+        conn, "learner-a", secret=SECRET, mode="rapid"
+    )
+    expected_ref = issue_learning_session_ref(
+        secret=SECRET,
+        learner_id="learner-a",
+        mode="rapid",
+        session_id=round_id,
+    )
+    assert [item["review"] for item in page["items"]] == [
+        {
+            "sessionRef": expected_ref,
+            "attemptIndex": 2,
+            "sessionStatus": "abandoned",
+        },
+        {
+            "sessionRef": expected_ref,
+            "attemptIndex": 1,
+            "sessionStatus": "abandoned",
+        },
+    ]
+    serialized = json.dumps(page)
+    assert round_id not in serialized
+    assert "learner-a" not in serialized

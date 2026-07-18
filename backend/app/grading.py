@@ -22,6 +22,27 @@ ANSWER_KEYWORDS = {
     "atrial_flutter": ["flutter"],
     "supraventricular_tachycardia": ["supraventricular tachycardia", "svt", "narrow complex tachycardia"],
     "wide_complex_tachycardia": ["wide complex tachycardia", "ventricular tachycardia", "vt"],
+    "ventricular_tachycardia": [
+        "ventricular tachycardia",
+        "monomorphic ventricular tachycardia",
+        "monomorphic vt",
+        "vtach",
+        "v tach",
+        "vt",
+    ],
+    "polymorphic_ventricular_tachycardia": [
+        "polymorphic ventricular tachycardia",
+        "polymorphic vt",
+        "torsades de pointes",
+        "torsades",
+    ],
+    "ventricular_flutter": ["ventricular flutter"],
+    "ventricular_fibrillation": [
+        "ventricular fibrillation",
+        "v fib",
+        "vfib",
+        "vf",
+    ],
     "bradycardia": ["brady"],
     "av_block_first_degree": ["first degree av block", "first-degree av block", "1st degree av block", "prolonged pr"],
     "av_block_second_degree_mobitz_i": ["mobitz i", "mobitz 1", "wenckebach"],
@@ -314,6 +335,10 @@ def grade_region_answer(
 
 
 _PRIORITY = [
+    "ventricular_fibrillation",
+    "ventricular_flutter",
+    "polymorphic_ventricular_tachycardia",
+    "ventricular_tachycardia",
     "atrial_fibrillation",
     "atrial_flutter",
     "right_bundle_branch_block",
@@ -381,11 +406,17 @@ def _core_expected_objectives(case: dict[str, Any], focus: str | None = None) ->
 # Prevents cross-field misfires (e.g. "normal" in the RATE field must not register
 # normal_ecg). The synthesis / free-text fields can express any concept.
 FIELD_CONCEPTS: dict[str, set[str] | None] = {
-    "rate": {"rate", "bradycardia", "supraventricular_tachycardia", "wide_complex_tachycardia"},
+    "rate": {
+        "rate", "bradycardia", "supraventricular_tachycardia",
+        "wide_complex_tachycardia", "ventricular_tachycardia",
+        "polymorphic_ventricular_tachycardia", "ventricular_flutter",
+    },
     "rhythm": {
         "sinus_rhythm", "atrial_fibrillation", "atrial_flutter",
         "supraventricular_tachycardia", "wide_complex_tachycardia", "paced_rhythm",
         "premature_ventricular_complex", "premature_atrial_complex",
+        "ventricular_tachycardia", "polymorphic_ventricular_tachycardia",
+        "ventricular_flutter", "ventricular_fibrillation",
     },
     "axis": {"axis_normal", "left_axis_deviation", "right_axis_deviation"},
     "intervals": {

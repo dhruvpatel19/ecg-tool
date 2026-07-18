@@ -188,7 +188,9 @@ def test_completed_shift_tutor_is_owner_bound_key_safe_and_ignores_browser_forge
         session_id = started["session"]["sessionId"]
         item_id = started["next"]["itemId"]
         ecg_ref = started["next"]["item"]["ecg_ref"]
-        internal_item = clinical_item_store.get_item(item_id)
+        internal_item = clinical_item_store.get_item(
+            store.get_shift_session(session_id)["pendingItemId"]
+        )
         assert internal_item is not None
 
         guessed = {
@@ -218,7 +220,6 @@ def test_completed_shift_tutor_is_owner_bound_key_safe_and_ignores_browser_forge
                 "itemId": item_id,
                 "answer": {
                     "firstLookFinding": "rate_or_rhythm",
-                    "firstLookConfidence": 3,
                 },
             },
         ).json()
@@ -233,6 +234,20 @@ def test_completed_shift_tutor_is_owner_bound_key_safe_and_ignores_browser_forge
             json={"itemId": item_id, "answer": answer},
         )
         assert graded.status_code == 200, graded.text
+        assert graded.json()["grade"]["calibrationEvent"] == {}
+        assert graded.json()["grade"]["firstLookAssessment"]["confidence"] is None
+        stored_answers = store.get_shift_answers(session_id)
+        assert len(stored_answers) == 1
+        stored = stored_answers[0]
+        assert stored["response"]["confidence"] is None
+        assert stored["response"]["first_look_confidence"] is None
+        assert stored["calibrationEvent"] is None
+        with store.connect() as conn:
+            stored_confidence = conn.execute(
+                "SELECT confidence FROM attempts WHERE id = ?",
+                (stored["attemptId"],),
+            ).fetchone()["confidence"]
+        assert stored_confidence == 0
         finished = owner.post(f"/clinical/shift/{session_id}/next")
         assert finished.status_code == 200
         assert finished.json()["done"] is True
@@ -241,6 +256,69 @@ def test_completed_shift_tutor_is_owner_bound_key_safe_and_ignores_browser_forge
         assert report_response.status_code == 200, report_response.text
         report = report_response.json()
         reference = report["tutorContext"]
+        review_session_ref = report["reviewSessionRef"]
+        assert review_session_ref.startswith("lsr1_")
+        assert report["reviewHref"] == f"/home/review/{review_session_ref}"
+        assert report["performanceDomains"]["confidenceCalibration"] == {
+            "assessed": 0,
+            "broadCategoryMatches": report["performanceDomains"][
+                "ecgRecognitionFirstLook"
+            ]["broadCategory"]["matched"],
+            "highConfidenceMismatches": 0,
+            "score": None,
+            "label": "No first-look confidence data",
+        }
+        assert len(report["caseReviews"]) == 1
+        case_review = report["caseReviews"][0]
+        assert set(case_review) == {
+            "attemptIndex",
+            "questionType",
+            "situation",
+            "score",
+            "correct",
+            "title",
+            "objectiveLabels",
+            "reviewAvailable",
+            "reviewHref",
+            "replayHref",
+        }
+        assert case_review["attemptIndex"] == 1
+        assert case_review["reviewAvailable"] is True
+        assert case_review["title"] == internal_item.stem
+        assert case_review["reviewHref"] == (
+            f"/home/review/{review_session_ref}/attempt/1"
+        )
+        assert case_review["replayHref"] == (
+            f"/learning/sessions/{review_session_ref}/attempts/1/replay"
+        )
+        assert internal_item.item_id not in _recursive_strings(report["caseReviews"])
+        assert internal_item.ecg_id not in _recursive_strings(report["caseReviews"])
+
+        saved_review = owner.get(f"/learning/sessions/{review_session_ref}")
+        assert saved_review.status_code == 200, saved_review.text
+        assert saved_review.json()["attempts"][0]["confidence"] is None
+        assert other.get(f"/learning/sessions/{review_session_ref}").status_code == 404
+        replay = owner.get(case_review["replayHref"])
+        assert replay.status_code == 200, replay.text
+        assert "confidence" not in replay.json()["submission"]
+        assert "firstLookConfidence" not in replay.json()["submission"]
+        assert "confidenceTimeMs" not in replay.json()["submission"]
+        assert other.get(case_review["replayHref"]).status_code == 404
+
+        profile = owner.get(f"/learners/{owner_user['userId']}")
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["recentAttempts"][0]["confidence"] is None
+        activity = owner.get("/learning/activity?mode=clinical&limit=20")
+        assert activity.status_code == 200, activity.text
+        assert activity.json()["items"][0]["confidence"] is None
+        exported = store.export_user_progress(owner_user["userId"])
+        assert exported is not None
+        exported_attempt = next(
+            row
+            for row in exported["records"]["attempts"]
+            if row["mode"] == "clinical_decision"
+        )
+        assert exported_attempt["confidence"] is None
         assert reference == {
             "contextId": reference["contextId"],
             "sessionId": session_id,

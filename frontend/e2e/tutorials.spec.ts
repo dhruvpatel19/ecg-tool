@@ -76,11 +76,11 @@ test.describe("legacy learner route compatibility", () => {
   });
 
   test("a legacy navigation adds no extra history entry", async ({ page }) => {
-    await page.goto("/dashboard");
+    await page.goto("/home");
     await page.goto("/tutorials?lesson=axis", { waitUntil: "domcontentloaded" });
     await expect(page).toHaveURL(/\/learn\/leads-vectors(?:[?#]|$)/);
 
     await page.goBack({ waitUntil: "domcontentloaded" });
-    await expect(page).toHaveURL(/\/dashboard(?:[?#]|$)/);
+    await expect(page).toHaveURL(/\/home(?:[?#]|$)/);
   });
 });

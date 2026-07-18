@@ -1,4 +1,11 @@
-export type LearningReturnSurface = "lesson" | "study_plan" | "profile" | "rapid" | "clinical";
+export type LearningReturnSurface =
+  | "lesson"
+  | "study_plan"
+  | "profile"
+  | "calendar"
+  | "rapid"
+  | "clinical"
+  | "session_review";
 
 export type LearningReturnDestination = {
   href: string;
@@ -11,9 +18,23 @@ const ALL_SURFACES: readonly LearningReturnSurface[] = [
   "lesson",
   "study_plan",
   "profile",
+  "calendar",
   "rapid",
   "clinical",
+  "session_review",
 ];
+
+function isCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
 
 function destination(
   href: string,
@@ -64,6 +85,51 @@ export function parseLearningReturn(
     }
     return params.length === 0 && allowed.has("profile")
       ? destination("/profile", "profile", "Return to My learning")
+      : null;
+  }
+
+  if (parsed.pathname === "/home") {
+    if (params.length === 0) {
+      return allowed.has("profile")
+        ? destination("/home", "profile", "Return to dashboard")
+        : null;
+    }
+    if (
+      params.length === 2
+      && params[0][0] === "panel"
+      && params[0][1] === "calendar"
+      && params[1][0] === "date"
+      && isCalendarDate(params[1][1])
+    ) {
+      return allowed.has("calendar")
+        ? destination(
+            `/home?panel=calendar&date=${params[1][1]}`,
+            "calendar",
+            "Return to calendar",
+          )
+        : null;
+    }
+    if (params.length !== 1 || params[0][0] !== "panel") return null;
+    if (params[0][1] === "plan") {
+      return allowed.has("study_plan")
+        ? destination("/home?panel=plan", "study_plan", "Return to study plan")
+        : null;
+    }
+    if (params[0][1] === "competencies" || params[0][1] === "activity") {
+      return allowed.has("profile")
+        ? destination(
+            `/home?panel=${params[0][1]}`,
+            "profile",
+            params[0][1] === "competencies" ? "Return to competencies" : "Return to activity",
+          )
+        : null;
+    }
+    return null;
+  }
+
+  if (/^\/home\/review\/[A-Za-z0-9_-]{1,160}$/.test(parsed.pathname)) {
+    return params.length === 0 && allowed.has("session_review")
+      ? destination(parsed.pathname, "session_review", "Return to session review")
       : null;
   }
 

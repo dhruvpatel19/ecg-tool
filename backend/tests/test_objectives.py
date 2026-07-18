@@ -101,3 +101,4 @@ def test_student_facing_objective_labels_preserve_clinical_acronyms() -> None:
     assert OBJECTIVES["normal_ecg"].label == "Normal ECG"
     assert OBJECTIVES["av_block_first_degree"].label == "AV Block First Degree"
     assert OBJECTIVES["st_depression"].label == "ST Depression"
+    assert OBJECTIVES["qt_interval"].label == "QT Interval"

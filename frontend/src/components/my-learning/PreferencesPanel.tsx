@@ -156,6 +156,7 @@ export function PreferencesPanel() {
   if (loading) {
     return (
       <section className={styles.loading} role="status" aria-label="Loading learning preferences">
+        <h2 id="preferences-heading" className="sr-only">Learning preferences</h2>
         <span />
         <span />
         <p>Loading your preferences…</p>
@@ -167,7 +168,7 @@ export function PreferencesPanel() {
     return (
       <section className={styles.loadError} role="alert">
         <Settings2 size={21} aria-hidden="true" />
-        <div><h2>Preferences are unavailable</h2><p>{error ?? "Your preferences could not be opened."}</p></div>
+        <div><h2 id="preferences-heading">Preferences are unavailable</h2><p>{error ?? "Your preferences could not be opened."}</p></div>
         <button className="button subtle" type="button" onClick={() => setRetryKey((value) => value + 1)}>Try again</button>
       </section>
     );
@@ -191,7 +192,7 @@ export function PreferencesPanel() {
         <div className={styles.stack}>
           <fieldset className={styles.card}>
             <legend>About your learning</legend>
-            <p className={styles.cardIntro}>A little context helps recommendations start at the right level.</p>
+            <p className={styles.cardIntro}>Your stage and goal break ties between suitable routes; completed practice remains the main signal.</p>
             <label className={styles.selectField} htmlFor="preference-training-stage">
               <span>Where are you in training?</span>
               <select

@@ -7,6 +7,7 @@ import { api, type AccountSession } from "@/lib/api";
 import { clearAuthenticatedBrowserState, useAuth } from "@/lib/auth";
 import { EarlierLearningPanel } from "./EarlierLearningPanel";
 import { EmailSecurityPanel } from "./EmailSecurityPanel";
+import { PreferencesPanel } from "@/components/my-learning/PreferencesPanel";
 import styles from "./account.module.css";
 
 type BusyAction = "password" | "other-sessions" | "all-sessions" | "export" | "delete" | null;
@@ -285,6 +286,10 @@ export default function AccountPage() {
 
       <EmailSecurityPanel />
       <EarlierLearningPanel />
+
+      <section id="learning-preferences" className={styles.learningPreferences} aria-labelledby="preferences-heading">
+        <PreferencesPanel />
+      </section>
 
       <section className={styles.section} aria-labelledby="password-heading">
         <div className={styles.sectionIntro}>

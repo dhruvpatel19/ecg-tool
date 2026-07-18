@@ -85,6 +85,11 @@
   box-shadow: var(--shadow-soft);
 }
 
+.learningPreferences {
+  margin-top: 14px;
+  scroll-margin-top: 24px;
+}
+
 .sectionIntro {
   display: flex;
   gap: 13px;

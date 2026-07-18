@@ -1425,6 +1425,7 @@ export default function TrainPage() {
                 medianBeats={packet?.ptbxl_plus.median_beats ?? null}
                 task={!result ? viewerTask : undefined}
                 onTaskEvidence={setViewerTaskEvidence}
+                onTaskReset={() => setViewerTaskEvidence(null)}
                 gradingMode="deferred"
               />
             ) : (

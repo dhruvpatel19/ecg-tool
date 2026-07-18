@@ -4,7 +4,6 @@ import {
   Activity,
   BookOpen,
   BrainCircuit,
-  ChartNoAxesCombined,
   Gauge,
   GraduationCap,
   LogOut,
@@ -70,8 +69,8 @@ export function Navigation() {
 
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
   const activeLearningRoute = modeLinks.find((link) => isActive(link.href));
-  const onProgress = isActive("/profile");
-  const onLegacyStudyPlan = isActive("/review");
+  const onLearningHome = isActive("/home") || isActive("/dashboard") || isActive("/profile") || isActive("/review");
+  const onAccount = isActive("/account");
 
   if (isPublicEntryPath(pathname)) {
     return (
@@ -89,7 +88,7 @@ export function Navigation() {
         </nav>
         <div className="public-nav-actions">
           {user ? (
-            <Link className="public-create" href="/dashboard">Open dashboard</Link>
+            <Link className="public-create" href="/home">Open dashboard</Link>
           ) : (
             <>
               <Link className="public-signin" href="/login">Sign in</Link>
@@ -106,7 +105,7 @@ export function Navigation() {
       className={`side-nav${activeLearningRoute ? " learning-route-nav" : ""}`}
       data-learning-route={activeLearningRoute?.short.toLowerCase() ?? undefined}
     >
-      <Link className="brand" href="/dashboard" aria-label="TRACE learning dashboard">
+      <Link className="brand" href="/home" aria-label="TRACE learning dashboard">
         <span className="brand-mark" aria-hidden="true">
           <Activity size={19} strokeWidth={2.2} />
         </span>
@@ -117,9 +116,15 @@ export function Navigation() {
       </Link>
 
       <nav className="nav-links" aria-label="Primary navigation">
-        <Link className={`nav-link nav-overview${isActive("/") ? " active" : ""}`} href="/" aria-current={isActive("/") ? "page" : undefined}>
+        <Link
+          className={`nav-link nav-overview${onLearningHome ? " active" : ""}`}
+          href="/home"
+          aria-label="Dashboard"
+          title="Dashboard"
+          aria-current={onLearningHome ? "page" : undefined}
+        >
           <Gauge size={18} aria-hidden="true" />
-          <span>Today</span>
+          <span className="nav-overview-label">Dashboard</span>
         </Link>
 
         <p className="nav-section-label">Learning modes</p>
@@ -135,20 +140,6 @@ export function Navigation() {
             </Link>
           );
         })}
-
-        <p className="nav-section-label nav-section-progress">Your learning</p>
-        <Link
-          className={`nav-link${onProgress || onLegacyStudyPlan ? " active" : ""}`}
-          href="/profile"
-          aria-label="My learning"
-          title="My learning"
-          aria-current={onProgress || onLegacyStudyPlan ? "page" : undefined}
-        >
-          <span className="nav-index">··</span>
-          <ChartNoAxesCombined size={18} aria-hidden="true" />
-          <span className="nav-long-label">My learning</span>
-          <span className="nav-short-label">Progress</span>
-        </Link>
       </nav>
 
       <div className="nav-account" aria-label="Account">
@@ -161,7 +152,13 @@ export function Navigation() {
               <span>{user.displayName || user.username}</span>
               <small>Student account</small>
             </span>
-            <Link className="nav-account-action icon-only" href="/account" title="Account security" aria-label="Account security">
+            <Link
+              className={`nav-account-action icon-only${onAccount ? " active" : ""}`}
+              href="/account"
+              title="Account security"
+              aria-label="Account security"
+              aria-current={onAccount ? "page" : undefined}
+            >
               <Settings size={15} aria-hidden="true" />
             </Link>
             <button

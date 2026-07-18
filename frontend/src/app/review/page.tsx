@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
 
 export default function LegacyStudyPlanPage() {
-  redirect("/profile?tab=plan");
+  redirect("/home?panel=plan");
 }

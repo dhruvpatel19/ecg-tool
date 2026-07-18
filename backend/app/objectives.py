@@ -12,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
+from .ingest.dangerous_arrhythmia import SOURCE_FS as DANGEROUS_ARRHYTHMIA_FS
 from .ingest.source_contract import KNOWN_SOURCES
 from .ontology import CONCEPTS, CONCEPT_BY_ID
 from .source_policy import packet_allows_learning_evidence
@@ -189,9 +190,13 @@ CLINICAL_APPLICATION_CONCEPTS = frozenset({
     "atrial_fibrillation",
     "av_block_third_degree",
     "bradycardia",
+    "left_anterior_fascicular_block",
     "left_ventricular_hypertrophy",
+    "myocardial_ischemia",
     "normal_ecg",
+    "qt_interval",
     "qtc_prolongation",
+    "right_bundle_branch_block",
     "supraventricular_tachycardia",
 })
 
@@ -206,13 +211,25 @@ CLINICAL_LOCALIZATION_CONCEPTS = frozenset({
     "st_depression",
 })
 
-# Unlike simulation-only objectives, WCT can become independently assessable
-# when an audited expert rhythm-stream source is actually connected.  The
-# registry definition therefore has no permanent hard lock; runtime availability
-# below fails closed until a qualifying packet exists.
+# Unlike simulation-only objectives, these rhythm families become independently
+# assessable only when an audited expert rhythm-stream source is present in the
+# active immutable release. The registry has no permanent hard lock, while
+# runtime availability still fails closed until a qualifying packet exists.
 DYNAMIC_SOURCE_UNAVAILABLE: dict[str, str] = {
     "wide_complex_tachycardia": (
         "No audited, learner-eligible expert wide-complex tachycardia rhythm-stream packet is connected."
+    ),
+    "ventricular_tachycardia": (
+        "No audited, learner-eligible expert ventricular-tachycardia rhythm fragment is connected."
+    ),
+    "polymorphic_ventricular_tachycardia": (
+        "No audited, learner-eligible expert polymorphic-ventricular-tachycardia rhythm fragment is connected."
+    ),
+    "ventricular_flutter": (
+        "No audited, learner-eligible expert ventricular-flutter rhythm fragment is connected."
+    ),
+    "ventricular_fibrillation": (
+        "No audited, learner-eligible expert ventricular-fibrillation rhythm fragment is connected."
     ),
 }
 
@@ -221,6 +238,7 @@ _SURFACE_12_LEADS = {"I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V
 
 class ObjectiveRepository(Protocol):
     def candidates(self, concept_id: str | None = None) -> list[dict[str, Any]]: ...
+    def rapid_rhythm_candidates(self, concept_id: str | None = None) -> list[dict[str, Any]]: ...
     def get_case(self, case_id: str) -> dict[str, Any] | None: ...
 
 
@@ -253,7 +271,11 @@ def audited_source_packet_supports_objective(packet: dict[str, Any] | None, obje
     descriptor = KNOWN_SOURCES.get(source)
     if not descriptor or descriptor.access != "open":
         return False
-    if "rhythm_stream" not in descriptor.educational_uses or "expert" not in descriptor.label_authority.casefold():
+    label_authority_text = descriptor.label_authority.casefold()
+    if (
+        "rhythm_stream" not in descriptor.educational_uses
+        or not any(marker in label_authority_text for marker in ("expert", "reviewed"))
+    ):
         return False
 
     case_id = str(packet.get("case_id") or "")
@@ -263,7 +285,11 @@ def audited_source_packet_supports_objective(packet: dict[str, Any] | None, obje
         return False
     source_record_id = str(identity.get("sourceRecordId") or "")
     patient_id = str(identity.get("patientId") or "")
-    if not source_record_id or not patient_id or case_id != f"{source}:{source_record_id}":
+    if (
+        not source_record_id
+        or (descriptor.patient_ids_available and not patient_id)
+        or case_id != f"{source}:{source_record_id}"
+    ):
         return False
     if (
         identity.get("sourceId") != source
@@ -292,6 +318,15 @@ def audited_source_packet_supports_objective(packet: dict[str, Any] | None, obje
         eligibility.get("educationalUse") != "rhythm_stream"
         or not ({"training", "rapid"} & eligible_modes)
         or not ({"recognize", "discriminate"} & objective_subskills)
+        or eligibility.get("clinicalCaseEligible") is not False
+        or eligibility.get("clinicalManagementEligible") is not False
+    ):
+        return False
+    if source == "ecg-fragment-dangerous-arrhythmia" and (
+        eligibility.get("masteryEvidenceEligible") is not True
+        or eligibility.get("shockabilityClassificationEligible") is not False
+        or eligibility.get("treatmentOrActionSequenceEligible") is not False
+        or eligibility.get("actionQuestionsFormativeOnly") is not True
     ):
         return False
 
@@ -301,9 +336,19 @@ def audited_source_packet_supports_objective(packet: dict[str, Any] | None, obje
     rhythm_label = source_labels.get("rhythm") or {}
     if not isinstance(rhythm_label, dict):
         return False
+    canonical_rhythm = str(
+        rhythm_label.get("canonicalConceptId")
+        or rhythm_label.get("canonicalRhythmId")
+        or ""
+    )
+    label_authority = str(
+        rhythm_label.get("authority")
+        or rhythm_label.get("labelAuthority")
+        or ""
+    )
     if (
-        rhythm_label.get("canonicalConceptId") != objective_id
-        or str(rhythm_label.get("authority") or "") != descriptor.label_authority
+        canonical_rhythm != objective_id
+        or label_authority != descriptor.label_authority
         or not str(rhythm_label.get("rhythmCode") or "")
     ):
         return False
@@ -335,21 +380,38 @@ def audited_source_packet_supports_objective(packet: dict[str, Any] | None, obje
     if not isinstance(waveform, dict):
         return False
     try:
-        waveform_ok = (
-            int(waveform.get("sampling_frequency") or 0) == 100
-            and float(waveform.get("duration_sec") or 0) == 10.0
-            and set(waveform.get("leads") or []) == _SURFACE_12_LEADS
-        )
-        source_fs = int(provenance.get("sourceSamplingFrequency") or 0)
+        sampling_frequency = int(waveform.get("sampling_frequency") or 0)
+        duration_sec = float(waveform.get("duration_sec") or 0)
+        leads = set(waveform.get("leads") or [])
         window_start = int(provenance["windowStartSample"])
         window_end = int(provenance["windowEndSample"])
-        episode_start = int(provenance["episodeStartSample"])
-        episode_end = int(provenance["episodeEndSample"])
-        episode_ok = (
-            source_fs > 0
-            and episode_start <= window_start < window_end <= episode_end
-            and window_end - window_start == round(10.0 * source_fs)
-        )
+        if source == "leipzig-heart-center":
+            episode_start = int(provenance["episodeStartSample"])
+            episode_end = int(provenance["episodeEndSample"])
+            waveform_ok = (
+                sampling_frequency == 100
+                and duration_sec == 10.0
+                and leads == _SURFACE_12_LEADS
+            )
+            source_fs = int(provenance.get("sourceSamplingFrequency") or 0)
+            episode_ok = (
+                source_fs > 0
+                and episode_start <= window_start < window_end <= episode_end
+                and window_end - window_start == round(10.0 * source_fs)
+            )
+        elif source == "ecg-fragment-dangerous-arrhythmia":
+            waveform_ok = (
+                sampling_frequency == DANGEROUS_ARRHYTHMIA_FS
+                and duration_sec == 2.0
+                and leads == {"MLII"}
+                and waveform.get("isSingleModifiedLimbLeadII") is True
+            )
+            episode_ok = (
+                window_start == 0
+                and window_end == round(duration_sec * sampling_frequency)
+            )
+        else:
+            return False
     except (KeyError, TypeError, ValueError):
         return False
     fingerprint = str(packet.get("signal_fingerprint") or "")
@@ -367,10 +429,17 @@ def audited_source_evidence(
         return (), ()
     case_ids: list[str] = []
     subskills: set[str] = set()
+    candidates: list[dict[str, Any]] = []
     try:
-        candidates = repo.candidates(objective_id)
+        candidates.extend(repo.candidates(objective_id))
     except Exception:
-        return (), ()
+        pass
+    specialist_provider = getattr(repo, "rapid_rhythm_candidates", None)
+    if callable(specialist_provider):
+        try:
+            candidates.extend(specialist_provider(objective_id))
+        except Exception:
+            pass
     for candidate in candidates:
         case_id = str(candidate.get("case_id") or "")
         if not case_id:
@@ -443,6 +512,7 @@ def _label(objective_id: str) -> str:
         "pac": "PAC",
         "pr": "PR",
         "qrs": "QRS",
+        "qt": "QT",
         "qtc": "QTc",
         "rvh": "RVH",
         "st": "ST",

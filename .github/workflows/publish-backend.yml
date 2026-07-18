@@ -26,8 +26,8 @@ jobs:
     outputs:
       image_ref: "${{ steps.publish.outputs.image_ref }}"
     env:
-      WIF_PROVIDER: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
-      DEPLOY_SERVICE_ACCOUNT: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}"
+      WIF_PROVIDER: "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+      DEPLOY_SERVICE_ACCOUNT: "${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}"
       PROJECT_ID: "${{ vars.GCP_PROJECT_ID }}"
       REGION: "${{ vars.GCP_REGION }}"
       REPOSITORY: "${{ vars.GCP_ARTIFACT_REPOSITORY }}"
@@ -60,11 +60,12 @@ jobs:
       - name: Validate release configuration
         run: |
           set -Eeuo pipefail
-          [[ -n "${WIF_PROVIDER}" ]] || { echo "Missing GCP_WORKLOAD_IDENTITY_PROVIDER secret." >&2; exit 1; }
-          [[ -n "${DEPLOY_SERVICE_ACCOUNT}" ]] || { echo "Missing GCP_DEPLOY_SERVICE_ACCOUNT secret." >&2; exit 1; }
+          [[ "${WIF_PROVIDER}" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]{4,32}/providers/[a-z0-9-]{4,32}$ ]] || { echo "Invalid GCP_WORKLOAD_IDENTITY_PROVIDER repository variable." >&2; exit 1; }
+          [[ "${DEPLOY_SERVICE_ACCOUNT}" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$ ]] || { echo "Invalid GCP_DEPLOY_SERVICE_ACCOUNT repository variable." >&2; exit 1; }
           [[ "${PROJECT_ID}" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || { echo "Invalid GCP_PROJECT_ID variable." >&2; exit 1; }
+          [[ "${DEPLOY_SERVICE_ACCOUNT}" == *"@${PROJECT_ID}.iam.gserviceaccount.com" ]] || { echo "GCP_DEPLOY_SERVICE_ACCOUNT must belong to GCP_PROJECT_ID." >&2; exit 1; }
           [[ "${REGION}" =~ ^[a-z]+-[a-z]+[0-9]$ ]] || { echo "Invalid GCP_REGION variable." >&2; exit 1; }
-          [[ "${REPOSITORY}" =~ ^[a-z][a-z0-9-]{2,62}$ ]] || { echo "Invalid GCP_ARTIFACT_REPOSITORY variable." >&2; exit 1; }
+          [[ "${REPOSITORY}" == "ecg-tool-backend" ]] || { echo "GCP_ARTIFACT_REPOSITORY must be ecg-tool-backend." >&2; exit 1; }
       - name: Authenticate to Google Cloud with Workload Identity
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:

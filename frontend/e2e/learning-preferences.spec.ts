@@ -26,6 +26,8 @@ test.describe("learning preferences", () => {
         },
       },
     }));
+    await page.route("**/api/backend/auth/sessions", (route) => route.fulfill({ json: { sessions: [] } }));
+    await page.route("**/api/backend/auth/guest-progress", (route) => route.fulfill({ json: { hasProgress: false, claimable: false } }));
   });
 
   test("persists strict choices and applies display preferences to the app shell", async ({ page }) => {
@@ -40,8 +42,8 @@ test.describe("learning preferences", () => {
       await route.fulfill({ json: stored });
     });
 
-    await page.goto("/profile?tab=preferences");
-    await expect(page.getByRole("tab", { name: "Preferences" })).toHaveAttribute("aria-selected", "true");
+    await page.goto("/account#learning-preferences");
+    await expect(page.getByRole("heading", { name: "Shape your learning workspace" })).toBeVisible();
     await page.getByLabel("Where are you in training?").selectOption("core_clerkship");
     await page.getByLabel("What are you working toward?").selectOption("clinical_reading");
     await page.getByRole("radio", { name: "25 ECGs" }).press("Space");
@@ -64,12 +66,12 @@ test.describe("learning preferences", () => {
       largeControls: true,
     }]);
 
-    // The client bridge reapplies saved presentation choices outside My
-    // Learning, then the URL-addressable panel hydrates the same record again.
+    // The client bridge reapplies saved presentation choices outside Account,
+    // then the URL-addressable Account section hydrates the same record again.
     await page.goto("/");
     await expect(page.locator("html")).toHaveAttribute("data-reduce-motion", "true");
     await expect(page.locator("html")).toHaveAttribute("data-large-controls", "true");
-    await page.goto("/profile?tab=preferences");
+    await page.goto("/account#learning-preferences");
     await expect(page.getByLabel("Where are you in training?")).toHaveValue("core_clerkship");
     await expect(page.getByLabel("What are you working toward?")).toHaveValue("clinical_reading");
     await expect(page.getByRole("radio", { name: "25 ECGs" })).toBeChecked();
@@ -77,25 +79,17 @@ test.describe("learning preferences", () => {
     await expect(page.locator("html")).toHaveAttribute("data-large-controls", "true");
   });
 
-  test("supports URL tabs, keyboard navigation, named groups, and WCAG A/AA", async ({ page }) => {
+  test("lives in Account with named groups and passes WCAG A/AA", async ({ page }) => {
     await page.route("**/api/backend/learning/preferences", (route) => route.fulfill({ json: defaults }));
-    await page.goto("/profile?tab=preferences");
-
-    const preferencesTab = page.getByRole("tab", { name: "Preferences" });
-    await expect(preferencesTab).toHaveAttribute("aria-selected", "true");
+    await page.goto("/account#learning-preferences");
+    await expect(page).toHaveURL(/\/account#learning-preferences$/);
     await expect(page.getByText("Preferences are private to your account and follow you across devices.")).toBeVisible();
     await expect(page.getByRole("group", { name: "About your learning" })).toBeVisible();
     await expect(page.getByRole("group", { name: "Practice defaults" })).toBeVisible();
     await expect(page.getByRole("group", { name: "Guided lesson support" })).toBeVisible();
     await expect(page.getByRole("group", { name: "Display and interaction" })).toBeVisible();
 
-    await preferencesTab.focus();
-    await page.keyboard.press("Home");
-    await expect(page).toHaveURL(/\/profile\?tab=overview$/);
-    await expect(page.getByRole("tab", { name: "Overview" })).toBeFocused();
-    await page.keyboard.press("End");
-    await expect(page).toHaveURL(/\/profile\?tab=preferences$/);
-    await expect(preferencesTab).toBeFocused();
+    await expect(page.getByRole("tab", { name: "Preferences" })).toHaveCount(0);
 
     const axe = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
@@ -111,7 +105,7 @@ test.describe("learning preferences", () => {
     await page.route("**/api/backend/learning/preferences", (route) => route.fulfill({
       json: { ...defaults, largeControls: true },
     }));
-    await page.goto("/profile?tab=preferences");
+    await page.goto("/account#learning-preferences");
     await expect(page.locator("html")).toHaveAttribute("data-large-controls", "true");
     await expect(page.getByRole("button", { name: "Save preferences" })).toBeVisible();
 
@@ -157,11 +151,11 @@ test.describe("learning preferences", () => {
     }));
 
     await page.goto("/practice");
-    await expect(page.getByRole("button", { name: "10 cases" })).toHaveAttribute("aria-pressed", "true");
-    await page.getByRole("button", { name: "5 cases" }).click();
-    await expect(page.getByRole("button", { name: "5 cases" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "10 patient cases" })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "5 patient cases" }).click();
+    await expect(page.getByRole("button", { name: "5 patient cases" })).toHaveAttribute("aria-pressed", "true");
 
     await page.goto("/practice?length=5");
-    await expect(page.getByRole("button", { name: "5 cases" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "5 patient cases" })).toHaveAttribute("aria-pressed", "true");
   });
 });

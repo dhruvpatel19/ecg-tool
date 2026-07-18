@@ -154,6 +154,34 @@ KNOWN_SOURCES: dict[str, SourceDescriptor] = {
         source_id="staff-iii", version="1.0.0", license_id="ODC-BY-1.0",
         access="open", label_authority="protocol-timed PTCA ischemia recordings",
         patient_ids_available=True, educational_uses=("acute_serial",),
+        dataset_title="STAFF III Database: ECGs Recorded During Acutely Induced Myocardial Ischemia",
+        license_name="Open Data Commons Attribution License (ODC-By) 1.0",
+        source_url="https://physionet.org/content/staffiii/1.0.0/",
+        doi="https://doi.org/10.13026/C20P4H",
+        corpus_role="protocol_timed_twelve_lead_comparison_source",
+        published_uncompressed_size="3.2 GB",
+    ),
+    "ecg-fragment-dangerous-arrhythmia": SourceDescriptor(
+        source_id="ecg-fragment-dangerous-arrhythmia",
+        version="1.0.0",
+        license_id="ODC-BY-1.0",
+        access="open",
+        label_authority=(
+            "author-reviewed short-fragment rhythm labels derived from the MIT-BIH "
+            "Malignant Ventricular Ectopy Database"
+        ),
+        # Source record numbers are not asserted to be patient identities and
+        # are deliberately replaced with content-addressed ids at import.
+        patient_ids_available=False,
+        educational_uses=("rhythm_stream",),
+        dataset_title="ECG Fragment Database for the Exploration of Dangerous Arrhythmia",
+        license_name="Open Data Commons Attribution License (ODC-By) 1.0",
+        source_url=(
+            "https://physionet.org/content/ecg-fragment-high-risk-label/1.0.0/"
+        ),
+        doi="https://doi.org/10.13026/kpfg-xs25",
+        corpus_role="reviewed_single_lead_rhythm_fragment_waveform_and_labels",
+        published_uncompressed_size="5.6 MB",
     ),
     "mit-bih-vfdb": SourceDescriptor(
         source_id="mit-bih-vfdb",

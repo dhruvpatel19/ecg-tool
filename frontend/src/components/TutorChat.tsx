@@ -2,7 +2,7 @@
 
 import { Brain, CornerDownLeft, MessageSquare, Quote, Send, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type AdaptiveTutorContextRef, type ClinicalShiftTutorContextRef, type ClinicalTutorContextRef, type TutorMessageBody } from "@/lib/api";
+import { ApiError, api, type AdaptiveTutorContextRef, type ClinicalShiftTutorContextRef, type ClinicalTutorContextRef, type TutorMessageBody } from "@/lib/api";
 import type { EcgCapability, TutorMessageResponse, ViewerAction } from "@/lib/types";
 
 type ChatTurn = {
@@ -54,6 +54,8 @@ type TutorChatProps = {
   onReturnToLesson?: () => void;
   /** Optional opening line shown before the first user turn. */
   openingPrompt?: string;
+  /** Optional learner-selected question placed in the composer without sending it. */
+  draftPrompt?: string;
   /** Extra viewer context (e.g. selected point) merged into each request. */
   viewerState?: Record<string, unknown>;
   /** Server-issued reference to a durably graded Clinical answer. */
@@ -62,6 +64,8 @@ type TutorChatProps = {
   clinicalShiftContext?: ClinicalShiftTutorContextRef | null;
   /** Server-issued, owner-bound reference to the current deterministic mastery plan. */
   adaptiveContext?: AdaptiveTutorContextRef | null;
+  /** Refreshes an expired adaptive context while preserving the learner's draft. */
+  onAdaptiveContextExpired?: (draft: string) => void;
   /** Called whenever a tutor reply carries viewer actions, so the page can drive the ECGViewer. */
   onViewerActions?: (actions: ViewerAction[]) => void;
   /** Records that learner-visible assistance was requested in the active assessment step. */
@@ -90,10 +94,12 @@ export function TutorChat({
   waypointLabel,
   onReturnToLesson,
   openingPrompt,
+  draftPrompt,
   viewerState,
   clinicalContext,
   clinicalShiftContext,
   adaptiveContext,
+  onAdaptiveContextExpired,
   onViewerActions,
   onAssistance,
   resetKey,
@@ -102,9 +108,10 @@ export function TutorChat({
   const requestEcgRef = ecgRef ?? caseId ?? null;
   const [threadId, setThreadId] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(draftPrompt ?? "");
   const [sending, setSending] = useState(false);
-  const [restoring, setRestoring] = useState(false);
+  const [restoring, setRestoring] = useState(Boolean(requestEcgRef || lessonId || mode === "freeform"));
+  const [adaptiveRefreshing, setAdaptiveRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [typed, setTyped] = useState("");
   const [returnedTutorTurnId, setReturnedTutorTurnId] = useState<string | null>(null);
@@ -120,12 +127,13 @@ export function TutorChat({
   useEffect(() => {
     setThreadId(null);
     setTurns([]);
-    setInput("");
+    setInput(draftPrompt ?? "");
     setError(null);
     setTyped("");
     setReturnedTutorTurnId(null);
+    setAdaptiveRefreshing(false);
     setCollapsed(collapsedByDefault);
-  }, [resetKey, collapsedByDefault]);
+  }, [resetKey, collapsedByDefault, draftPrompt]);
 
   useEffect(() => {
     let active = true;
@@ -170,7 +178,7 @@ export function TutorChat({
         if (latestActionMessage) onViewerActionsRef.current?.(latestActionMessage.viewerActions);
       })
       .catch(() => {
-        // A missing history must not disable asking a new grounded question.
+        if (active) setError("Previous tutor history could not be restored. You can still start a new grounded conversation.");
       })
       .finally(() => { if (active) setRestoring(false); });
     return () => { active = false; };
@@ -198,7 +206,7 @@ export function TutorChat({
   const send = useCallback(
     async (message: string) => {
       const trimmed = message.trim();
-      if (!trimmed || sending) return;
+      if (!trimmed || sending || restoring || adaptiveRefreshing) return;
       setSending(true);
       setError(null);
       const userTurn: ChatTurn = { id: nextTurnId(), role: "user", content: trimmed };
@@ -240,14 +248,22 @@ export function TutorChat({
         if (response.viewerActions?.length) {
           onViewerActions?.(response.viewerActions);
         }
-      } catch {
+      } catch (caught) {
         setInput(trimmed);
-        setError("The tutor could not respond. Your question is still here—try again when you are ready.");
+        if (adaptiveContext && caught instanceof ApiError && caught.status === 409 && caught.code === "adaptive_plan_context_expired") {
+          setError("Your study plan changed while Luna was open. Refreshing its context now; your question is saved and will not be sent automatically.");
+          if (onAdaptiveContextExpired) {
+            setAdaptiveRefreshing(true);
+            onAdaptiveContextExpired(trimmed);
+          }
+        } else {
+          setError("The tutor could not respond. Your question is still here—try again when you are ready.");
+        }
       } finally {
         setSending(false);
       }
     },
-    [sending, mode, threadId, requestEcgRef, lessonId, threadScope, viewerState, clinicalContext, clinicalShiftContext, adaptiveContext, onViewerActions, onAssistance],
+    [sending, restoring, adaptiveRefreshing, mode, threadId, requestEcgRef, lessonId, threadScope, viewerState, clinicalContext, clinicalShiftContext, adaptiveContext, onAdaptiveContextExpired, onViewerActions, onAssistance],
   );
 
   function onSubmit(event: React.FormEvent) {
@@ -265,6 +281,7 @@ export function TutorChat({
   const showReturnToLesson = Boolean(lessonReturnPrompt || onReturnToLesson)
     && latestTutor?.onLessonTopic === false
     && returnedTutorTurnId !== latestTutor.id;
+  const speakerLabel = roleLabel || "Conversational tutor";
 
   function returnToLesson() {
     if (onReturnToLesson) {
@@ -276,16 +293,16 @@ export function TutorChat({
   }
 
   return (
-    <section className="panel tutor-chat" aria-label="Conversational ECG tutor">
+    <section className="panel tutor-chat" aria-label={`${speakerLabel} chat`}>
       <div className="tutor-chat-header">
-        <strong><Brain size={18} aria-hidden="true" /> Conversational Tutor</strong>
-        <span className="muted">{roleLabel || modeLabel(mode)}</span>
+        <strong><Brain size={18} aria-hidden="true" /> {speakerLabel}</strong>
+        <span className="muted">{modeLabel(mode)}</span>
         <button className="button subtle small" type="button" aria-expanded={!collapsed} onClick={() => setCollapsed((value) => !value)}>{collapsed ? "Open tutor" : "Collapse"}</button>
       </div>
 
       {collapsed ? (
         <button className="tutor-collapsed-prompt" type="button" onClick={() => setCollapsed(false)}>
-          <MessageSquare size={17} aria-hidden="true" /><span><strong>Tutor silent.</strong> Open only if you want help; the attempt will retain its assistance history.</span>
+          <MessageSquare size={17} aria-hidden="true" /><span><strong>{speakerLabel} is silent.</strong> Open only if you want help; the attempt will retain its assistance history.</span>
         </button>
       ) : <>
 
@@ -314,7 +331,7 @@ export function TutorChat({
           return (
             <div className={`chat-bubble ${turn.role}`} key={turn.id}>
               {turn.role === "tutor" ? (
-                <span className="chat-author"><Brain size={14} aria-hidden="true" /> Tutor</span>
+                <span className="chat-author"><Brain size={14} aria-hidden="true" /> {speakerLabel}</span>
               ) : (
                 <span className="chat-author">You</span>
               )}
@@ -350,7 +367,7 @@ export function TutorChat({
 
         {sending ? (
           <div className="chat-bubble tutor">
-            <span className="chat-author"><Brain size={14} aria-hidden="true" /> Tutor</span>
+            <span className="chat-author"><Brain size={14} aria-hidden="true" /> {speakerLabel}</span>
             <p className="chat-text typing-dots"><span /><span /><span /></p>
           </div>
         ) : null}
@@ -366,20 +383,23 @@ export function TutorChat({
         </div>
       ) : null}
 
-      {error ? <div className="warning tutor-chat-error">{error}</div> : null}
+      {error ? <div className="warning tutor-chat-error" role="alert" aria-live="polite">{error}</div> : null}
 
       <form className="tutor-chat-input" onSubmit={onSubmit}>
         <textarea
-          aria-label="Message the tutor"
+          aria-label={mode === "freeform" && roleLabel ? `Message ${roleLabel}` : "Message the tutor"}
           aria-describedby="tutor-privacy-note"
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Type a message (Enter to send, Shift+Enter for a new line)"
+          placeholder={mode === "freeform" && roleLabel
+            ? `Ask ${roleLabel} about your plan…`
+            : "Type a message (Enter to send, Shift+Enter for a new line)"}
           rows={2}
           maxLength={4000}
+          disabled={restoring || adaptiveRefreshing}
         />
-        <button className="button primary" type="submit" disabled={restoring || sending || !input.trim()}>
+        <button className="button primary" type="submit" disabled={restoring || adaptiveRefreshing || sending || !input.trim()}>
           <Send size={16} aria-hidden="true" />
           Send
         </button>
@@ -396,5 +416,5 @@ export function TutorChat({
 function modeLabel(mode: TutorChatProps["mode"]) {
   if (mode === "tutorial") return "Tutorial mode";
   if (mode === "practice") return "Practice mode";
-  return "Freeform";
+  return "Study coach";
 }

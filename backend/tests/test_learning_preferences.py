@@ -113,7 +113,7 @@ def test_reading_default_guest_preferences_does_not_create_claimable_work() -> N
         assert after.json()["learningPreferences"] == 0
 
 
-def test_adaptive_plan_applies_saved_session_defaults_to_its_runnable_link() -> None:
+def test_adaptive_plan_preserves_saved_defaults_but_keeps_cold_start_brief() -> None:
     with TestClient(app) as client:
         _register(client, "prefs_plan")
         saved = client.put(
@@ -140,8 +140,9 @@ def test_adaptive_plan_applies_saved_session_defaults_to_its_runnable_link() -> 
         }
         stage = plan["stages"][0]
         assert stage["mode"] == "rapid"
-        assert stage["suggestedLength"] == 50
-        assert stage["suggestedPace"] == "emergency"
+        assert stage["stageKind"] == "baseline"
+        assert stage["suggestedLength"] == 5
+        assert stage["suggestedPace"] == "untimed"
         query = parse_qs(urlparse(stage["href"]).query)
-        assert query["suggestedLength"] == ["50"]
-        assert query["pace"] == ["emergency"]
+        assert query["suggestedLength"] == ["5"]
+        assert query["pace"] == ["untimed"]

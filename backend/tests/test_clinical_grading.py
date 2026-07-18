@@ -44,6 +44,22 @@ def test_confidence_upside_cap_lowers_correct_credit():
     assert low["score"] >= 0.6  # still correct, just capped
 
 
+def test_omitted_confidence_preserves_base_credit_without_calibration() -> None:
+    packet = next(
+        case for case in build_fixture_cases() if case["case_id"] == AF_MCQ.ecg_id
+    )
+
+    grade = grade_clinical_answer(
+        AF_MCQ,
+        packet,
+        _ans(selected_option_id="af_rate"),
+    )
+
+    assert grade["score"] == 1.0
+    assert grade["answerClass"] == "ideal"
+    assert grade["calibrationEvent"] == {}
+
+
 def test_high_confidence_wrong_zeroed_and_flagged():
     grade = grade_clinical_answer(CASE_W, packet_for(CASE_W), _ans(selected_option_id="w4", confidence=5))
     assert grade["score"] == 0.0

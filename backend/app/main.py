@@ -99,6 +99,43 @@ from .guest_progress import (
 from .http_errors import privacy_safe_validation_error
 from .llm import TutorService, curated_general_teaching
 from .learning_activity import ActivityCursorError, get_learning_activity
+from .competency_trends import (
+    MAX_COMPETENCY_TREND_POINTS,
+    get_competency_trend,
+)
+from .learning_sessions import (
+    MAX_SESSION_OFFSET,
+    get_learning_session_review,
+    get_learning_sessions,
+    set_learning_session_attempt_flag,
+)
+from .learning_replay import (
+    build_learning_replay,
+    learning_replay_comparison_ecg_id,
+    learning_replay_attempt_is_available,
+    resolve_learning_replay_ecg_target,
+    resolve_learning_replay_attempt,
+)
+from .study_calendar import (
+    CalendarItemConflictError,
+    CalendarItemNotFoundError,
+    CalendarSourceChangedError,
+    calendar_plan_action,
+    calendarize_plan_launch_href,
+    create_calendar_item,
+    delete_calendar_item,
+    get_calendar_item,
+    get_calendar_snapshot,
+    get_competency_due_source,
+    get_competency_review_projection,
+    replay_calendar_plan_request,
+    save_calendar_settings,
+    set_calendar_item_completion,
+    update_calendar_item,
+    validate_calendar_date,
+    validate_calendar_range,
+    validate_time_zone,
+)
 from .mastery_planner import _best_case_concept, _receipt_mode, build_mastery_plan
 from .origin_guard import OriginKeyMiddleware, trusted_registration_ip
 from .ontology import CONCEPTS, CONCEPT_BY_ID, concept_label
@@ -111,6 +148,7 @@ from .objectives import (
     ObjectiveRuntimeAvailability,
     audited_source_packet_supports_objective,
     objective_runtime_availability,
+    validate_objective_subskill,
 )
 from .review import next_review_case, review_status, start_review
 from .rapid_tutor_context import (
@@ -123,6 +161,7 @@ from .rapid_tutor_context import (
 )
 from .retention import competency_state
 from .schemas import (
+    LEADS,
     TUTOR_MESSAGE_MAX_CHARS,
     AttemptRequest,
     GuidedLearningEventRequest,
@@ -864,6 +903,157 @@ class LearningPreferencesUpdate(BaseModel):
     guidanceLevel: Literal["step_by_step", "balanced", "minimal"] | None = None
     reduceMotion: bool | None = Field(default=None, strict=True)
     largeControls: bool | None = Field(default=None, strict=True)
+
+
+class CalendarRequestModel(BaseModel):
+    model_config = {"extra": "forbid"}
+
+
+class CalendarSettingsUpdate(CalendarRequestModel):
+    timeZone: str = Field(min_length=1, max_length=64)
+    weekStartsOn: Literal[0, 1] = 0
+
+    @field_validator("timeZone")
+    @classmethod
+    def valid_time_zone(cls, value: str) -> str:
+        return validate_time_zone(value)
+
+
+class CalendarItemCreate(CalendarRequestModel):
+    title: str = Field(min_length=1, max_length=120)
+    notes: str = Field(default="", max_length=1000)
+    scheduledDate: str = Field(min_length=10, max_length=10)
+    startMinute: int | None = Field(default=None, ge=0, le=1439)
+    durationMinutes: int | None = Field(default=None, ge=5, le=240)
+    mode: Literal["guided", "train", "rapid", "clinical"] | None = None
+    clientRequestId: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+
+    @field_validator("title")
+    @classmethod
+    def meaningful_title(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("title must contain a visible character")
+        return cleaned
+
+    @field_validator("notes")
+    @classmethod
+    def clean_notes(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("scheduledDate")
+    @classmethod
+    def valid_scheduled_date(cls, value: str) -> str:
+        return validate_calendar_date(value)
+
+
+class CalendarCompetencyItemCreate(CalendarRequestModel):
+    objectiveId: str = Field(min_length=1, max_length=120)
+    subskill: str = Field(min_length=1, max_length=80)
+    expectedNextDueAt: str = Field(min_length=1, max_length=64)
+    scheduledDate: str = Field(min_length=10, max_length=10)
+    startMinute: int | None = Field(default=None, ge=0, le=1439)
+    durationMinutes: int | None = Field(default=None, ge=5, le=240)
+    notes: str = Field(default="", max_length=1000)
+    clientRequestId: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+
+    @field_validator("objectiveId", "subskill", "expectedNextDueAt", "clientRequestId")
+    @classmethod
+    def clean_required_value(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("notes")
+    @classmethod
+    def clean_competency_notes(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("scheduledDate")
+    @classmethod
+    def valid_competency_date(cls, value: str) -> str:
+        return validate_calendar_date(value)
+
+    @field_validator("expectedNextDueAt")
+    @classmethod
+    def valid_due_instant(cls, value: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("expectedNextDueAt must be an ISO-8601 instant") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("expectedNextDueAt must include a time zone")
+        return value
+
+
+class CalendarPlanItemCreate(CalendarRequestModel):
+    expectedActionKey: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    scheduledDate: str = Field(min_length=10, max_length=10)
+    startMinute: int | None = Field(default=None, ge=0, le=1439)
+    durationMinutes: int | None = Field(default=30, ge=5, le=240)
+    notes: str = Field(default="", max_length=1000)
+    clientRequestId: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+
+    @field_validator("scheduledDate")
+    @classmethod
+    def valid_plan_date(cls, value: str) -> str:
+        return validate_calendar_date(value)
+
+    @field_validator("notes")
+    @classmethod
+    def clean_plan_notes(cls, value: str) -> str:
+        return value.strip()
+
+
+class CalendarItemUpdate(CalendarRequestModel):
+    revision: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    notes: str | None = Field(default=None, max_length=1000)
+    scheduledDate: str | None = Field(default=None, min_length=10, max_length=10)
+    startMinute: int | None = Field(default=None, ge=0, le=1439)
+    durationMinutes: int | None = Field(default=None, ge=5, le=240)
+
+    @field_validator("title")
+    @classmethod
+    def meaningful_optional_title(cls, value: str | None) -> str | None:
+        if value is None:
+            raise ValueError("title cannot be null")
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("title must contain a visible character")
+        return cleaned
+
+    @field_validator("notes")
+    @classmethod
+    def clean_optional_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            raise ValueError("notes cannot be null")
+        return value.strip()
+
+    @field_validator("scheduledDate")
+    @classmethod
+    def valid_optional_date(cls, value: str | None) -> str | None:
+        if value is None:
+            raise ValueError("scheduledDate cannot be null")
+        return validate_calendar_date(value)
+
+
+class CalendarCompletionUpdate(CalendarRequestModel):
+    revision: int = Field(ge=1)
 
 
 class ClickGradeRequest(BaseModel):
@@ -2360,6 +2550,7 @@ def _competency_state(row: dict[str, Any] | None) -> str:
 @app.get("/learners/{learner_id}/competencies")
 def competency_registry_state(
     learner_id: str,
+    time_zone: str | None = Header(default=None, alias="X-ECG-Time-Zone"),
     authorization: str | None = Header(default=None),
     session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> dict[str, Any]:
@@ -2369,6 +2560,21 @@ def competency_registry_state(
         (row["concept"], row["subskill"]): row
         for row in profile.get("subskillMastery", [])
     }
+    try:
+        if time_zone is not None:
+            validate_time_zone(time_zone)
+        with store.connect() as conn:
+            calendar_projection = get_competency_review_projection(
+                conn,
+                learner,
+                observed,
+                requested_time_zone=time_zone,
+            )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_time_zone", "message": str(exc)},
+        ) from exc
     concept_counts = repo.concept_ab_counts()
     objectives: list[dict[str, Any]] = []
     for definition in OBJECTIVES.values():
@@ -2427,8 +2633,490 @@ def competency_registry_state(
     return {
         "learnerId": learner,
         "registryVersion": REGISTRY_VERSION,
+        "calendarProjection": calendar_projection,
         "objectives": objectives,
     }
+
+
+def _calendar_receipt_contracts() -> dict[tuple[str, str], dict[str, str] | None]:
+    concept_counts = repo.concept_ab_counts()
+    contracts: dict[tuple[str, str], dict[str, str] | None] = {}
+    for definition in OBJECTIVES.values():
+        runtime = objective_runtime_availability(definition, repo)
+        for subskill in definition.allowed_subskills:
+            contracts[(definition.id, subskill)] = _independent_receipt_contract(
+                definition,
+                runtime,
+                concept_counts,
+                subskill,
+            )
+    return contracts
+
+
+def _calendar_headers(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+
+
+def _calendar_mutation_error(exc: Exception) -> HTTPException:
+    headers = {"Cache-Control": "no-store, private", "Pragma": "no-cache"}
+    if isinstance(exc, CalendarItemNotFoundError):
+        return HTTPException(
+            status_code=404,
+            detail={"code": "calendar_item_not_found", "message": "Calendar item not found"},
+            headers=headers,
+        )
+    if isinstance(exc, CalendarSourceChangedError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "calendar_source_changed",
+                "message": str(exc),
+                "currentNextDueAt": exc.current_due_at,
+            },
+            headers=headers,
+        )
+    if isinstance(exc, CalendarItemConflictError):
+        detail: dict[str, Any] = {"code": exc.code, "message": str(exc)}
+        if exc.current is not None:
+            detail["current"] = exc.current
+        return HTTPException(status_code=409, detail=detail, headers=headers)
+    return HTTPException(
+        status_code=400,
+        detail={"code": "calendar_request_invalid", "message": str(exc)},
+        headers=headers,
+    )
+
+
+@app.get("/learning/calendar")
+def learning_calendar(
+    response: Response,
+    start_date: str = Query(
+        alias="startDate",
+        min_length=10,
+        max_length=10,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    ),
+    end_date: str = Query(
+        alias="endDate",
+        min_length=10,
+        max_length=10,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    ),
+    time_zone: str | None = Query(default=None, alias="timeZone", max_length=64),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Return one bounded planner window plus live competency review dates."""
+
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    store.ensure_profile(learner)
+    try:
+        validate_calendar_range(start_date, end_date)
+        if time_zone is not None:
+            validate_time_zone(time_zone)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_calendar_range", "message": str(exc)},
+        ) from exc
+    current_plan = _adaptive_plan_for_learner(learner)
+    current_action = current_plan.get("calendarAction")
+    current_action_key = (
+        str(current_action.get("actionKey"))
+        if isinstance(current_action, dict) and current_action.get("actionKey")
+        else None
+    )
+    current_plan_priorities: dict[tuple[str, str], int] = {}
+    for index, priority in enumerate(current_plan.get("priorities") or [], start=1):
+        if not isinstance(priority, dict):
+            continue
+        objective_id = priority.get("objectiveId")
+        subskill = priority.get("subskill")
+        if isinstance(objective_id, str) and isinstance(subskill, str):
+            current_plan_priorities.setdefault((objective_id, subskill), index)
+    with store.connect() as conn:
+        return get_calendar_snapshot(
+            conn,
+            learner,
+            start_date=start_date,
+            end_date=end_date,
+            requested_time_zone=time_zone,
+            receipts=_calendar_receipt_contracts(),
+            current_plan_action_key=current_action_key,
+            current_plan_priorities=current_plan_priorities,
+        )
+
+
+@app.put("/learning/calendar/settings")
+def update_learning_calendar_settings(
+    update: CalendarSettingsUpdate,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    store.ensure_profile(learner)
+    with store.connect() as conn:
+        return save_calendar_settings(
+            conn,
+            learner,
+            time_zone=update.timeZone,
+            week_starts_on=update.weekStartsOn,
+            now=datetime.now(UTC).isoformat(),
+        )
+
+
+@app.post("/learning/calendar/items", status_code=201)
+def create_learning_calendar_item(
+    request: CalendarItemCreate,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    store.ensure_profile(learner)
+    try:
+        with store.connect() as conn:
+            return create_calendar_item(
+                conn,
+                learner,
+                source="manual",
+                title=request.title,
+                notes=request.notes,
+                scheduled_date=request.scheduledDate,
+                start_minute=request.startMinute,
+                duration_minutes=request.durationMinutes,
+                client_request_id=request.clientRequestId,
+                now=datetime.now(UTC).isoformat(),
+                target={"mode": request.mode} if request.mode else None,
+            )
+    except (CalendarItemConflictError, ValueError) as exc:
+        raise _calendar_mutation_error(exc) from exc
+
+
+@app.post("/learning/calendar/items/from-plan", status_code=201)
+def create_learning_calendar_plan_item(
+    request: CalendarPlanItemCreate,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Schedule the server-owned runnable action the learner explicitly confirmed."""
+
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    store.ensure_profile(learner)
+    try:
+        plan = _adaptive_plan_for_learner(learner)
+        action = plan.get("calendarAction")
+        current_action_key = (
+            str(action.get("actionKey"))
+            if isinstance(action, dict) and action.get("actionKey")
+            else None
+        )
+        with store.connect() as conn:
+            replay = replay_calendar_plan_request(
+                conn,
+                learner,
+                client_request_id=request.clientRequestId,
+                source_plan_key=request.expectedActionKey,
+                scheduled_date=request.scheduledDate,
+                start_minute=request.startMinute,
+                duration_minutes=request.durationMinutes,
+                notes=request.notes,
+                current_plan_action_key=current_action_key,
+            )
+            if replay is not None:
+                return replay
+
+        if not isinstance(action, dict):
+            raise CalendarItemConflictError(
+                "calendar_plan_unavailable",
+                "The current study plan has no launchable activity to schedule.",
+            )
+        if action.get("actionKey") != request.expectedActionKey:
+            raise CalendarItemConflictError(
+                "calendar_plan_changed",
+                "The recommended activity changed before it was scheduled. Review the current plan and confirm again.",
+            )
+        objective_id = str(action.get("objectiveId") or "")
+        subskill = str(action.get("subskill") or "")
+        case_concept = str(action.get("caseConcept") or "")
+        mode = str(action.get("mode") or "")
+        if not all((objective_id, subskill, case_concept)) or mode not in {"train", "rapid"}:
+            raise ValueError("The current study-plan action is not an exact runnable ECG skill")
+        launch_href = calendarize_plan_launch_href(
+            str(action.get("launchHref") or ""),
+            mode=mode,
+            scheduled_date=request.scheduledDate,
+        )
+        with store.connect() as conn:
+            created = create_calendar_item(
+                conn,
+                learner,
+                source="study_plan",
+                title=str(action.get("title") or "Planned ECG practice")[:120],
+                notes=request.notes,
+                scheduled_date=request.scheduledDate,
+                start_minute=request.startMinute,
+                duration_minutes=request.durationMinutes,
+                client_request_id=request.clientRequestId,
+                now=datetime.now(UTC).isoformat(),
+                target={
+                    "objectiveId": objective_id,
+                    "subskill": subskill,
+                    "mode": mode,
+                    "caseConcept": case_concept,
+                },
+                target_launch_href=launch_href,
+                source_plan_key=request.expectedActionKey,
+            )
+            return get_calendar_item(
+                conn,
+                learner,
+                created["itemId"],
+                receipts=_calendar_receipt_contracts(),
+                current_plan_action_key=request.expectedActionKey,
+            )
+    except (CalendarItemConflictError, ValueError) as exc:
+        raise _calendar_mutation_error(exc) from exc
+
+
+@app.post("/learning/calendar/items/from-competency", status_code=201)
+def create_learning_calendar_competency_item(
+    request: CalendarCompetencyItemCreate,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Schedule one exact review without changing its retention due instant."""
+
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    store.ensure_profile(learner)
+    definition = OBJECTIVES.get(request.objectiveId)
+    if definition is None or request.subskill not in definition.allowed_subskills:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "calendar_competency_not_found",
+                "message": "Competency not found",
+            },
+        )
+    receipt = _independent_receipt_contract(
+        definition,
+        objective_runtime_availability(definition, repo),
+        repo.concept_ab_counts(),
+        request.subskill,
+    )
+    if receipt is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "calendar_competency_unavailable",
+                "message": "No independent real-ECG review route is currently available.",
+            },
+        )
+    try:
+        with store.connect() as conn:
+            source = get_competency_due_source(
+                conn,
+                learner,
+                request.objectiveId,
+                request.subskill,
+            )
+            current_due_at = source["nextDueAt"] if source is not None else None
+            if current_due_at != request.expectedNextDueAt:
+                raise CalendarSourceChangedError(current_due_at)
+            created = create_calendar_item(
+                conn,
+                learner,
+                source="retention_review",
+                title=(
+                    f"Review {definition.label}: "
+                    f"{request.subskill.replace('_', ' ')}"
+                )[:120],
+                notes=request.notes,
+                scheduled_date=request.scheduledDate,
+                start_minute=request.startMinute,
+                duration_minutes=request.durationMinutes,
+                client_request_id=request.clientRequestId,
+                now=datetime.now(UTC).isoformat(),
+                target={
+                    "objectiveId": request.objectiveId,
+                    "subskill": request.subskill,
+                    "mode": receipt["mode"],
+                    "caseConcept": receipt["caseConcept"],
+                },
+                source_due_at=request.expectedNextDueAt,
+            )
+            return get_calendar_item(
+                conn,
+                learner,
+                created["itemId"],
+                receipts={(request.objectiveId, request.subskill): receipt},
+            )
+    except (
+        CalendarItemConflictError,
+        CalendarSourceChangedError,
+        ValueError,
+    ) as exc:
+        raise _calendar_mutation_error(exc) from exc
+
+
+@app.patch("/learning/calendar/items/{item_id}")
+def edit_learning_calendar_item(
+    request: CalendarItemUpdate,
+    response: Response,
+    item_id: str = ApiPath(min_length=36, max_length=36),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    changes = request.model_dump(exclude_unset=True, exclude={"revision"})
+    try:
+        with store.connect() as conn:
+            updated = update_calendar_item(
+                conn,
+                learner,
+                item_id,
+                revision=request.revision,
+                changes=changes,
+                now=datetime.now(UTC).isoformat(),
+            )
+            return get_calendar_item(
+                conn,
+                learner,
+                updated["itemId"],
+                receipts=_calendar_receipt_contracts(),
+            )
+    except (CalendarItemNotFoundError, CalendarItemConflictError, ValueError) as exc:
+        raise _calendar_mutation_error(exc) from exc
+
+
+@app.put("/learning/calendar/items/{item_id}/completion")
+def complete_learning_calendar_item(
+    request: CalendarCompletionUpdate,
+    response: Response,
+    item_id: str = ApiPath(min_length=36, max_length=36),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    return _set_learning_calendar_item_completion(
+        completed=True,
+        revision=request.revision,
+        response=response,
+        item_id=item_id,
+        authorization=authorization,
+        session_cookie=session_cookie,
+    )
+
+
+def _set_learning_calendar_item_completion(
+    *,
+    completed: bool,
+    revision: int,
+    response: Response,
+    item_id: str,
+    authorization: str | None,
+    session_cookie: str | None,
+) -> dict[str, Any]:
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    try:
+        with store.connect() as conn:
+            updated = set_calendar_item_completion(
+                conn,
+                learner,
+                item_id,
+                revision=revision,
+                completed=completed,
+                now=datetime.now(UTC).isoformat(),
+            )
+            return get_calendar_item(
+                conn,
+                learner,
+                updated["itemId"],
+                receipts=_calendar_receipt_contracts(),
+            )
+    except (CalendarItemNotFoundError, CalendarItemConflictError) as exc:
+        raise _calendar_mutation_error(exc) from exc
+
+
+@app.delete("/learning/calendar/items/{item_id}/completion")
+def reopen_learning_calendar_item(
+    response: Response,
+    item_id: str = ApiPath(min_length=36, max_length=36),
+    revision: int = Query(ge=1),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    return _set_learning_calendar_item_completion(
+        completed=False,
+        revision=revision,
+        response=response,
+        item_id=item_id,
+        authorization=authorization,
+        session_cookie=session_cookie,
+    )
+
+
+@app.delete("/learning/calendar/items/{item_id}")
+def remove_learning_calendar_item(
+    response: Response,
+    item_id: str = ApiPath(min_length=36, max_length=36),
+    revision: int = Query(ge=1),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    _calendar_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    try:
+        with store.connect() as conn:
+            delete_calendar_item(
+                conn,
+                learner,
+                item_id,
+                revision=revision,
+            )
+    except (CalendarItemNotFoundError, CalendarItemConflictError) as exc:
+        raise _calendar_mutation_error(exc) from exc
+    return {"deleted": True, "itemId": item_id}
+
+
+@app.get(
+    "/learners/{learner_id}/competencies/{objective_id}/{subskill}/trend"
+)
+def competency_evidence_trend(
+    learner_id: str,
+    response: Response,
+    objective_id: str = ApiPath(min_length=1, max_length=120),
+    subskill: str = ApiPath(min_length=1, max_length=80),
+    limit: int = Query(default=20, ge=1, le=MAX_COMPETENCY_TREND_POINTS),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Return scored observations, not reconstructed historical mastery."""
+
+    learner = effective_learner(authorization, learner_id, session_cookie)
+    if not validate_objective_subskill(objective_id, subskill):
+        raise HTTPException(status_code=404, detail="Competency not found")
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Vary"] = "Authorization, Cookie"
+    with store.connect() as conn:
+        return get_competency_trend(
+            conn,
+            learner_id=learner,
+            objective_id=objective_id,
+            subskill=subskill,
+            limit=limit,
+        )
 
 
 def _adaptive_plan_for_learner(learner: str) -> dict[str, Any]:
@@ -2444,22 +3132,24 @@ def _adaptive_plan_for_learner(learner: str) -> dict[str, Any]:
         definition.id: objective_runtime_availability(definition, repo)
         for definition in OBJECTIVES.values()
     }
+    plan = build_mastery_plan(
+        profile,
+        repo.concept_ab_counts(),
+        preferences=store.get_learning_preferences(learner),
+        runtime_evidence={
+            objective_id: availability.evidence_ceiling
+            for objective_id, availability in runtime.items()
+        },
+        runtime_subskills={
+            objective_id: set(availability.eligible_subskills)
+            for objective_id, availability in runtime.items()
+        },
+        clinical_concepts=clinical_concepts,
+    )
     return {
         "learnerId": learner,
-        **build_mastery_plan(
-            profile,
-            repo.concept_ab_counts(),
-            preferences=store.get_learning_preferences(learner),
-            runtime_evidence={
-                objective_id: availability.evidence_ceiling
-                for objective_id, availability in runtime.items()
-            },
-            runtime_subskills={
-                objective_id: set(availability.eligible_subskills)
-                for objective_id, availability in runtime.items()
-            },
-            clinical_concepts=clinical_concepts,
-        ),
+        **plan,
+        "calendarAction": calendar_plan_action(plan),
     }
 
 
@@ -2536,6 +3226,329 @@ def learning_activity(
                 "message": "The requested activity page is unavailable. Start again from the first page.",
             },
         ) from exc
+
+
+@app.get("/learning/sessions")
+def learning_sessions(
+    response: Response,
+    limit: int = Query(default=10, ge=1, le=50),
+    offset: int = Query(default=0, ge=0, le=MAX_SESSION_OFFSET),
+    saved_only: bool = Query(default=False, alias="savedOnly"),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Return recent completed session aggregates without assessment payloads."""
+
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    with store.connect() as conn:
+        return get_learning_sessions(
+            conn,
+            learner,
+            secret=settings.registration_rate_limit_secret,
+            limit=limit,
+            offset=offset,
+            saved_only=saved_only,
+        )
+
+
+@app.get("/learning/sessions/{session_ref}")
+def learning_session_review(
+    response: Response,
+    session_ref: str = ApiPath(min_length=1, max_length=128),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Resolve an opaque owner-bound reference to an answer-free review."""
+
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    with store.connect() as conn:
+        review = get_learning_session_review(
+            conn,
+            learner,
+            secret=settings.registration_rate_limit_secret,
+            session_ref=session_ref,
+        )
+    if review is None:
+        raise _learning_session_not_found()
+    return review
+
+
+def _learning_session_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "code": "learning_session_not_found",
+            "message": "Learning session not found",
+        },
+        headers={
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "Vary": "Authorization, Cookie",
+        },
+    )
+
+
+def _set_learning_replay_headers(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Vary"] = "Authorization, Cookie"
+
+
+def _guard_learning_replay_case(case_id: str, learner_id: str) -> None:
+    """Preserve assessment secrecy and cache policy on guarded replay reads."""
+
+    try:
+        _guard_pending_assessment_case(case_id, learner_id=learner_id)
+    except HTTPException as exc:
+        headers = dict(exc.headers or {})
+        headers.update(
+            {
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "Vary": "Authorization, Cookie",
+            }
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=headers,
+        ) from exc
+
+
+def _owned_learning_replay_attempt(
+    *, learner_id: str, session_ref: str, attempt_index: int
+) -> Any:
+    with store.connect() as conn:
+        attempt = resolve_learning_replay_attempt(
+            conn,
+            learner_id,
+            session_secret=settings.registration_rate_limit_secret,
+            session_ref=session_ref,
+            attempt_index=attempt_index,
+        )
+    if attempt is None:
+        raise _learning_session_not_found()
+    return attempt
+
+
+@app.get("/learning/sessions/{session_ref}/attempts/{attempt_index}/replay")
+def learning_session_attempt_replay(
+    response: Response,
+    session_ref: str = ApiPath(min_length=1, max_length=128),
+    attempt_index: int = ApiPath(ge=1, le=5000),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Reconstruct one committed item through a strict post-completion DTO."""
+
+    _set_learning_replay_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    attempt = _owned_learning_replay_attempt(
+        learner_id=learner,
+        session_ref=session_ref,
+        attempt_index=attempt_index,
+    )
+    if not learning_replay_attempt_is_available(
+        attempt,
+        repo=repo,
+        clinical_item_store=clinical_item_store,
+    ):
+        raise _learning_session_not_found()
+    _guard_learning_replay_case(attempt.canonical_ecg_id, learner)
+    comparison_ecg_id = learning_replay_comparison_ecg_id(
+        attempt, clinical_item_store=clinical_item_store
+    )
+    if comparison_ecg_id:
+        _guard_learning_replay_case(comparison_ecg_id, learner)
+    try:
+        replay = build_learning_replay(
+            attempt,
+            learner_id=learner,
+            session_ref=session_ref,
+            capability_secret=ADAPTIVE_PLAN_CONTEXT_SECRET,
+            repo=repo,
+            packet_provider=packet_for_case,
+            clinical_item_store=clinical_item_store,
+        )
+    except (KeyError, TypeError, ValueError, OSError):
+        replay = None
+    if replay is None:
+        raise _learning_session_not_found()
+    return replay
+
+
+@app.get(
+    "/learning/sessions/{session_ref}/attempts/{attempt_index}/waveform/{ecg_ref}"
+)
+def learning_session_attempt_waveform(
+    response: Response,
+    session_ref: str = ApiPath(min_length=1, max_length=128),
+    attempt_index: int = ApiPath(ge=1, le=5000),
+    ecg_ref: str = ApiPath(min_length=1, max_length=128),
+    leads: str | None = Query(default=None, max_length=120),
+    start: float = Query(default=0, ge=0),
+    end: float | None = Query(default=None, ge=0),
+    maxPoints: int = Query(default=1200, ge=100, le=5000),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Return only a bounded waveform window for the opened replay attempt."""
+
+    _set_learning_replay_headers(response)
+    learner = effective_learner(authorization, session_cookie=session_cookie)
+    attempt = _owned_learning_replay_attempt(
+        learner_id=learner,
+        session_ref=session_ref,
+        attempt_index=attempt_index,
+    )
+    target_ecg_id = (
+        resolve_learning_replay_ecg_target(
+            attempt,
+            ecg_ref,
+            learner_id=learner,
+            capability_secret=ADAPTIVE_PLAN_CONTEXT_SECRET,
+            clinical_item_store=clinical_item_store,
+        )
+        if is_ecg_capability(ecg_ref)
+        else None
+    )
+    if target_ecg_id is None:
+        raise _learning_session_not_found()
+    if not learning_replay_attempt_is_available(
+        attempt,
+        repo=repo,
+        clinical_item_store=clinical_item_store,
+    ):
+        raise _learning_session_not_found()
+    _guard_learning_replay_case(target_ecg_id, learner)
+    replay_case = repo.get_case(target_ecg_id)
+    replay_waveform = (
+        replay_case.get("waveform")
+        if isinstance(replay_case, dict)
+        else {}
+    )
+    replay_leads = {
+        str(value)
+        for value in (
+            replay_waveform.get("leads")
+            if isinstance(replay_waveform, dict)
+            else []
+        )
+        or []
+        if str(value)
+    }
+    lead_list = [lead.strip() for lead in leads.split(",")] if leads else None
+    if lead_list and (
+        len(lead_list) > 12
+        or any(lead not in replay_leads for lead in lead_list)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid waveform lead selection",
+            headers={
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "Vary": "Authorization, Cookie",
+            },
+        )
+    try:
+        waveform = repo.get_waveform_window(
+            target_ecg_id,
+            leads=lead_list,
+            start=start,
+            end=end,
+            max_points=maxPoints,
+        )
+    except (KeyError, TypeError, ValueError, OSError):
+        waveform = None
+    if not waveform:
+        raise _learning_session_not_found()
+    return public_waveform(waveform, case_reference=ecg_ref)
+
+
+def _update_learning_session_attempt_flag(
+    *,
+    flagged: bool,
+    session_ref: str,
+    attempt_index: int,
+    response: Response,
+    authorization: str | None,
+    session_cookie: str | None,
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    if session_user(authorization, session_cookie) is None:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "authentication_required",
+                "message": "Sign in to save items for review.",
+            },
+            headers={
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+            },
+        )
+    learner = effective_learner(
+        authorization,
+        session_cookie=session_cookie,
+    )
+    with store.connect() as conn:
+        result = set_learning_session_attempt_flag(
+            conn,
+            learner,
+            secret=settings.registration_rate_limit_secret,
+            session_ref=session_ref,
+            attempt_index=attempt_index,
+            flagged=flagged,
+        )
+    if result is None:
+        raise _learning_session_not_found()
+    return result
+
+
+@app.put("/learning/sessions/{session_ref}/attempts/{attempt_index}/flag")
+def save_learning_session_attempt_flag(
+    response: Response,
+    session_ref: str = ApiPath(min_length=1, max_length=128),
+    attempt_index: int = ApiPath(ge=1, le=5000),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Idempotently save one submitted session item for later review."""
+
+    return _update_learning_session_attempt_flag(
+        flagged=True,
+        session_ref=session_ref,
+        attempt_index=attempt_index,
+        response=response,
+        authorization=authorization,
+        session_cookie=session_cookie,
+    )
+
+
+@app.delete("/learning/sessions/{session_ref}/attempts/{attempt_index}/flag")
+def remove_learning_session_attempt_flag(
+    response: Response,
+    session_ref: str = ApiPath(min_length=1, max_length=128),
+    attempt_index: int = ApiPath(ge=1, le=5000),
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Idempotently remove one submitted item from the review queue."""
+
+    return _update_learning_session_attempt_flag(
+        flagged=False,
+        session_ref=session_ref,
+        attempt_index=attempt_index,
+        response=response,
+        authorization=authorization,
+        session_cookie=session_cookie,
+    )
 
 
 @app.get("/learners/{learner_id}/pathway-progress")
@@ -3198,8 +4211,14 @@ def _clinical_tutor_bundle(
     if owned_session and str(owned_session.get("learnerId") or "") == learner:
         for answer in store.get_shift_answers(reference.sessionId):
             candidate = str(answer.get("itemId") or "")
-            if candidate and hmac.compare_digest(
-                public_item_reference(candidate), reference.itemId
+            item = clinical_item_store.get_item(candidate) if candidate else None
+            if item is not None and hmac.compare_digest(
+                public_item_reference(
+                    str(item.item_id),
+                    learner_id=learner,
+                    session_id=reference.sessionId,
+                ),
+                reference.itemId,
             ):
                 durable_item_id = candidate
                 break
@@ -4247,9 +5266,17 @@ training_campaign_store = TrainingCampaignStore(settings.sqlite_path, store.conn
 
 
 def clinical_packet(ecg_id: str) -> dict[str, Any] | None:
-    """Resolve learner Clinical ECGs only through the active checked repository."""
+    """Resolve Clinical ECGs with server-only identity for pair authentication."""
     case = repo.get_case(ecg_id)
-    return packet_for_case(case) if case else None
+    if not case:
+        return None
+    packet = packet_for_case(case)
+    # These fields never enter the learner packet projection. They exist here
+    # solely so the Clinical provenance gate can prove that comparison ECGs are
+    # distinct, same-patient, same-release, and chronologically ordered.
+    packet["record_identity"] = case.get("record_identity", {})
+    packet["source_provenance"] = case.get("source_provenance", {})
+    return packet
 
 
 # The learner bank is code-defined, real-ECG-backed, and automatically screened.

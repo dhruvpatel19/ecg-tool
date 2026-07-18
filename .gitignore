@@ -13,8 +13,7 @@ backend/.tmp/
 # Node / Next
 node_modules/
 .next/
-frontend/.next-e2e-*/
-frontend/.next-review-*/
+frontend/.next-*/
 out/
 dist/
 *.tsbuildinfo

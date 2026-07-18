@@ -37,7 +37,7 @@ from .objectives import (
 from .retention import due_snapshot, parse_instant, retention_uncertainty, update_retention
 
 
-LEARNER_SCHEMA_VERSION = 4
+LEARNER_SCHEMA_VERSION = 8
 _SESSION_PUBLIC_ID_DOMAIN = b"ecg-learning-session-public-id-v1\x00"
 _EXPORT_AUTH_KEY_DOMAIN = b"ecg-progress-export-authorization-v1\x00"
 _PASSWORD_FINGERPRINT_DOMAIN = b"ecg-account-password-fingerprint-v1\x00"
@@ -61,6 +61,23 @@ _LEARNING_RECORD_DISPLAY_KEYS = frozenset({"displayId", "display_id"})
 _LEARNING_RECORD_EVENT_KEYS = frozenset({
     "eventKey", "event_key", "interactionId", "interaction_id",
 })
+
+
+def _public_confidence(value: object) -> int | None:
+    """Project only authored 1–5 confidence values from the legacy column.
+
+    Clinical answers may omit confidence.  The immutable ``attempts`` schema
+    still requires an integer, so that persistence boundary uses zero as an
+    out-of-domain sentinel.  This helper is the mandatory public read boundary:
+    zero and any malformed legacy value are always represented as ``None``.
+    """
+
+    try:
+        confidence = int(value)
+    except (TypeError, ValueError):
+        return None
+    return confidence if 1 <= confidence <= 5 else None
+
 
 _LEARNING_PREFERENCE_DEFAULTS: dict[str, Any] = {
     "trainingStage": "not_set",
@@ -141,6 +158,8 @@ _GUEST_CHILD_DELETE_SPECS = (
 _GUEST_DIRECT_DELETE_TABLES = (
     "learner_events",
     "assessment_leases",
+    "study_calendar_items",
+    "learner_calendar_settings",
     "learner_preferences",
     "subskill_retention_events",
     "guided_learning_events",
@@ -369,7 +388,7 @@ class LearningStore:
                     f"{current_version} is newer than this binary's supported "
                     f"schema {LEARNER_SCHEMA_VERSION}"
                 )
-            if current_version not in {0, 1, 2, 3, LEARNER_SCHEMA_VERSION}:
+            if current_version not in {0, 1, 2, 3, 4, 5, 6, 7, LEARNER_SCHEMA_VERSION}:
                 raise SchemaCompatibilityError(
                     f"learner database schema {current_version} has no reviewed migration "
                     f"to {LEARNER_SCHEMA_VERSION}"
@@ -415,6 +434,107 @@ class LearningStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS learner_calendar_settings (
+                    learner_id TEXT PRIMARY KEY,
+                    time_zone TEXT NOT NULL CHECK (
+                        length(time_zone) BETWEEN 1 AND 64
+                    ),
+                    week_starts_on INTEGER NOT NULL DEFAULT 0 CHECK (
+                        week_starts_on IN (0, 1)
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS study_calendar_items (
+                    item_id TEXT PRIMARY KEY CHECK (length(item_id) = 36),
+                    learner_id TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (
+                        source IN ('manual', 'retention_review', 'study_plan')
+                    ),
+                    title TEXT NOT NULL CHECK (
+                        length(title) BETWEEN 1 AND 120
+                    ),
+                    notes TEXT NOT NULL DEFAULT '' CHECK (length(notes) <= 1000),
+                    scheduled_date TEXT NOT NULL CHECK (
+                        length(scheduled_date) = 10
+                    ),
+                    start_minute INTEGER CHECK (
+                        start_minute IS NULL OR start_minute BETWEEN 0 AND 1439
+                    ),
+                    duration_minutes INTEGER CHECK (
+                        duration_minutes IS NULL OR duration_minutes BETWEEN 5 AND 240
+                    ),
+                    status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
+                        status IN ('scheduled', 'completed')
+                    ),
+                    completion_source TEXT CHECK (
+                        completion_source IS NULL OR
+                        completion_source IN ('manual', 'verified_practice')
+                    ),
+                    completed_at TEXT,
+                    target_objective TEXT,
+                    target_subskill TEXT,
+                    target_mode TEXT CHECK (
+                        target_mode IS NULL OR
+                        target_mode IN ('guided', 'train', 'rapid', 'clinical')
+                    ),
+                    target_case_concept TEXT,
+                    source_due_at TEXT,
+                    target_launch_href TEXT CHECK (
+                        target_launch_href IS NULL OR (
+                            length(target_launch_href) BETWEEN 1 AND 2048
+                            AND substr(target_launch_href, 1, 1) = '/'
+                            AND substr(target_launch_href, 1, 2) != '//'
+                        )
+                    ),
+                    source_plan_key TEXT CHECK (
+                        source_plan_key IS NULL OR (
+                            length(source_plan_key) = 64
+                            AND source_plan_key NOT GLOB '*[^0-9a-f]*'
+                        )
+                    ),
+                    client_request_id TEXT NOT NULL CHECK (
+                        length(client_request_id) BETWEEN 1 AND 100
+                    ),
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        (status = 'scheduled' AND completion_source IS NULL AND completed_at IS NULL)
+                        OR
+                        (status = 'completed' AND completion_source IS NOT NULL AND completed_at IS NOT NULL)
+                    ),
+                    CHECK (
+                        (source = 'manual' AND target_objective IS NULL
+                            AND target_subskill IS NULL
+                            AND target_case_concept IS NULL AND source_due_at IS NULL
+                            AND target_launch_href IS NULL AND source_plan_key IS NULL)
+                        OR
+                        (source = 'retention_review' AND target_objective IS NOT NULL
+                            AND target_subskill IS NOT NULL
+                            AND target_mode IN ('train', 'rapid')
+                            AND target_case_concept IS NOT NULL AND source_due_at IS NOT NULL
+                            AND target_launch_href IS NULL AND source_plan_key IS NULL)
+                        OR
+                        (source = 'study_plan' AND target_objective IS NOT NULL
+                            AND target_subskill IS NOT NULL
+                            AND target_mode IN ('train', 'rapid')
+                            AND target_case_concept IS NOT NULL AND source_due_at IS NULL
+                            AND target_launch_href IS NOT NULL AND source_plan_key IS NOT NULL)
+                    ),
+                    UNIQUE (learner_id, client_request_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_study_calendar_owner_date
+                    ON study_calendar_items(
+                        learner_id, scheduled_date, status, start_minute, item_id
+                    );
+                CREATE INDEX IF NOT EXISTS idx_study_calendar_owner_target
+                    ON study_calendar_items(
+                        learner_id, target_objective, target_subskill,
+                        source_due_at, status, scheduled_date
+                    );
 
                 CREATE TABLE IF NOT EXISTS objective_mastery (
                     learner_id TEXT NOT NULL,
@@ -580,6 +700,29 @@ class LearningStore:
                     account_origin TEXT NOT NULL DEFAULT 'established',
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS learning_session_flags (
+                    flag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK (
+                        mode IN ('training', 'rapid', 'clinical')
+                    ),
+                    session_id TEXT NOT NULL CHECK (
+                        length(session_id) BETWEEN 1 AND 200
+                    ),
+                    attempt_index INTEGER NOT NULL CHECK (
+                        attempt_index BETWEEN 1 AND 5000
+                    ),
+                    source_answer_id INTEGER CHECK (
+                        source_answer_id IS NULL OR source_answer_id >= 1
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (owner_id) REFERENCES users(user_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_learning_session_flags_owner
+                    ON learning_session_flags(owner_id, updated_at, mode, session_id);
 
                 CREATE TABLE IF NOT EXISTS auth_verification_budgets (
                     key_hash TEXT NOT NULL,
@@ -951,13 +1094,351 @@ class LearningStore:
                 "ON auth_challenges(user_id, purpose) WHERE consumed_at IS NULL"
             )
 
+            # Saved-review routes intentionally expose a 1-based item ordinal,
+            # but that ordinal is only a projection of the current eligible
+            # answer rows. Keep the durable answer key private and nullable so
+            # older or ambiguous flags remain readable through their legacy
+            # ordinal without inventing learner data during migration.
+            flag_table_info = conn.execute(
+                "PRAGMA table_info(learning_session_flags)"
+            ).fetchall()
+            flag_columns = {str(row["name"]) for row in flag_table_info}
+            flag_primary_key = [
+                str(row["name"])
+                for row in sorted(flag_table_info, key=lambda value: int(value["pk"]))
+                if int(row["pk"]) > 0
+            ]
+            legacy_flag_table = "learning_session_flags_ordinal_v5"
+            if self._table_exists(conn, legacy_flag_table):
+                raise SchemaCompatibilityError(
+                    "learner database contains an unfinished saved-review "
+                    "identity migration"
+                )
+            if flag_primary_key != ["flag_id"]:
+                legacy_has_source_id = "source_answer_id" in flag_columns
+                conn.execute(
+                    "ALTER TABLE learning_session_flags RENAME TO "
+                    f"{legacy_flag_table}"
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE learning_session_flags (
+                        flag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        owner_id TEXT NOT NULL,
+                        mode TEXT NOT NULL CHECK (
+                            mode IN ('training', 'rapid', 'clinical')
+                        ),
+                        session_id TEXT NOT NULL CHECK (
+                            length(session_id) BETWEEN 1 AND 200
+                        ),
+                        attempt_index INTEGER NOT NULL CHECK (
+                            attempt_index BETWEEN 1 AND 5000
+                        ),
+                        source_answer_id INTEGER CHECK (
+                            source_answer_id IS NULL OR source_answer_id >= 1
+                        ),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (owner_id) REFERENCES users(user_id)
+                            ON DELETE CASCADE
+                    )
+                    """
+                )
+                legacy_source_projection = (
+                    "source_answer_id" if legacy_has_source_id else "NULL"
+                )
+                legacy_flag_count = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM {legacy_flag_table}"
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    "INSERT INTO learning_session_flags ("
+                    "owner_id, mode, session_id, attempt_index, source_answer_id, "
+                    "created_at, updated_at) "
+                    "SELECT owner_id, mode, session_id, attempt_index, "
+                    f"{legacy_source_projection}, created_at, updated_at "
+                    f"FROM {legacy_flag_table} "
+                    "ORDER BY owner_id, mode, session_id, attempt_index, updated_at"
+                )
+                migrated_flag_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM learning_session_flags"
+                    ).fetchone()[0]
+                )
+                if migrated_flag_count != legacy_flag_count:
+                    raise SchemaCompatibilityError(
+                        "saved-review identity migration did not preserve every row"
+                    )
+                conn.execute(f"DROP TABLE {legacy_flag_table}")
+                conn.execute(
+                    "CREATE INDEX idx_learning_session_flags_owner "
+                    "ON learning_session_flags("
+                    "owner_id, updated_at, mode, session_id)"
+                )
+            # Install both uniqueness domains before best-effort backfill. If a
+            # legacy ordinal currently resolves to an already-stable answer,
+            # UPDATE OR IGNORE must preserve that row as NULL rather than create
+            # a duplicate stable identity and abort the migration.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_learning_session_flags_source_answer "
+                "ON learning_session_flags("
+                "owner_id, mode, session_id, source_answer_id"
+                ") WHERE source_answer_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_learning_session_flags_legacy_ordinal "
+                "ON learning_session_flags("
+                "owner_id, mode, session_id, attempt_index"
+                ") WHERE source_answer_id IS NULL"
+            )
+            available_tables = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            ranked_answer_queries: list[str] = []
+            if {
+                "training_campaigns",
+                "training_campaign_answers",
+            }.issubset(available_tables) and "integrity_status" in {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(training_campaign_answers)"
+                ).fetchall()
+            }:
+                ranked_answer_queries.append(
+                    """
+                    SELECT campaigns.learner_id AS owner_id,
+                           'training' AS mode,
+                           answers.campaign_id AS session_id,
+                           answers.id AS source_answer_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY answers.campaign_id
+                               ORDER BY answers.ordinal, answers.id
+                           ) AS attempt_index
+                    FROM training_campaign_answers AS answers
+                    JOIN training_campaigns AS campaigns
+                      ON campaigns.campaign_id = answers.campaign_id
+                    WHERE answers.integrity_status IN ('atomic_v1', 'atomic_v2')
+                    """
+                )
+            if {
+                "rapid_rounds",
+                "rapid_round_answers",
+            }.issubset(available_tables) and "integrity_status" in {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(rapid_round_answers)"
+                ).fetchall()
+            }:
+                ranked_answer_queries.append(
+                    """
+                    SELECT rounds.learner_id AS owner_id,
+                           'rapid' AS mode,
+                           answers.round_id AS session_id,
+                           answers.id AS source_answer_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY answers.round_id
+                               ORDER BY answers.id
+                           ) AS attempt_index
+                    FROM rapid_round_answers AS answers
+                    JOIN rapid_rounds AS rounds
+                      ON rounds.round_id = answers.round_id
+                    WHERE answers.integrity_status IN ('atomic_v1', 'atomic_v2')
+                    """
+                )
+            if {
+                "clinical_shift_sessions",
+                "clinical_shift_answers",
+            }.issubset(available_tables):
+                ranked_answer_queries.append(
+                    """
+                    SELECT sessions.learner_id AS owner_id,
+                           'clinical' AS mode,
+                           answers.session_id AS session_id,
+                           answers.id AS source_answer_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY answers.session_id
+                               ORDER BY answers.id
+                           ) AS attempt_index
+                    FROM clinical_shift_answers AS answers
+                    JOIN clinical_shift_sessions AS sessions
+                      ON sessions.session_id = answers.session_id
+                    """
+                )
+            if ranked_answer_queries:
+                ranked_answers_sql = " UNION ALL ".join(ranked_answer_queries)
+                conn.execute(
+                    f"""
+                WITH ranked_answers AS ({ranked_answers_sql})
+                UPDATE OR IGNORE learning_session_flags
+                SET source_answer_id = (
+                    SELECT ranked_answers.source_answer_id
+                    FROM ranked_answers
+                    WHERE ranked_answers.owner_id = learning_session_flags.owner_id
+                      AND ranked_answers.mode = learning_session_flags.mode
+                      AND ranked_answers.session_id = learning_session_flags.session_id
+                      AND ranked_answers.attempt_index = learning_session_flags.attempt_index
+                )
+                WHERE source_answer_id IS NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM ranked_answers
+                      WHERE ranked_answers.owner_id = learning_session_flags.owner_id
+                        AND ranked_answers.mode = learning_session_flags.mode
+                        AND ranked_answers.session_id = learning_session_flags.session_id
+                        AND ranked_answers.attempt_index = learning_session_flags.attempt_index
+                  )
+                """
+                )
+
+            # V8 turns a calendar note into an explicit, server-routed learning
+            # activity. SQLite cannot widen CHECK constraints in place, so the
+            # v7 calendar table is rebuilt inside this same immediate
+            # transaction. Every learner-owned row and idempotency key is
+            # copied before the old table is removed.
+            if current_version in {1, 2, 3, 4, 5, 6, 7}:
+                legacy_calendar_table = "study_calendar_items_v7"
+                if self._table_exists(conn, legacy_calendar_table):
+                    raise SchemaCompatibilityError(
+                        "learner database contains an unfinished study-calendar migration"
+                    )
+                legacy_calendar_count = int(
+                    conn.execute("SELECT COUNT(*) FROM study_calendar_items").fetchone()[0]
+                )
+                conn.execute("DROP INDEX IF EXISTS idx_study_calendar_owner_date")
+                conn.execute("DROP INDEX IF EXISTS idx_study_calendar_owner_target")
+                conn.execute(
+                    "ALTER TABLE study_calendar_items RENAME TO "
+                    f"{legacy_calendar_table}"
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE study_calendar_items (
+                        item_id TEXT PRIMARY KEY CHECK (length(item_id) = 36),
+                        learner_id TEXT NOT NULL,
+                        source TEXT NOT NULL CHECK (
+                            source IN ('manual', 'retention_review', 'study_plan')
+                        ),
+                        title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 120),
+                        notes TEXT NOT NULL DEFAULT '' CHECK (length(notes) <= 1000),
+                        scheduled_date TEXT NOT NULL CHECK (length(scheduled_date) = 10),
+                        start_minute INTEGER CHECK (
+                            start_minute IS NULL OR start_minute BETWEEN 0 AND 1439
+                        ),
+                        duration_minutes INTEGER CHECK (
+                            duration_minutes IS NULL OR duration_minutes BETWEEN 5 AND 240
+                        ),
+                        status TEXT NOT NULL DEFAULT 'scheduled' CHECK (
+                            status IN ('scheduled', 'completed')
+                        ),
+                        completion_source TEXT CHECK (
+                            completion_source IS NULL OR
+                            completion_source IN ('manual', 'verified_practice')
+                        ),
+                        completed_at TEXT,
+                        target_objective TEXT,
+                        target_subskill TEXT,
+                        target_mode TEXT CHECK (
+                            target_mode IS NULL OR
+                            target_mode IN ('guided', 'train', 'rapid', 'clinical')
+                        ),
+                        target_case_concept TEXT,
+                        source_due_at TEXT,
+                        target_launch_href TEXT CHECK (
+                            target_launch_href IS NULL OR (
+                                length(target_launch_href) BETWEEN 1 AND 2048
+                                AND substr(target_launch_href, 1, 1) = '/'
+                                AND substr(target_launch_href, 1, 2) != '//'
+                            )
+                        ),
+                        source_plan_key TEXT CHECK (
+                            source_plan_key IS NULL OR (
+                                length(source_plan_key) = 64
+                                AND source_plan_key NOT GLOB '*[^0-9a-f]*'
+                            )
+                        ),
+                        client_request_id TEXT NOT NULL CHECK (
+                            length(client_request_id) BETWEEN 1 AND 100
+                        ),
+                        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        CHECK (
+                            (status = 'scheduled' AND completion_source IS NULL AND completed_at IS NULL)
+                            OR
+                            (status = 'completed' AND completion_source IS NOT NULL AND completed_at IS NOT NULL)
+                        ),
+                        CHECK (
+                            (source = 'manual' AND target_objective IS NULL
+                                AND target_subskill IS NULL
+                                AND target_case_concept IS NULL AND source_due_at IS NULL
+                                AND target_launch_href IS NULL AND source_plan_key IS NULL)
+                            OR
+                            (source = 'retention_review' AND target_objective IS NOT NULL
+                                AND target_subskill IS NOT NULL
+                                AND target_mode IN ('train', 'rapid')
+                                AND target_case_concept IS NOT NULL AND source_due_at IS NOT NULL
+                                AND target_launch_href IS NULL AND source_plan_key IS NULL)
+                            OR
+                            (source = 'study_plan' AND target_objective IS NOT NULL
+                                AND target_subskill IS NOT NULL
+                                AND target_mode IN ('train', 'rapid')
+                                AND target_case_concept IS NOT NULL AND source_due_at IS NULL
+                                AND target_launch_href IS NOT NULL AND source_plan_key IS NOT NULL)
+                        ),
+                        UNIQUE (learner_id, client_request_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO study_calendar_items ("
+                    "item_id, learner_id, source, title, notes, scheduled_date, "
+                    "start_minute, duration_minutes, status, completion_source, completed_at, "
+                    "target_objective, target_subskill, target_mode, target_case_concept, "
+                    "source_due_at, target_launch_href, source_plan_key, client_request_id, "
+                    "revision, created_at, updated_at) "
+                    "SELECT item_id, learner_id, source, title, notes, scheduled_date, "
+                    "start_minute, duration_minutes, status, completion_source, completed_at, "
+                    "target_objective, target_subskill, target_mode, target_case_concept, "
+                    "source_due_at, NULL, NULL, client_request_id, revision, created_at, updated_at "
+                    f"FROM {legacy_calendar_table} "
+                    "ORDER BY scheduled_date, created_at, item_id"
+                )
+                migrated_calendar_count = int(
+                    conn.execute("SELECT COUNT(*) FROM study_calendar_items").fetchone()[0]
+                )
+                if migrated_calendar_count != legacy_calendar_count:
+                    raise SchemaCompatibilityError(
+                        "study-calendar migration did not preserve every row"
+                    )
+                conn.execute(f"DROP TABLE {legacy_calendar_table}")
+                conn.execute(
+                    "CREATE INDEX idx_study_calendar_owner_date ON study_calendar_items("
+                    "learner_id, scheduled_date, status, start_minute, item_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX idx_study_calendar_owner_target ON study_calendar_items("
+                    "learner_id, target_objective, target_subskill, source_due_at, "
+                    "status, scheduled_date)"
+                )
+            # Renaming and dropping the ordinal-keyed table also drops its
+            # owner-generation guards. The calendar v8 rebuild does the same.
+            # Reinstall the complete guard inventory before this schema
+            # transaction commits.
+            ensure_account_boundary_schema(conn)
+
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at, description) "
                 "VALUES (?, ?, ?)",
                 (
                     LEARNER_SCHEMA_VERSION,
                     utc_now(),
-                    "Versioned baseline v4: durable privacy-preserving account-generation retirement guards",
+                    "Versioned baseline v8: mode-aware study blocks and server-owned plan scheduling",
                 ),
             )
             conn.execute(f"PRAGMA user_version={LEARNER_SCHEMA_VERSION}")
@@ -1219,7 +1700,7 @@ class LearningStore:
                             ),
                             "mode": row["mode"],
                             "score": round(row["score"], 3),
-                            "confidence": row["confidence"],
+                            "confidence": _public_confidence(row["confidence"]),
                             "misconceptions": json.loads(row["misconception_tags_json"]),
                             "createdAt": row["created_at"],
                         }
@@ -2049,7 +2530,7 @@ class LearningStore:
         case_id: str,
         mode: str,
         structured_answer: dict[str, Any],
-        confidence: int,
+        confidence: int | None,
         grade: dict[str, Any],
         now: str,
     ) -> int:
@@ -2058,6 +2539,11 @@ class LearningStore:
         Clinical answers use this helper so the answer ledger, generic attempt,
         mastery mutation, and session advance either all commit or all roll back.
         """
+        # Preserve the existing learner-data table: zero is deliberately
+        # outside the public 1–5 domain and represents an omitted response.
+        persisted_confidence = 0 if confidence is None else int(confidence)
+        if persisted_confidence not in {0, 1, 2, 3, 4, 5}:
+            raise ValueError("attempt confidence must be omitted or between 1 and 5")
         cursor = conn.execute(
             """
             INSERT INTO attempts (
@@ -2071,7 +2557,7 @@ class LearningStore:
                 case_id,
                 mode,
                 json.dumps(structured_answer),
-                confidence,
+                persisted_confidence,
                 float(grade["score"]),
                 json.dumps(grade["correctObjectives"]),
                 json.dumps(grade["missedObjectives"]),
@@ -2093,7 +2579,11 @@ class LearningStore:
             ).fetchone()
             correct_increment = 1 if objective in grade["correctObjectives"] else 0
             high_conf_wrong_increment = (
-                1 if confidence >= 4 and objective in grade["missedObjectives"] else 0
+                1
+                if confidence is not None
+                and confidence >= 4
+                and objective in grade["missedObjectives"]
+                else 0
             )
             if current:
                 conn.execute(
@@ -3867,6 +4357,18 @@ class LearningStore:
                 "prefs.learner_id",
             ),
             (
+                "learner_calendar_settings",
+                "calendar_settings.updated_at >= ?",
+                "learner_calendar_settings calendar_settings",
+                "calendar_settings.learner_id",
+            ),
+            (
+                "study_calendar_items",
+                "calendar_items.updated_at >= ?",
+                "study_calendar_items calendar_items",
+                "calendar_items.learner_id",
+            ),
+            (
                 "objective_mastery",
                 "om.last_practiced_at >= ?",
                 "objective_mastery om",
@@ -4014,6 +4516,8 @@ class LearningStore:
         params: list[Any] = [cutoff]
         activity_specs = (
             ("learner_preferences", "learner_id", None),
+            ("learner_calendar_settings", "learner_id", None),
+            ("study_calendar_items", "learner_id", None),
             ("subskill_retention_events", "learner_id", None),
             ("guided_learning_events", "learner_id", None),
             ("learner_events", "owner_id", None),
@@ -4391,6 +4895,8 @@ class LearningStore:
             direct_specs = (
                 ("learnerProfiles", "learner_profiles", "learner_id, display_name, created_at, updated_at", "created_at"),
                 ("learnerPreferences", "learner_preferences", "learner_id, training_stage, primary_goal, default_session_length, rapid_pace, guidance_level, reduce_motion, large_controls, created_at, updated_at", "created_at"),
+                ("learnerCalendarSettings", "learner_calendar_settings", "learner_id, time_zone, week_starts_on, created_at, updated_at", "created_at"),
+                ("studyCalendarItems", "study_calendar_items", "item_id, learner_id, source, title, notes, scheduled_date, start_minute, duration_minutes, status, completion_source, completed_at, target_objective, target_subskill, target_mode, target_case_concept, source_due_at, target_launch_href, source_plan_key, revision, created_at, updated_at", "scheduled_date, created_at, item_id"),
                 ("objectiveMastery", "objective_mastery", "learner_id, objective, mastery, attempts, correct, high_confidence_wrong, last_practiced_at", "objective"),
                 ("subskillMastery", "subskill_mastery", "learner_id, concept, subskill, formative_score, independent_mastery, attempts, independent_attempts, correct, high_confidence_wrong, last_practiced_at, next_due_at, stability_days, lapses, spaced_retrievals, distinct_eligible_ecgs, distinct_successful_ecgs, distinct_modes, distinct_morphologies, last_independent_at, last_independent_correct", "concept, subskill"),
                 ("retentionEvents", "subskill_retention_events", "id, guided_event_id, learner_id, concept, subskill, case_id, mode, morphology_key, correct, registry_version, occurred_at", "id"),
@@ -4413,6 +4919,38 @@ class LearningStore:
                     (user_id,),
                 ).fetchall()
                 records[export_name] = self._account_export_rows(rows)
+                if export_name == "attempts":
+                    for record in records[export_name]:
+                        record["confidence"] = _public_confidence(
+                            record.get("confidence")
+                        )
+
+            # Session flags are keyed internally by the private mode/session
+            # identity. Export only a stable owner-scoped alias so an account
+            # archive cannot become a route to raw assessment identifiers.
+            if self._table_exists(conn, "learning_session_flags"):
+                flag_rows = conn.execute(
+                    "SELECT mode, session_id, attempt_index, created_at, updated_at "
+                    "FROM learning_session_flags WHERE owner_id = ? "
+                    "ORDER BY updated_at, mode, session_id, attempt_index, flag_id",
+                    (user_id,),
+                ).fetchall()
+                records["learningSessionFlags"] = [
+                    {
+                        "mode": str(row["mode"]),
+                        "sessionRef": self._learning_record_internal_reference(
+                            user_id,
+                            f"{row['mode']}\0{row['session_id']}",
+                        ),
+                        "attemptIndex": int(row["attempt_index"]),
+                        "flagged": True,
+                        "createdAt": str(row["created_at"]),
+                        "updatedAt": str(row["updated_at"]),
+                    }
+                    for row in flag_rows
+                ]
+            else:
+                records["learningSessionFlags"] = []
 
             # The normalized event ledger is deliberately answer-free. Export
             # its provenance and competency evidence, but never lease claim
@@ -4611,6 +5149,23 @@ class LearningStore:
                 records["trainingCampaignSlots"] = []
                 records["trainingCampaignAnswers"] = []
 
+            # Give each reviewable session the same stable, owner-scoped
+            # correlation used by learningSessionFlags. This makes the saved
+            # queue portable without turning the export into a source of live
+            # route references or embedding a private session id in the token.
+            for record_name, mode, identity_field in (
+                ("trainingCampaigns", "training", "campaign_id"),
+                ("rapidRounds", "rapid", "round_id"),
+                ("clinicalShiftSessions", "clinical", "session_id"),
+            ):
+                for record in records.get(record_name, []):
+                    private_identity = record.get(identity_field)
+                    if private_identity not in (None, ""):
+                        record["sessionRef"] = self._learning_record_internal_reference(
+                            user_id,
+                            f"{mode}\0{private_identity}",
+                        )
+
         records = self._sanitize_account_export_identifiers(user_id, records)
         public_user = dict(user)
         return {
@@ -4722,8 +5277,11 @@ class LearningStore:
                     )
 
             direct_tables = (
+                "learning_session_flags",
                 "learner_events",
                 "assessment_leases",
+                "study_calendar_items",
+                "learner_calendar_settings",
                 "learner_preferences",
                 "subskill_retention_events",
                 "guided_learning_events",
@@ -4746,7 +5304,12 @@ class LearningStore:
                         "user_id"
                         if table_name in {"sessions", "auth_challenges"}
                         else "owner_id"
-                        if table_name in {"learner_events", "assessment_leases"}
+                        if table_name
+                        in {
+                            "learner_events",
+                            "assessment_leases",
+                            "learning_session_flags",
+                        }
                         else "learner_id"
                     )
                     conn.execute(
@@ -5512,7 +6075,7 @@ class LearningStore:
         tutor: dict[str, Any] | None,
         trace_grade: dict[str, Any] | None,
         tested_objective_manifest: dict[str, Any],
-        confidence: int,
+        confidence: int | None,
         result: dict[str, Any],
         receipts: list[dict[str, Any]],
         receipt_events: dict[int, dict[str, Any]],
@@ -5559,7 +6122,7 @@ class LearningStore:
                 return {"status": "not_pending", "pendingCaseId": session["pending_case_id"]}
 
             frozen_manifest = json.loads(session["pending_manifest_json"] or "{}")
-            frozen_keys = (
+            frozen_keys = [
                 "version",
                 "caseId",
                 "assessmentScope",
@@ -5567,7 +6130,9 @@ class LearningStore:
                 "objectives",
                 "allowSelectedExtras",
                 "overcallPolicy",
-            )
+            ]
+            if frozen_manifest.get("contractVersion") == "mixed-v2":
+                frozen_keys.extend(("contractVersion", "taskPacket"))
             if not frozen_manifest or any(
                 frozen_manifest.get(key) != tested_objective_manifest.get(key)
                 for key in frozen_keys
@@ -6032,7 +6597,6 @@ class LearningStore:
         session_id: str,
         item_id: str,
         first_look: dict[str, Any],
-        decide_duration_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Persist the ECG-only commitment before authored context is served.
 
@@ -6042,11 +6606,6 @@ class LearningStore:
         """
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat()
-        decide_deadline = (
-            (now_dt + timedelta(seconds=int(decide_duration_seconds))).isoformat()
-            if decide_duration_seconds is not None
-            else None
-        )
         with self.connect() as conn:
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
@@ -6086,12 +6645,16 @@ class LearningStore:
                 "orientStartedAt": row["pending_orient_started_at"] or now,
                 "orientDeadlineAt": row["pending_orient_deadline_at"],
             }
+            # Timed decision work starts only at the explicit viewer-ready
+            # activation boundary. Learn sessions remain untimed and preserve
+            # their historical decision-duration telemetry from context reveal.
+            decide_started_at = now if row["tier"] != "shift" else None
             conn.execute(
                 "UPDATE clinical_shift_sessions SET pending_context_revealed = 1, "
                 "pending_first_look_json = ?, pending_decide_started_at = ?, "
-                "pending_decide_deadline_at = ?, updated_at = ? WHERE session_id = ? "
+                "pending_decide_deadline_at = NULL, updated_at = ? WHERE session_id = ? "
                 "AND pending_context_revealed = 0",
-                (json.dumps(durable_first_look), now, decide_deadline, now, session_id),
+                (json.dumps(durable_first_look), decide_started_at, now, session_id),
             )
             return {"status": "recorded", "firstLook": durable_first_look}
 
@@ -6114,7 +6677,8 @@ class LearningStore:
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT pending_item_id, pending_context_revealed, pending_step_answers_json, status "
+                "SELECT pending_item_id, pending_context_revealed, pending_step_answers_json, "
+                "pending_decide_started_at, tier, status "
                 "FROM clinical_shift_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
@@ -6124,6 +6688,8 @@ class LearningStore:
                 return {"status": "not_pending", "pendingItemId": row["pending_item_id"]}
             if not row["pending_context_revealed"]:
                 return {"status": "context_not_revealed"}
+            if row["tier"] == "shift" and not row["pending_decide_started_at"]:
+                return {"status": "phase_not_activated"}
             committed = json.loads(row["pending_step_answers_json"] or "[]")
             if step_index < len(committed):
                 return {
@@ -6154,7 +6720,7 @@ class LearningStore:
                 conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT pending_item_id, pending_context_revealed, pending_decide_started_at, "
-                "pending_decide_deadline_at, pending_decide_submitted_at, status "
+                "pending_decide_deadline_at, pending_decide_submitted_at, tier, status "
                 "FROM clinical_shift_sessions WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
@@ -6164,6 +6730,8 @@ class LearningStore:
                 return {"status": "not_pending", "pendingItemId": row["pending_item_id"]}
             if not row["pending_context_revealed"]:
                 return {"status": "context_not_revealed", "pendingItemId": item_id}
+            if row["tier"] == "shift" and not row["pending_decide_started_at"]:
+                return {"status": "phase_not_activated", "pendingItemId": item_id}
             started_at = row["pending_decide_started_at"] or now
             submitted_at = row["pending_decide_submitted_at"] or now
             if not row["pending_decide_started_at"] or not row["pending_decide_submitted_at"]:
@@ -6372,7 +6940,7 @@ class LearningStore:
         response: dict[str, Any],
         grade: dict[str, Any],
         correct: bool,
-        confidence: int,
+        confidence: int | None,
         calibration_event: dict[str, Any] | None,
         competency_events: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:

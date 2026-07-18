@@ -119,6 +119,151 @@ validate_corpus_tree() {
     and .clinical.distinctRealEcgs >= 100
   ' "${root}/release-audit.json" >/dev/null \
     || die "release audit does not satisfy product capability minima"
+
+  if jq -e '.rapidRhythmSupplement != null' "${root}/manifest.json" >/dev/null; then
+    local rhythm_path rhythm_root rhythm_integrity rhythm_count rhythm_waveform_count
+    local rhythm_runtime_sha rhythm_reference_sha rhythm_source_sha rhythm_expected_source_sha
+    local rhythm_database_sha rhythm_waveform_files_sha rhythm_reference_targets
+    local rhythm_runtime_targets rhythm_audit_targets rhythm_top_level_count
+    rhythm_path="$(jq -er '.rapidRhythmSupplement.path' "${root}/manifest.json")"
+    [[ "${rhythm_path}" == "rapid_rhythm_supplement" ]] \
+      || die "rapid rhythm supplement path is outside the reviewed release contract"
+    rhythm_root="${root}/${rhythm_path}"
+    [[ -d "${rhythm_root}" && ! -L "${rhythm_root}" ]] \
+      || die "referenced rapid rhythm supplement directory is missing or unsafe"
+    [[ -z "$(find "${rhythm_root}" -type l -print -quit)" ]] \
+      || die "rapid rhythm supplement contains a symlink"
+    rhythm_top_level_count="$(find "${rhythm_root}" -mindepth 1 -maxdepth 1 -printf '.' | wc -c)"
+    [[ "${rhythm_top_level_count}" == "4" ]] \
+      || die "rapid rhythm supplement contains unexpected top-level artifacts"
+    [[ -f "${rhythm_root}/manifest.json" ]] \
+      || die "rapid rhythm source manifest is missing"
+    [[ -f "${rhythm_root}/runtime-manifest.json" ]] \
+      || die "rapid rhythm runtime manifest is missing"
+    [[ -f "${rhythm_root}/rhythm_streams.db" ]] \
+      || die "rapid rhythm database is missing"
+    [[ -d "${rhythm_root}/waveforms" ]] \
+      || die "rapid rhythm waveforms directory is missing"
+    [[ -z "$(find "${rhythm_root}/waveforms" -type f ! -name '*.npy' -print -quit)" ]] \
+      || die "rapid rhythm waveform tree contains a non-NPY artifact"
+
+    rhythm_integrity="$(sqlite3 -readonly "${rhythm_root}/rhythm_streams.db" \
+      'PRAGMA integrity_check;')"
+    [[ "${rhythm_integrity}" == "ok" ]] \
+      || die "rapid rhythm database integrity check failed"
+    rhythm_count="$(sqlite3 -readonly "${rhythm_root}/rhythm_streams.db" \
+      'SELECT COUNT(*) FROM rhythm_windows;')"
+    [[ "${rhythm_count}" =~ ^[0-9]+$ && "${rhythm_count}" -gt 0 ]] \
+      || die "rapid rhythm supplement contains no fragments"
+    rhythm_waveform_count="$(find "${rhythm_root}/waveforms" -type f -name '*.npy' -printf '.' | wc -c)"
+    [[ "${rhythm_waveform_count}" == "${rhythm_count}" ]] \
+      || die "rapid rhythm waveform/database count mismatch"
+
+    rhythm_runtime_sha="$(sha256_file "${rhythm_root}/runtime-manifest.json")"
+    rhythm_reference_sha="$(jq -r '.rapidRhythmSupplement.runtimeManifestSha256 // ""' \
+      "${root}/manifest.json")"
+    [[ "${rhythm_reference_sha}" == "${rhythm_runtime_sha}" ]] \
+      || die "rapid rhythm parent/runtime manifest hash mismatch"
+    rhythm_source_sha="$(sha256_file "${rhythm_root}/manifest.json")"
+    rhythm_expected_source_sha="$(jq -r '.sourceManifestSha256 // ""' \
+      "${rhythm_root}/runtime-manifest.json")"
+    [[ "${rhythm_expected_source_sha}" == "${rhythm_source_sha}" ]] \
+      || die "rapid rhythm source/runtime manifest hash mismatch"
+    rhythm_database_sha="$(sha256_file "${rhythm_root}/rhythm_streams.db")"
+    rhythm_waveform_files_sha="$(
+      cd "${rhythm_root}"
+      find waveforms -type f -name '*.npy' -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 sha256sum \
+        | sha256sum \
+        | awk '{print $1}'
+    )"
+    rhythm_reference_targets="$(jq -cS '.rapidRhythmSupplement.learnerTargetCounts // {}' \
+      "${root}/manifest.json")"
+    rhythm_runtime_targets="$(jq -cS '.learnerTargetCounts // {}' \
+      "${rhythm_root}/runtime-manifest.json")"
+    rhythm_audit_targets="$(jq -cS '.rapidRhythmSupplement.learnerTargetCounts // {}' \
+      "${root}/release-audit.json")"
+    [[ "${rhythm_reference_targets}" == "${rhythm_runtime_targets}" \
+      && "${rhythm_reference_targets}" == "${rhythm_audit_targets}" ]] \
+      || die "rapid rhythm learner target counts do not reconcile"
+
+    jq -e --argjson count "${rhythm_count}" \
+      --arg runtime_sha "${rhythm_runtime_sha}" '
+      .rapidRhythmSupplement.schemaVersion == 1
+      and .rapidRhythmSupplement.path == "rapid_rhythm_supplement"
+      and .rapidRhythmSupplement.sourceId == "ecg-fragment-dangerous-arrhythmia"
+      and .rapidRhythmSupplement.runtimeScope == "rapid_emergency_rhythm"
+      and .rapidRhythmSupplement.mappingVersion == "high-risk-ventricular-rhythm-v1"
+      and .rapidRhythmSupplement.fragmentCount == $count
+      and .rapidRhythmSupplement.runtimeManifestSha256 == $runtime_sha
+    ' "${root}/manifest.json" >/dev/null \
+      || die "rapid rhythm parent reference is invalid"
+    jq -e --argjson count "${rhythm_count}" --arg source_sha "${rhythm_source_sha}" '
+      .schemaVersion == 1
+      and .complete == true
+      and .sourceId == "ecg-fragment-dangerous-arrhythmia"
+      and .mappingVersion == "high-risk-ventricular-rhythm-v1"
+      and .runtimeScope == "rapid_emergency_rhythm"
+      and .fragmentCount == $count
+      and .sourceManifestSha256 == $source_sha
+      and .clinicalCaseEligible == false
+      and .hemodynamicContextAvailable == false
+      and .stabilityInferenceEligible == false
+      and .cardiacArrestInferenceEligible == false
+      and .shockabilityClassificationEligible == false
+      and .clinicalManagementEligible == false
+      and .treatmentOrActionSequenceEligible == false
+      and .actionQuestionsRequireSeparateAuthoredContext == true
+      and .actionQuestionsFormativeOnly == true
+    ' "${rhythm_root}/runtime-manifest.json" >/dev/null \
+      || die "rapid rhythm runtime manifest violates its evidence boundary"
+    jq -e --argjson count "${rhythm_count}" '
+      .complete == true
+      and .fragmentCount == $count
+      and .rawPatientIdentifiersIncluded == false
+      and .rawRecordIdentifiersIncluded == false
+      and .currentRuntimeConnected == false
+      and .clinicalManagementEligible == false
+      and .shockabilityClassificationEligible == false
+    ' "${rhythm_root}/manifest.json" >/dev/null \
+      || die "rapid rhythm source manifest contains unsafe release claims"
+    jq -e --argjson count "${rhythm_count}" \
+      --arg runtime_sha "${rhythm_runtime_sha}" \
+      --arg source_sha "${rhythm_source_sha}" \
+      --arg database_sha "${rhythm_database_sha}" \
+      --arg waveform_sha "${rhythm_waveform_files_sha}" \
+      --arg content_sha "$(jq -r '.contentIndexSha256 // ""' \
+        "${rhythm_root}/runtime-manifest.json")" '
+      .rapidRhythmSupplement.present == true
+      and .rapidRhythmSupplement.complete == true
+      and .rapidRhythmSupplement.schemaVersion == 1
+      and .rapidRhythmSupplement.path == "rapid_rhythm_supplement"
+      and .rapidRhythmSupplement.sourceId == "ecg-fragment-dangerous-arrhythmia"
+      and .rapidRhythmSupplement.fragmentCount == $count
+      and .rapidRhythmSupplement.runtimeManifestSha256 == $runtime_sha
+      and .rapidRhythmSupplement.sourceManifestSha256 == $source_sha
+      and .rapidRhythmSupplement.databaseSha256 == $database_sha
+      and .rapidRhythmSupplement.contentIndexSha256 == $content_sha
+      and .rapidRhythmSupplement.waveforms.complete == true
+      and .rapidRhythmSupplement.waveforms.caseFilesChecked == $count
+      and .rapidRhythmSupplement.waveforms.npyFilesFound == $count
+      and .rapidRhythmSupplement.waveforms.expectedColumns == 1
+      and .rapidRhythmSupplement.waveforms.lead == "MLII"
+      and .rapidRhythmSupplement.waveforms.dtype == "int16"
+      and .rapidRhythmSupplement.waveforms.filesSha256 == $waveform_sha
+      and .rapidRhythmSupplement.identity.opaqueOnly == true
+      and .rapidRhythmSupplement.identity.rawPatientIdentifiersIncluded == false
+      and .rapidRhythmSupplement.identity.rawRecordIdentifiersIncluded == false
+      and .rapidRhythmSupplement.clinicalManagementEligible == false
+      and .rapidRhythmSupplement.shockabilityClassificationEligible == false
+      and .rapidRhythmSupplement.actionQuestionsFormativeOnly == true
+    ' "${root}/release-audit.json" >/dev/null \
+      || die "rapid rhythm exhaustive release audit does not match the packaged data"
+  else
+    jq -e '.rapidRhythmSupplement.present != true' "${root}/release-audit.json" >/dev/null \
+      || die "release audit advertises an unreferenced rapid rhythm supplement"
+  fi
 }
 
 wait_ready() {

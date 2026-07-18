@@ -100,10 +100,14 @@ def test_phase_activation_is_exactly_once_and_cross_device_resume_keeps_deadline
         assert resumed_orient["current"]["clock"]["orientDeadlineAt"] == orient_deadline
 
         revealed = _reveal(second, session_id, item_id)
-        decide_start = revealed["clock"]["decideStartedAt"]
-        decide_deadline = revealed["clock"]["decideDeadlineAt"]
-        assert decide_start and decide_deadline
+        assert revealed["clock"]["decideStartedAt"] is None
+        assert revealed["clock"]["decideDeadlineAt"] is None
         assert revealed["clock"]["activePhase"] == "decide"
+
+        activated_decide = _activate(second, session_id, item_id, "decide")
+        decide_start = activated_decide["clock"]["decideStartedAt"]
+        decide_deadline = activated_decide["clock"]["decideDeadlineAt"]
+        assert decide_start and decide_deadline
         decide_replay = _activate(second, session_id, item_id, "decide")
         assert decide_replay["clock"]["decideStartedAt"] == decide_start
         assert decide_replay["clock"]["decideDeadlineAt"] == decide_deadline
@@ -134,6 +138,10 @@ def test_server_derives_timeout_and_answer_time_ignoring_forged_client_timing() 
         session_id, item_id, _ = _start(client)
         _activate(client, session_id, item_id, "orient")
         _reveal(client, session_id, item_id)
+        _activate(client, session_id, item_id, "decide")
+        durable = store.get_shift_session(session_id)
+        assert durable is not None
+        canonical_item_id = durable["pendingItemId"]
 
         now = datetime.now(UTC)
         with store.connect() as conn:
@@ -161,7 +169,8 @@ def test_server_derives_timeout_and_answer_time_ignoring_forged_client_timing() 
         )
         assert response.status_code == 200, response.text
         assert response.json()["grade"]["timedOut"] is True
-        stored = store.get_shift_answer(session_id, item_id)
+        stored = store.get_shift_answer(session_id, canonical_item_id)
+        assert stored is not None
         assert stored["response"]["timed_out"] is True
         assert stored["answerTimeMs"] >= 9_000
         assert stored["answerTimeMs"] != 1
