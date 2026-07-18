@@ -18,10 +18,13 @@ test.describe("public landing page", () => {
     });
 
     await page.goto("/");
+    await expect(page.locator('[data-route-accessibility-ready="true"]')).toHaveText("ECG learning home loaded");
 
     await expect(page.getByRole("heading", { name: "Read ECGs with a method you can trust." })).toBeVisible();
     await expect(page).toHaveTitle("TRACE · ECG learning for medical students");
-    await expect(page.getByText(/Learn the framework, strengthen specific findings/i)).toBeVisible();
+    const productSummary = page.locator("#main-content").getByText(/Learn the framework, strengthen specific findings/i);
+    await expect(productSummary).toHaveCount(1);
+    await expect(productSummary).toBeVisible();
     await expect(page.getByRole("navigation", { name: "Website navigation" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Create account", exact: true })).toHaveAttribute("href", "/login?mode=register");
     await expect(page.getByRole("link", { name: "Create your account", exact: true }).first()).toHaveAttribute("href", "/login?mode=register");

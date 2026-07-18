@@ -534,6 +534,7 @@ function LearningHome() {
             id={`home-tab-${item.id}`}
             key={item.id}
             role="tab"
+            aria-label={item.id === "calendar" && dueSkills.length > 0 ? `${item.label}, review ready` : item.label}
             aria-selected={panel === item.id}
             aria-controls={`home-panel-${item.id}`}
             tabIndex={panel === item.id ? 0 : -1}
@@ -552,7 +553,7 @@ function LearningHome() {
             }}
           >
             {item.label}
-            {item.id === "calendar" && dueSkills.length > 0 ? <><span className={styles.tabDot} aria-hidden="true" /><span className="sr-only">, review ready</span></> : null}
+            {item.id === "calendar" && dueSkills.length > 0 ? <span className={styles.tabDot} aria-hidden="true" /> : null}
           </button>
         ))}
       </div>

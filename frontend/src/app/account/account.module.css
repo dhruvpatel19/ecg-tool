@@ -1,7 +1,40 @@
 .page {
   width: min(880px, calc(100% - 48px));
+  min-width: 0;
+  max-width: 100%;
   margin: 0 auto;
   padding: 52px 0 96px;
+}
+
+.page > *,
+.header > div,
+.section > *,
+.danger > *,
+.sectionIntro > div,
+.learningPreferences,
+.feedback,
+.actions,
+.form,
+.deleteForm,
+.exportForm,
+.sessionPanel,
+.sessionList,
+.logoutConfirm,
+.recoveryNote {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.header p,
+.sectionIntro p,
+.hint,
+.sessionSummary,
+.sessionError,
+.logoutConfirm,
+.recoveryNote,
+.exportForm,
+.deleteForm {
+  overflow-wrap: anywhere;
 }
 
 .header {
@@ -704,7 +737,7 @@
 
 @media (max-width: 720px) {
   .page {
-    width: min(100%, 880px);
+    width: 100%;
     padding-top: 30px;
   }
 

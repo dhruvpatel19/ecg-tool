@@ -425,7 +425,12 @@ test.describe("canonical learning dashboard details", () => {
   test("supports deep-linked panels, keyboard movement, and browser history", async ({ page }) => {
     await page.goto("/home?panel=activity");
     const tabs = page.getByRole("tablist", { name: "Learning dashboard sections" }).getByRole("tab");
-    await expect(tabs).toHaveText(["Home", "History", "Progress", "Schedule", "My plan"]);
+    await expect(tabs).toHaveCount(5);
+    await expect(tabs.nth(0)).toHaveAccessibleName("Home");
+    await expect(tabs.nth(1)).toHaveAccessibleName("History");
+    await expect(tabs.nth(2)).toHaveAccessibleName("Progress");
+    await expect(tabs.nth(3)).toHaveAccessibleName("Schedule, review ready");
+    await expect(tabs.nth(4)).toHaveAccessibleName("My plan");
 
     const activityTab = page.getByRole("tab", { name: "History" });
     await expect(activityTab).toHaveAttribute("aria-selected", "true");

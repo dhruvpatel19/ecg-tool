@@ -76,6 +76,29 @@ test.describe("small-screen student shell", () => {
 
         const result = await page.evaluate(() => {
           const overflow = document.documentElement.scrollWidth - document.documentElement.clientWidth;
+          const viewportWidth = document.documentElement.clientWidth;
+          const overflowing = Array.from(document.querySelectorAll<HTMLElement>("body *"))
+            .filter((element) => {
+              const style = window.getComputedStyle(element);
+              const box = element.getBoundingClientRect();
+              return style.visibility !== "hidden"
+                && style.display !== "none"
+                && box.width > 0
+                && box.height > 0
+                && (box.right > viewportWidth + 1 || box.left < -1);
+            })
+            .slice(0, 12)
+            .map((element) => {
+              const box = element.getBoundingClientRect();
+              return {
+                tag: element.tagName.toLowerCase(),
+                className: typeof element.className === "string" ? element.className.slice(0, 100) : "",
+                text: (element.innerText || element.getAttribute("aria-label") || "").trim().slice(0, 60),
+                left: Math.round(box.left),
+                right: Math.round(box.right),
+                width: Math.round(box.width),
+              };
+            });
           const undersized = Array.from(document.querySelectorAll<HTMLElement>(
             'main button, main input, main select, main textarea, main summary, main [role="tab"]',
           )).filter((element) => {
@@ -92,10 +115,13 @@ test.describe("small-screen student shell", () => {
             width: Math.round(element.getBoundingClientRect().width),
             height: Math.round(element.getBoundingClientRect().height),
           }));
-          return { overflow, undersized };
+          return { overflow, overflowing, undersized };
         });
 
-        expect(result.overflow, `Horizontal overflow on ${route.path} at ${viewport.name}`).toBeLessThanOrEqual(1);
+        expect(
+          result.overflow,
+          `Horizontal overflow on ${route.path} at ${viewport.name}. Offenders: ${JSON.stringify(result.overflowing)}`,
+        ).toBeLessThanOrEqual(1);
         expect(result.undersized, `Controls below the WCAG 2.2 24px target minimum on ${route.path}`).toEqual([]);
       });
     }

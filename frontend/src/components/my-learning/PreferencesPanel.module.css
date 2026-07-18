@@ -1,7 +1,27 @@
 .form {
   min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 14px;
+}
+
+.form > *,
+.intro > *,
+.grid > *,
+.stack > *,
+.card > *,
+.choiceGroup > *,
+.saveBar > *,
+.saveBar > div:last-child > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.intro,
+.card,
+.choiceGroup,
+.saveBar {
+  overflow-wrap: anywhere;
 }
 
 .intro {
@@ -390,5 +410,9 @@
 
   .lengthChoices {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .saveBar > div:last-child {
+    grid-template-columns: 1fr;
   }
 }
