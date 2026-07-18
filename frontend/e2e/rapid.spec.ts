@@ -781,6 +781,106 @@ test.describe("Mode 3 · Rapid", () => {
     expect(errors, `Unexpected console errors:\n${errors.join("\n")}`).toEqual([]);
   });
 
+  test("preserves a server-echoed numeric response in post-commit feedback", async ({ page }) => {
+    let taskId = "";
+    let submittedValue: unknown;
+    const numericTaskPacket = {
+      version: "rapid-task-packet-v1",
+      display: { kind: "twelve_lead" },
+      estimatedSeconds: 45,
+      tasks: [{
+        id: "",
+        type: "numeric_fill_in",
+        prompt: "Estimate the ventricular rate.",
+        unit: "bpm",
+        minValue: 20,
+        maxValue: 250,
+        step: 5,
+        responseLabel: "Your measurement",
+        required: true,
+      }],
+    };
+
+    await page.route("**/api/backend/rapid/rounds/*/next", async (route) => {
+      if (route.request().postDataJSON()?.activate !== false) {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      const payload = await response.json() as {
+        current?: { kind?: string; taskPacket?: { tasks?: Array<{ id?: string }> } | null } | null;
+      };
+      taskId = payload.current?.taskPacket?.tasks?.[0]?.id ?? "";
+      expect(taskId).not.toBe("");
+      numericTaskPacket.tasks[0].id = taskId;
+      if (payload.current?.kind === "pending") payload.current.taskPacket = numericTaskPacket;
+      await route.fulfill({ response, json: payload });
+    });
+
+    await page.route("**/api/backend/rapid/rounds/*/submit", async (route) => {
+      const requestBody = route.request().postDataJSON() as {
+        taskResponses?: Record<string, unknown>;
+      };
+      submittedValue = requestBody.taskResponses?.[taskId];
+
+      // The live server still owns its original frozen task in this browser-only
+      // regression. Forward a valid response for that task, then reproduce the
+      // numeric response shape the server returns for a real measurement task.
+      const forwardedBody = {
+        ...requestBody,
+        taskResponses: { [taskId]: String(submittedValue) },
+      };
+      const response = await route.fetch({ postData: JSON.stringify(forwardedBody) });
+      const payload = await response.json() as {
+        current?: {
+          taskPacket?: unknown;
+          answer?: {
+            response?: { taskResponses?: Record<string, unknown> };
+            grade?: Record<string, unknown>;
+          } | null;
+        } | null;
+      };
+      expect(response.ok()).toBeTruthy();
+      expect(payload.current?.answer).toBeTruthy();
+      payload.current!.taskPacket = numericTaskPacket;
+      payload.current!.answer!.response = {
+        ...(payload.current!.answer!.response ?? {}),
+        taskResponses: { [taskId]: submittedValue },
+      };
+      payload.current!.answer!.grade = {
+        ...(payload.current!.answer!.grade ?? {}),
+        score: 0,
+        taskFeedback: [{
+          taskId,
+          type: "numeric_fill_in",
+          complete: true,
+          correct: false,
+          score: 0,
+          timedOut: false,
+          formativeOnly: false,
+          expectedValue: 64,
+          tolerance: 5,
+          unit: "bpm",
+          feedback: "Recheck the ECG-grid calculation.",
+        }],
+      };
+      await route.fulfill({ response, json: payload });
+    });
+
+    await page.goto("/rapid");
+    await startQuickUntimedRound(page);
+    await expect(page.getByText("Estimate the ventricular rate.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await page.getByLabel("Your measurement").fill("80");
+    await page.getByRole("button", { name: "Submit answers" }).click();
+
+    expect(submittedValue).toBe(80);
+    const feedback = page.locator(".rapid-task-feedback-list article").first();
+    await expect(feedback).toBeVisible({ timeout: 60_000 });
+    await expect(feedback.getByText("80 bpm", { exact: true })).toBeVisible();
+    await expect(feedback.getByText("64 bpm", { exact: true })).toBeVisible();
+    await expect(feedback.getByText("No answer", { exact: true })).toHaveCount(0);
+  });
+
   test("tachyarrhythmia handoff constrains the first case and preserves return navigation", async ({ page }) => {
     const errors = collectConsoleErrors(page);
     await page.goto("/rapid?focus=tachyarrhythmia_mixed&subskill=recognize&returnTo=/learn/tachyarrhythmias?scene=m06-s11");

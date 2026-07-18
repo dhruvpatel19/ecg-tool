@@ -8,6 +8,7 @@ connection/`:memory:` handling of :class:`app.store.case_store.CaseStore`.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
@@ -22,6 +23,7 @@ from ..clinical.schemas import ClinicalCaseItem
 class ClinicalItemStore:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
+        self._memory_lock = threading.Lock()
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._memory_conn = (
@@ -34,8 +36,18 @@ class ClinicalItemStore:
     @contextmanager
     def connect(self):
         if self._memory_conn is not None:
-            yield self._memory_conn
-            self._memory_conn.commit()
+            # ``check_same_thread=False`` permits the test app's request threads
+            # to use this connection; it does not make concurrent cursor access
+            # safe.  Serialize the shared in-memory handle just as LearningStore
+            # and TrainingCampaignStore do.  File-backed production calls keep
+            # their independent per-operation connections below.
+            with self._memory_lock:
+                try:
+                    yield self._memory_conn
+                    self._memory_conn.commit()
+                except Exception:
+                    self._memory_conn.rollback()
+                    raise
             return
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row

@@ -4,7 +4,7 @@ import { ArrowLeft, ArrowRight, Check, Crosshair, Send } from "lucide-react";
 import { competencySkillLabel } from "@/lib/learning/skillLabels";
 import type { RapidTaskPrompt } from "@/lib/types";
 
-export type RapidTaskResponse = string | string[] | Record<string, string>;
+export type RapidTaskResponse = string | number | string[] | Record<string, string>;
 
 type Props = {
   tasks: RapidTaskPrompt[];
@@ -34,6 +34,7 @@ export function rapidTaskAnswered(
   if (["trace_point", "point_localization", "trace_region"].includes(task.type)) return traceComplete;
   if (Array.isArray(response)) return response.length > 0;
   if (typeof response === "string") return response.trim().length > 0;
+  if (typeof response === "number") return Number.isFinite(response);
   if (response && typeof response === "object") {
     if (task.type === "full_interpretation") {
       return String(response.impression ?? "").trim().length >= 3;
@@ -137,8 +138,12 @@ function ResponseControl({
     );
   }
 
-  const textValue = typeof response === "string" ? response : "";
   const numeric = task.type === "numeric" || task.type === "numeric_fill_in";
+  const textValue = typeof response === "string"
+    ? response
+    : numeric && typeof response === "number" && Number.isFinite(response)
+      ? String(response)
+      : "";
   return (
     <label className="rapid-task-entry">
       <span>{numeric ? task.responseLabel || "Your measurement" : "Your answer"}</span>

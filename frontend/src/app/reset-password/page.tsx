@@ -5,7 +5,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Suspense, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, api } from "@/lib/api";
-import { emailedLinkProof } from "@/lib/routeAccess";
+import {
+  emailedLinkProof,
+  PENDING_PASSWORD_RESET_PROOF_KEY,
+  storedPasswordResetProof,
+} from "@/lib/routeAccess";
 import styles from "../forgot-password/recovery.module.css";
 
 type ResetErrors = {
@@ -20,6 +24,14 @@ type RecoveredIdentity = {
   username: string;
   displayName: string | null;
 };
+
+const TERMINAL_PASSWORD_RESET_CODES = new Set([
+  "challenge_attempts_exhausted",
+  "challenge_expired",
+  "challenge_invalid",
+  "challenge_stale",
+  "challenge_used",
+]);
 
 export default function ResetPasswordPage() {
   return (
@@ -67,14 +79,47 @@ function ResetPasswordScreen() {
   const passwordsMatch = newPassword.length >= 10 && newPassword === confirmation;
   const proofCaptured = useRef(false);
 
+  function clearStoredProof() {
+    setProof({ challengeId: "", token: "" });
+    try {
+      window.sessionStorage.removeItem(PENDING_PASSWORD_RESET_PROOF_KEY);
+    } catch {
+      // React state still drops the one-time proof on every terminal outcome.
+    }
+  }
+
   useLayoutEffect(() => {
     if (proofCaptured.current || typeof window === "undefined") return;
     proofCaptured.current = true;
-    const captured = emailedLinkProof(window.location.search, window.location.hash);
-    if (window.location.search || window.location.hash) {
-      window.history.replaceState(window.history.state, "", "/reset-password");
+    const hasUrlProofMaterial = Boolean(window.location.search || window.location.hash);
+    const fromUrl = emailedLinkProof(window.location.search, window.location.hash);
+    let captured = fromUrl.challengeId && fromUrl.token ? fromUrl : null;
+    try {
+      if (captured) {
+        window.sessionStorage.setItem(
+          PENDING_PASSWORD_RESET_PROOF_KEY,
+          JSON.stringify({ ...captured, savedAt: Date.now() }),
+        );
+      } else if (!hasUrlProofMaterial) {
+        const raw = window.sessionStorage.getItem(PENDING_PASSWORD_RESET_PROOF_KEY);
+        captured = storedPasswordResetProof(raw);
+        if (raw && !captured) {
+          window.sessionStorage.removeItem(PENDING_PASSWORD_RESET_PROOF_KEY);
+        }
+      } else {
+        // A partial or malformed emailed-link handoff must fail closed instead
+        // of silently reviving an older proof from this tab.
+        window.sessionStorage.removeItem(PENDING_PASSWORD_RESET_PROOF_KEY);
+      }
+    } catch {
+      // A blocked tab store cannot prevent a fresh URL proof from remaining in
+      // memory; an URL-less reload simply falls back to the incomplete state.
+    } finally {
+      if (hasUrlProofMaterial) {
+        window.history.replaceState(window.history.state, "", "/reset-password");
+      }
+      setProof(captured ?? { challengeId: "", token: "" });
     }
-    setProof(captured);
   }, []);
 
   function focusPassword() {
@@ -128,6 +173,7 @@ function ResetPasswordScreen() {
         recoveryUsername: normalizedRecoveryUsername || undefined,
         recoveryDisplayName: recoveryDisplayName.trim() || undefined,
       });
+      clearStoredProof();
       setNewPassword("");
       setConfirmation("");
       setRecoveryUsername("");
@@ -157,6 +203,9 @@ function ResetPasswordScreen() {
         setErrors({ recoveryDisplayName: "Use 80 characters or fewer for the name shown in TRACE." });
         window.requestAnimationFrame(() => recoveryDisplayNameRef.current?.focus());
       } else if (caught instanceof ApiError && caught.code?.startsWith("challenge_")) {
+        if (TERMINAL_PASSWORD_RESET_CODES.has(caught.code)) {
+          clearStoredProof();
+        }
         setErrors({});
         setInvalidLink(true);
       } else {

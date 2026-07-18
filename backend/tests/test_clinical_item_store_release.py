@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 
 from app.clinical.schemas import ClinicalCaseItem
@@ -35,6 +38,24 @@ def test_release_readiness_accepts_unique_primary_and_prior_ecgs() -> None:
     )
 
     assert store.release_readiness(2) == (True, "ready")
+
+
+def test_memory_store_serializes_concurrent_readers() -> None:
+    store = ClinicalItemStore(":memory:")
+    item = _item("ptb-concurrent-item", "100")
+    store.upsert_item(item)
+    workers = 8
+    start = Barrier(workers)
+
+    def read_many() -> None:
+        start.wait()
+        for _ in range(250):
+            loaded = store.get_item(item.item_id)
+            assert loaded is not None
+            assert loaded.item_id == item.item_id
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(lambda _: read_many(), range(workers)))
 
 
 @pytest.mark.parametrize(

@@ -124,6 +124,128 @@ def test_public_numeric_task_exposes_input_bounds_without_answer_key() -> None:
     assert "expectedValue" not in json.dumps(public)
 
 
+def test_rate_never_becomes_a_generic_finding_choice_against_rhythm_labels() -> None:
+    case = {
+        "case_id": "rate-choice-regression",
+        "supported_objectives": [
+            "normal_ecg",
+            "rate",
+            "sinus_rhythm",
+            "axis_normal",
+            "qt_interval",
+        ],
+    }
+    session = {"roundId": "rate-choice-regression", "position": 0}
+
+    assert rapid_routes._choice_distractors(case, "rate") == []
+    assert rapid_routes._single_choice_task(case, session, "rate", 1) is None
+
+
+def test_single_choice_options_stay_within_one_clinical_answer_class() -> None:
+    mapped_count = sum(
+        len(answer_class)
+        for answer_class in rapid_routes._SINGLE_CHOICE_ANSWER_CLASSES
+    )
+    assert len(rapid_routes._SINGLE_CHOICE_CLASS_BY_OBJECTIVE) == mapped_count
+
+    for answer_class in rapid_routes._SINGLE_CHOICE_ANSWER_CLASSES:
+        for objective_id in answer_class:
+            case = {
+                "case_id": f"choice-{objective_id}",
+                "supported_objectives": [objective_id],
+            }
+            distractors = rapid_routes._choice_distractors(case, objective_id)
+            assert 2 <= len(distractors) <= 3, objective_id
+            assert set(distractors).issubset(answer_class), objective_id
+
+            task = rapid_routes._single_choice_task(
+                case,
+                {"roundId": "answer-class-audit", "position": 0},
+                objective_id,
+                1,
+            )
+            assert task is not None, objective_id
+            expected_labels = {
+                concept_label(value) for value in (objective_id, *distractors)
+            }
+            assert {option["label"] for option in task["options"]} == expected_labels
+            correct_label = next(
+                option["label"]
+                for option in task["options"]
+                if option["id"] == task["grading"]["correctOptionId"]
+            )
+            assert correct_label == concept_label(objective_id)
+
+
+def test_single_choice_fails_closed_when_supported_truths_exhaust_contrasts() -> None:
+    case = {
+        "case_id": "axis-choice-exhausted",
+        "supported_objectives": ["axis_normal", "left_axis_deviation"],
+    }
+    session = {"roundId": "axis-choice-exhausted", "position": 0}
+
+    assert rapid_routes._choice_distractors(case, "axis_normal") == [
+        "right_axis_deviation"
+    ]
+    assert rapid_routes._single_choice_task(case, session, "axis_normal", 1) is None
+
+
+def test_focused_packet_skips_rate_choice_and_keeps_task_diversity(monkeypatch) -> None:
+    case = {
+        "case_id": "mixed-choice-fallback",
+        "supported_objectives": [
+            "normal_ecg",
+            "rate",
+            "atrial_fibrillation",
+        ],
+    }
+    session = {
+        "roundId": "mixed-choice-fallback",
+        "position": 0,
+        "contextKey": rapid_routes._with_round_contract(
+            "",
+            contract_version="mixed-v2",
+            practice_mode="mixed",
+            question_depth="focused",
+        ),
+    }
+    monkeypatch.setattr(
+        rapid_routes,
+        "_ordered_task_targets",
+        lambda _case, _focus: ["normal_ecg", "rate", "atrial_fibrillation"],
+    )
+
+    def numeric_task(_case, _session, index, *, preferred_objective=None):
+        del preferred_objective
+        return {
+            "id": f"task_numeric_{index}",
+            "type": "numeric_fill_in",
+            "prompt": "Estimate the ventricular rate.",
+            "skillId": "measure",
+            "grading": {
+                "objectiveId": "rate",
+                "subskill": "measure",
+            },
+        }
+
+    monkeypatch.setattr(rapid_routes, "_numeric_task", numeric_task)
+    monkeypatch.setattr(rapid_routes, "_localization_task", lambda *args, **kwargs: None)
+
+    packet = rapid_routes._build_mixed_task_packet(
+        case,
+        session,
+        focus_concept=None,
+    )
+    assert [task["type"] for task in packet["tasks"]] == [
+        "short_answer",
+        "single_choice",
+        "numeric_fill_in",
+    ]
+    choice = packet["tasks"][1]
+    assert choice["grading"]["objectiveId"] == "atrial_fibrillation"
+    assert "Rate" not in {option["label"] for option in choice["options"]}
+
+
 def test_mixed_v2_pending_packet_is_blinded_and_grades_only_frozen_tasks() -> None:
     with TestClient(app) as client:
         _register(client, "rapid_mixed_contract")

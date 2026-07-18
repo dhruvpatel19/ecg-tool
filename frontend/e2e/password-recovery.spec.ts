@@ -1,5 +1,42 @@
 import { expect, test } from "@playwright/test";
+import {
+  PASSWORD_RESET_PROOF_TTL_MS,
+  PENDING_PASSWORD_RESET_PROOF_KEY,
+  storedPasswordResetProof,
+} from "../src/lib/routeAccess";
 import { collectConsoleErrors } from "./helpers";
+
+test.describe("password reset proof storage", () => {
+  test("accepts only complete, fresh, same-window proof values", () => {
+    const now = 2_000_000_000_000;
+    const fresh = JSON.stringify({
+      challengeId: "  challenge_fresh  ",
+      token: "  token_fresh  ",
+      savedAt: now - PASSWORD_RESET_PROOF_TTL_MS + 1,
+    });
+
+    expect(storedPasswordResetProof(fresh, now)).toEqual({
+      challengeId: "challenge_fresh",
+      token: "token_fresh",
+    });
+    expect(storedPasswordResetProof(JSON.stringify({
+      challengeId: "challenge_stale",
+      token: "token_stale",
+      savedAt: now - PASSWORD_RESET_PROOF_TTL_MS,
+    }), now)).toBeNull();
+    expect(storedPasswordResetProof(JSON.stringify({
+      challengeId: "challenge_future",
+      token: "token_future",
+      savedAt: now + 1,
+    }), now)).toBeNull();
+    expect(storedPasswordResetProof("{malformed", now)).toBeNull();
+    expect(storedPasswordResetProof(JSON.stringify({
+      challengeId: "challenge_incomplete",
+      token: "   ",
+      savedAt: now,
+    }), now)).toBeNull();
+  });
+});
 
 test.describe("public password recovery", () => {
   test.beforeEach(async ({ page }) => {
@@ -56,6 +93,9 @@ test.describe("public password recovery", () => {
 
     await page.goto(`/reset-password?challengeId=${challengeId}#token=${token}`);
     await expect(page).toHaveURL(/\/reset-password$/);
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), PENDING_PASSWORD_RESET_PROOF_KEY)).toContain(token);
+    await page.reload();
+    await expect(page).toHaveURL(/\/reset-password$/);
     const password = page.getByLabel("New password", { exact: true });
     const confirmation = page.getByLabel("Confirm new password");
     await expect(password).toHaveAttribute("required", "");
@@ -75,6 +115,7 @@ test.describe("public password recovery", () => {
     expect(browserUrlAtRequest).not.toContain(token);
     expect(requestBody).toEqual({ challengeId, token, newPassword: "A-longer-passphrase-28" });
     expect(observedNetwork.every((request) => !request.url.includes(token) && !request.referer.includes(token))).toBe(true);
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), PENDING_PASSWORD_RESET_PROOF_KEY)).toBeNull();
     expect(errors).toEqual([]);
   });
 
@@ -166,7 +207,65 @@ test.describe("public password recovery", () => {
 
     await expect(page.getByRole("alert").filter({ hasText: /invalid, expired, or has already been used/i })).toBeVisible();
     await expect(page.getByText("RAW_INTERNAL_CHALLENGE_DETAIL")).toHaveCount(0);
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), PENDING_PASSWORD_RESET_PROOF_KEY)).toBeNull();
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "This reset link is incomplete" })).toBeVisible();
     expect(confirmRequests).toBe(1);
+  });
+
+  test("removes malformed and stale same-tab reset proofs", async ({ page }) => {
+    await page.goto("/privacy");
+    await page.evaluate(({ key, ttl }) => {
+      sessionStorage.setItem(key, JSON.stringify({
+        challengeId: "stale_challenge",
+        token: "stale-private-token",
+        savedAt: Date.now() - ttl,
+      }));
+    }, { key: PENDING_PASSWORD_RESET_PROOF_KEY, ttl: PASSWORD_RESET_PROOF_TTL_MS });
+
+    await page.goto("/reset-password");
+    await expect(page.getByRole("heading", { name: "This reset link is incomplete" })).toBeVisible();
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), PENDING_PASSWORD_RESET_PROOF_KEY)).toBeNull();
+
+    await page.goto("/privacy");
+    await page.evaluate((key) => sessionStorage.setItem(key, "{malformed"), PENDING_PASSWORD_RESET_PROOF_KEY);
+    await page.goto("/reset-password");
+    await expect(page.getByRole("heading", { name: "This reset link is incomplete" })).toBeVisible();
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), PENDING_PASSWORD_RESET_PROOF_KEY)).toBeNull();
+  });
+
+  test("does not revive an older proof when the emailed-link handoff is incomplete", async ({ page }) => {
+    await page.goto("/privacy");
+    await page.evaluate((key) => {
+      sessionStorage.setItem(key, JSON.stringify({
+        challengeId: "older_challenge",
+        token: "older-private-token",
+        savedAt: Date.now(),
+      }));
+    }, PENDING_PASSWORD_RESET_PROOF_KEY);
+
+    await page.goto("/reset-password?challengeId=incomplete_challenge");
+    await expect(page).toHaveURL(/\/reset-password$/);
+    await expect(page.getByRole("heading", { name: "This reset link is incomplete" })).toBeVisible();
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), PENDING_PASSWORD_RESET_PROOF_KEY)).toBeNull();
+  });
+
+  test("retains the reset proof across a transient confirmation failure", async ({ page }) => {
+    await page.route("**/api/backend/auth/password-reset/confirm", (route) => route.fulfill({
+      status: 503,
+      json: { detail: { code: "auth_service_unavailable", message: "PRIVATE outage detail" } },
+    }));
+
+    await page.goto("/reset-password?challengeId=retry_reset#token=retry-private-token");
+    await page.getByLabel("New password", { exact: true }).fill("A-longer-passphrase-28");
+    await page.getByLabel("Confirm new password").fill("A-longer-passphrase-28");
+    await page.getByRole("button", { name: "Update password" }).click();
+
+    await expect(page.getByText(/could not be reset right now/i)).toBeVisible();
+    await expect(page.getByText("PRIVATE outage detail")).toHaveCount(0);
+    expect(await page.evaluate((key) => sessionStorage.getItem(key), PENDING_PASSWORD_RESET_PROOF_KEY)).toContain("retry-private-token");
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Set your new password" })).toBeVisible();
   });
 
   test("places focus on the field that needs correction", async ({ page }) => {
