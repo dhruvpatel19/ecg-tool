@@ -56,7 +56,7 @@ jobs:
             --jq ".total_count")"
           [[ "${successful_runs}" -gt 0 ]] || { echo "No successful CI run exists for ${GITHUB_SHA}." >&2; exit 1; }
       - name: Check out reviewed source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Validate release configuration
         run: |
           set -Eeuo pipefail
