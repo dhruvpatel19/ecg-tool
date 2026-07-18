@@ -29,7 +29,7 @@ from .config import get_settings
 from .data_sources import case_summary
 from .ecg_capability import issue_ecg_capability, matches_ecg_capability
 from .grading import grade_attempt, grade_click_answer
-from .ontology import CONCEPT_BY_ID, CONCEPTS, PRACTICE_GROUPS, concept_label
+from .ontology import CONCEPT_BY_ID, concept_label
 from .objectives import REGISTRY_VERSION, objective_definition
 from .assessment_contracts import (
     RAPID_SYNTHESIS_RECEIPT_UNAVAILABLE_REASON,
@@ -117,6 +117,64 @@ _ROUND_CONTRACT_PARAMS = frozenset(
     {_CONTRACT_VERSION_PARAM, _PRACTICE_MODE_PARAM, _QUESTION_DEPTH_PARAM}
 )
 _MIXED_TASK_PACKET_VERSION = "rapid-task-packet-v1"
+
+# A single-choice recognition item must compare like with like.  These classes
+# are intentionally narrower than the broad curriculum/ontology groups: those
+# groups organize learning, but can mix measurements, waveform descriptions,
+# and diagnoses that do not belong in one best-answer item.  Objectives absent
+# from this map (for example rate, QRS duration, and QT interval) use the
+# dedicated numeric, localization, short-answer, or full-interpretation paths.
+_SINGLE_CHOICE_ANSWER_CLASSES: tuple[tuple[str, ...], ...] = (
+    (
+        "sinus_rhythm",
+        "atrial_fibrillation",
+        "atrial_flutter",
+        "supraventricular_tachycardia",
+    ),
+    (
+        "wide_complex_tachycardia",
+        "ventricular_tachycardia",
+        "polymorphic_ventricular_tachycardia",
+        "ventricular_flutter",
+        "ventricular_fibrillation",
+    ),
+    (
+        "av_block_first_degree",
+        "av_block_second_degree_mobitz_i",
+        "av_block_second_degree_mobitz_ii",
+        "av_block_third_degree",
+    ),
+    ("axis_normal", "left_axis_deviation", "right_axis_deviation"),
+    (
+        "right_bundle_branch_block",
+        "left_bundle_branch_block",
+        "incomplete_right_bundle_branch_block",
+        "nonspecific_intraventricular_conduction_delay",
+    ),
+    (
+        "left_anterior_fascicular_block",
+        "left_posterior_fascicular_block",
+        "wolff_parkinson_white",
+    ),
+    (
+        "left_ventricular_hypertrophy",
+        "right_ventricular_hypertrophy",
+        "atrial_enlargement",
+    ),
+    (
+        "st_elevation",
+        "st_depression",
+        "t_wave_inversion",
+        "nonspecific_st_t_change",
+    ),
+    ("myocardial_ischemia", "electrolyte_drug_pattern", "pericarditis_pattern"),
+    ("anterior_mi", "inferior_mi", "lateral_mi", "septal_mi", "posterior_mi"),
+)
+_SINGLE_CHOICE_CLASS_BY_OBJECTIVE = {
+    objective_id: answer_class
+    for answer_class in _SINGLE_CHOICE_ANSWER_CLASSES
+    for objective_id in answer_class
+}
 
 
 def _b64encode(value: bytes) -> str:
@@ -435,36 +493,19 @@ def _ordered_task_targets(
 
 
 def _choice_distractors(case: dict[str, Any], objective_id: str) -> list[str]:
-    """Choose nearby, unsupported distractors so each option remains plausible."""
+    """Choose unsupported distractors from one reviewed clinical answer class."""
 
     supported = {str(value) for value in case.get("supported_objectives") or []}
-    nearby: list[str] = []
-    matching_groups = [
-        group
-        for group in PRACTICE_GROUPS
-        if objective_id in {str(value) for value in group.get("concepts") or []}
-    ]
-    matching_groups.sort(
-        key=lambda group: (
-            -len(group.get("concepts") or []),
-            str(group.get("id") or ""),
-        )
-    )
-    for group in matching_groups:
-        nearby.extend(str(value) for value in group.get("concepts") or [])
-    target = CONCEPT_BY_ID.get(objective_id)
-    if target is not None:
-        nearby.extend(concept.id for concept in CONCEPTS if concept.group == target.group)
-    nearby.extend(concept.id for concept in CONCEPTS)
-    return list(
-        dict.fromkeys(
-            value
-            for value in nearby
-            if value != objective_id
-            and value in CONCEPT_BY_ID
-            and value not in supported
-        )
-    )[:3]
+    answer_class = _SINGLE_CHOICE_CLASS_BY_OBJECTIVE.get(objective_id)
+    if answer_class is None:
+        return []
+    return [
+        value
+        for value in answer_class
+        if value != objective_id
+        and value in CONCEPT_BY_ID
+        and value not in supported
+    ][:3]
 
 
 def _single_choice_task(
@@ -474,7 +515,10 @@ def _single_choice_task(
     index: int,
 ) -> dict[str, Any] | None:
     distractors = _choice_distractors(case, objective_id)
-    if len(distractors) < 3:
+    # Three clinically plausible options are preferable to padding a task with
+    # an answer from a different construct.  If even two distractors are not
+    # available, the mixed-task builder continues to another target/task type.
+    if len(distractors) < 2:
         return None
     task_id = _task_id(session, str(case.get("case_id") or ""), index, "single_choice", objective_id)
     keyed_rows = [(objective_id, concept_label(objective_id))] + [

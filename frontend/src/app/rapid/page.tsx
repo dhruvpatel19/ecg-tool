@@ -338,6 +338,9 @@ function rapidTaskResponseDisplay(
 ) {
   const task = taskPacket?.tasks.find((candidate) => candidate.id === taskId);
   const response = responses[taskId];
+  if (typeof response === "number" && Number.isFinite(response)) {
+    return `${response}${task?.unit ? ` ${task.unit}` : ""}`;
+  }
   if (typeof response === "string") {
     return task?.options?.find((option) => option.id === response)?.label ?? response;
   }
