@@ -417,12 +417,20 @@ test.describe("Mode 4 · Clinical Decisions", () => {
 
     const options = page.locator(".clinical-options").getByRole("button");
     await expect(options.first()).toBeVisible();
+    const selectedAnswer = (await options.first().locator("span").last().innerText()).trim();
+    expect(selectedAnswer).not.toBe("");
     await options.first().click();
     await page.getByRole("button", { name: "Commit decision", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Review your decision|Review the safest path/ })).toBeVisible({ timeout: 30_000 });
 
     await page.reload();
     await expect(page.getByRole("heading", { name: /Review your decision|Review the safest path/ })).toBeVisible({ timeout: 30_000 });
+    const restoredLearnerAnswer = page.getByRole("region", { name: "Decision review" })
+      .locator("dt")
+      .filter({ hasText: /^Your answer$/ })
+      .locator("..")
+      .locator("dd");
+    await expect(restoredLearnerAnswer).toHaveText(selectedAnswer);
     await expect(page.getByRole("button", { name: "Review shift" })).toBeVisible();
     const reportResponse = page.waitForResponse((response) => (
       /\/api\/backend\/clinical\/shift\/[^/]+\/report$/.test(new URL(response.url()).pathname)

@@ -1535,7 +1535,7 @@ export function ClinicalDecisions() {
                 title={timedOut ? "Review the safest path" : "Review your decision"}
                 tone={feedbackSucceeded ? "correct" : grade.safetyFlags?.length ? "safety" : "developing"}
                 statusLabel={timedOut ? "Time ended" : feedbackSucceeded ? "Decision supported" : "Decision needs another pass"}
-                learnerAnswer={<p>{clinicalAnswerSummary(item, answer)}</p>}
+                learnerAnswer={<p>{grade.learnerAnswer?.trim() || clinicalAnswerSummary(item, answer)}</p>}
                 recommendedAnswer={<p>{bestSupportedResponse(grade)}</p>}
                 rationale={(
                   <>
