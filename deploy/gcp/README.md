@@ -444,9 +444,14 @@ bash deploy/gcp/scripts/validate-vercel-frontend.sh https://student.ecg.example.
 ```
 
 Then run one intentional live-tutor smoke through the deployed student UI and
-confirm it returns a substantive answer. The companion protected check performs
-a real provider call and consumes a guest quota reservation; it is separate
-from readiness so probes never spend tokens:
+confirm it returns a substantive answer. The companion protected check requires
+the full `Cookie` header value from a verified disposable production test
+account, performs a real provider call, and consumes that account's quota. It is
+separate from readiness so probes never spend tokens. Revoke the session and
+delete the disposable account after the complete live smoke. The script prompts
+for the cookie silently through the controlling terminal while the origin secret
+arrives on standard input; non-interactive operators may instead supply the
+cookie on file descriptor 3 from an approved secret-handling process:
 
 ```bash
 gcloud secrets versions access latest --secret ecg-origin-shared-secret \
