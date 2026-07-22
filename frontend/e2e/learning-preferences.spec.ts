@@ -134,8 +134,8 @@ test.describe("learning preferences", () => {
     });
 
     await page.goto("/train");
-    await expect(page.getByRole("heading", { name: "Train one visual skill until it sticks" })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByLabel("Requested unique ECGs")).toHaveValue("25");
+    await expect(page.getByRole("heading", { name: "What do you want to strengthen?" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("button", { name: "Up to 20 ECGs" })).toHaveAttribute("aria-pressed", "true");
     expect(reads).toBe(1);
   });
 

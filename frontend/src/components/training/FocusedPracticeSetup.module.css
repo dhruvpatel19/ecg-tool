@@ -277,7 +277,7 @@
 
 .topicCopy small {
   overflow: hidden;
-  color: #6c7d77;
+  color: #53665f;
   font-size: .75rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -415,7 +415,7 @@
 }
 
 .skillGrid button small {
-  color: #75847f;
+  color: #53665f;
   font-size: .73rem;
   line-height: 1.4;
 }
@@ -464,7 +464,7 @@
 }
 
 .lengthChoices strong { font-size: .88rem; }
-.lengthChoices span { color: #73827d; font-size: .7rem; }
+.lengthChoices span { color: #53665f; font-size: .7rem; }
 
 .lengthChoices button.selectedLength {
   border-color: #17684f;
@@ -518,7 +518,7 @@
   font-size: .78rem;
 }
 
-.planSummary span { color: #71807b; }
+.planSummary span { color: #53665f; }
 .planSummary strong { color: #274c40; text-align: right; }
 
 .poolWarning {
