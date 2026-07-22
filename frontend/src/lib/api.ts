@@ -14,6 +14,8 @@ import type {
   TutorMessageResponse,
   TutorResponse,
   TutorThread,
+  ViewerAction,
+  ViewerTaskEvidence,
   WaveformScope,
   WaveformResponse,
 } from "./types";
@@ -64,6 +66,7 @@ export type TutorMessageBody = {
   clinicalShiftContext?: ClinicalShiftTutorContextRef | null;
   adaptiveContext?: AdaptiveTutorContextRef | null;
   rapidRoundContext?: RapidRoundTutorContextRef | null;
+  trainingSetContext?: TrainingSetTutorContextRef | null;
 };
 
 export type ClinicalTutorContextRef = {
@@ -91,6 +94,12 @@ export type RapidRoundTutorContextRef = {
   roundId: string;
   answerCount: number;
   version: "rapid-round-debrief-v1";
+};
+
+export type TrainingSetTutorContextRef = {
+  campaignId: string;
+  answerCount: number;
+  version: "training-set-debrief-v1";
 };
 
 export type ClickGradeBody = {
@@ -310,11 +319,27 @@ export type LearningSessionReplay = {
   };
   submission: Record<string, unknown> & {
     taskResponses?: Record<string, unknown>;
+    viewerTaskEvidence?: ViewerTaskEvidence | null;
+    traceEvidence?: ViewerTaskEvidence | null;
+    structuredInterpretation?: Partial<Record<
+      "rate" | "rhythm" | "axis" | "intervals" | "conduction" | "st_t" | "hypertrophy" | "synthesis",
+      string
+    >>;
   };
   feedback: Record<string, unknown> & {
     taskFeedback?: LearningReplayTaskFeedback[];
   };
-  answerGuide: Record<string, unknown>;
+  answerGuide: Record<string, unknown> & {
+    systematicInterpretationComplete?: boolean;
+    reviewedFramework?: Array<{
+      key: string;
+      label: string;
+      review: string;
+      grounded: boolean;
+    }>;
+  };
+  /** Post-commit reviewed geometry. It is never present during an assessment. */
+  reviewActions?: ViewerAction[];
   provenance: {
     tracing: "real_deidentified_ecg";
     context?: "authored_simulation";
@@ -897,6 +922,17 @@ export const api = {
       source: "audited_waveform_only";
       independentReceiptsAvailable: boolean;
     }>(`/training/campaigns/pool?${params.toString()}`);
+  },
+  trainingAvailability: (conceptId: string) => {
+    const params = new URLSearchParams({ conceptId });
+    return request<{
+      conceptId: string;
+      source: "exact_target_index";
+      subskills: Record<string, {
+        available: boolean;
+        independentReceiptsAvailable: boolean;
+      }>;
+    }>(`/training/campaigns/availability?${params.toString()}`);
   },
   activeTrainingCampaign: () => request<TrainingCampaignPayload>("/training/campaigns/active"),
   startTrainingCampaign: (body: unknown) =>

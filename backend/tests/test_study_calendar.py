@@ -68,6 +68,32 @@ def test_emergency_rhythm_calendar_receipt_uses_the_isolated_practice_mode() -> 
     assert "returnTo=%2Fhome%3Fpanel%3Dcalendar%26date%3D2026-07-17" in href
 
 
+def test_dashboard_and_calendar_share_the_exact_focused_pool_gate(monkeypatch) -> None:
+    definition = main_module.OBJECTIVES["right_bundle_branch_block"]
+    runtime = main_module.objective_runtime_availability(definition, main_module.repo)
+    counts = main_module.repo.concept_ab_counts()
+    monkeypatch.setattr(
+        main_module,
+        "_training_pool_receipt_available",
+        lambda _concept, _subskill: False,
+    )
+
+    assert main_module._independent_receipt_contract(
+        definition, runtime, counts, "localize"
+    ) is None
+    assert main_module._calendar_receipt_contracts()[
+        ("right_bundle_branch_block", "localize")
+    ] is None
+    assert main_module._independent_receipt_contract(
+        definition, runtime, counts, "recognize"
+    ) == {
+        "mode": "rapid",
+        "caseConcept": "right_bundle_branch_block",
+        "receiptConcept": "right_bundle_branch_block",
+        "subskill": "recognize",
+    }
+
+
 def test_calendar_manual_crud_is_owner_bound_idempotent_and_revision_safe() -> None:
     with TestClient(app) as owner, TestClient(app) as other:
         owner_registration = _register(owner, "calendar_owner")

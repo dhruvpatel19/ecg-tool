@@ -2,7 +2,7 @@
 
 import { Brain, CornerDownLeft, MessageSquare, Quote, Send, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, api, type AdaptiveTutorContextRef, type ClinicalShiftTutorContextRef, type ClinicalTutorContextRef, type TutorMessageBody } from "@/lib/api";
+import { ApiError, api, type AdaptiveTutorContextRef, type ClinicalShiftTutorContextRef, type ClinicalTutorContextRef, type TrainingSetTutorContextRef, type TutorMessageBody } from "@/lib/api";
 import type { EcgCapability, TutorMessageResponse, ViewerAction } from "@/lib/types";
 
 type ChatTurn = {
@@ -64,6 +64,8 @@ type TutorChatProps = {
   clinicalShiftContext?: ClinicalShiftTutorContextRef | null;
   /** Server-issued, owner-bound reference to the current deterministic mastery plan. */
   adaptiveContext?: AdaptiveTutorContextRef | null;
+  /** Owner-bound reference to a completed Focused Practice answer ledger. */
+  trainingSetContext?: TrainingSetTutorContextRef | null;
   /** Refreshes an expired adaptive context while preserving the learner's draft. */
   onAdaptiveContextExpired?: (draft: string) => void;
   /** Called whenever a tutor reply carries viewer actions, so the page can drive the ECGViewer. */
@@ -99,6 +101,7 @@ export function TutorChat({
   clinicalContext,
   clinicalShiftContext,
   adaptiveContext,
+  trainingSetContext,
   onAdaptiveContextExpired,
   onViewerActions,
   onAssistance,
@@ -224,6 +227,7 @@ export function TutorChat({
           clinicalContext: clinicalContext ?? undefined,
           clinicalShiftContext: clinicalShiftContext ?? undefined,
           adaptiveContext: adaptiveContext ?? undefined,
+          trainingSetContext: trainingSetContext ?? undefined,
         };
         const response: TutorMessageResponse = await api.tutorMessage(body);
         setThreadId(response.threadId);
@@ -263,7 +267,7 @@ export function TutorChat({
         setSending(false);
       }
     },
-    [sending, restoring, adaptiveRefreshing, mode, threadId, requestEcgRef, lessonId, threadScope, viewerState, clinicalContext, clinicalShiftContext, adaptiveContext, onAdaptiveContextExpired, onViewerActions, onAssistance],
+    [sending, restoring, adaptiveRefreshing, mode, threadId, requestEcgRef, lessonId, threadScope, viewerState, clinicalContext, clinicalShiftContext, adaptiveContext, trainingSetContext, onAdaptiveContextExpired, onViewerActions, onAssistance],
   );
 
   function onSubmit(event: React.FormEvent) {

@@ -13,7 +13,9 @@ const TRAINING_SUBSKILLS = new Set<LearningSubskill>([
   "calibrate_confidence",
 ]);
 
-export const TRAINING_SESSION_LENGTHS = [10, 25, 50, 100, 500, 1000, 5000] as const;
+/** API-compatible lengths. Focused Practice presents only 5/10/20 in the
+ * learner setup; larger values remain accepted for durable legacy campaigns. */
+export const TRAINING_SESSION_LENGTHS = [5, 10, 20, 25, 50, 100, 500, 1000, 5000] as const;
 const TRAINING_RETURN_SURFACES = ["lesson", "study_plan", "profile", "calendar", "rapid", "clinical", "session_review"] as const;
 
 export function trainingFeedbackHeading({
@@ -28,7 +30,7 @@ export function trainingFeedbackHeading({
   subskillLabel?: string;
 }) {
   if (measurementRehearsal) return "Measurement rehearsal saved";
-  if (subskillLabel && subskillLabel !== "Recognize the pattern") {
+  if (subskillLabel && !["Recognize the pattern", "Recognize and name"].includes(subskillLabel)) {
     return correct ? `${subskillLabel} met` : `${subskillLabel} needs review`;
   }
   if (!correct) return "Re-check the discriminator";

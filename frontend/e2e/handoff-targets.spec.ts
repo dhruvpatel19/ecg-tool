@@ -49,6 +49,16 @@ test("supported direct findings resolve exactly without proxying", () => {
   }
 });
 
+test("Focused review offers Clinical transfer only for an exact case-bank objective", () => {
+  const availableClinicalObjectives = ["normal_ecg", "right_bundle_branch_block"];
+  const exact = resolveHandoffTarget("right_bundle_branch_block", availableClinicalObjectives);
+  const proxy = resolveHandoffTarget("lead_territories", availableClinicalObjectives);
+
+  expect(exact?.exact ? exact.caseConcept : null).toBe("right_bundle_branch_block");
+  expect(proxy).toMatchObject({ caseConcept: "normal_ecg", exact: false });
+  expect(proxy?.exact ? proxy.caseConcept : null).toBeNull();
+});
+
 test("competency CTAs fail closed and preserve the exact receipt contract", () => {
   expect(competencyPracticeHref(null)).toBeNull();
   expect(competencyPracticeHref({

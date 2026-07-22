@@ -86,12 +86,16 @@ type ECGViewerProps = {
   medianBeats?: MedianBeats | null;
   /** Fired once after the first waveform for this case renders (used to start the decision clock). */
   onReady?: () => void;
-  /** "clinical" uses a contextual, labeled command bar; "none" hides toolbar + help. */
-  toolbar?: "full" | "clinical" | "none";
+  /** "clinical" is contextual; "practice" keeps only task and view controls; "none" hides toolbar + help. */
+  toolbar?: "full" | "clinical" | "practice" | "none";
   /** Optional curriculum task. When present, the viewer becomes the response surface rather than decorative context. */
   task?: ViewerTaskSpec;
   /** Emits the actual waveform evidence collected by the active curriculum task. */
   onTaskEvidence?: (evidence: ViewerTaskEvidence) => void;
+  /** Parent-owned draft evidence, used to visibly restore a resumed task. */
+  taskEvidence?: ViewerTaskEvidence | null;
+  /** Parent-owned, committed learner evidence to redraw on a completed-review ECG. */
+  reviewEvidence?: ViewerTaskEvidence | ViewerTaskEvidence[] | null;
   /** Clears parent-owned evidence when learner task marks are removed. */
   onTaskReset?: () => void;
   /** Assessment modes collect raw evidence; only Guided may request immediate correctness. */
@@ -107,7 +111,7 @@ type ECGViewerProps = {
   guidedContext?: string | null;
 };
 
-export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = [], gradingRois = [], onCoordinate, gradeConcept, gradePrompt, medianBeats = null, onReady, toolbar, task, onTaskEvidence, onTaskReset, gradingMode = "immediate", reviewMode = false, presentation = { kind: "twelve_lead" }, guidedContext = null }: ECGViewerProps) {
+export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = [], gradingRois = [], onCoordinate, gradeConcept, gradePrompt, medianBeats = null, onReady, toolbar, task, onTaskEvidence, taskEvidence = null, reviewEvidence = null, onTaskReset, gradingMode = "immediate", reviewMode = false, presentation = { kind: "twelve_lead" }, guidedContext = null }: ECGViewerProps) {
   const [loadedWaveform, setLoadedWaveform] = useState<ScopedWaveformState | null>(null);
   const [loadError, setLoadError] = useState<(ScopedRequestState & { message: string }) | null>(null);
   const [loadingRequest, setLoadingRequest] = useState<ScopedRequestState | null>(null);
@@ -177,6 +181,26 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
   const lockedTool = taskTool(task);
   const activeTool = lockedTool ?? selectedTool;
   const identifyMode = activeTool === "point";
+  // Committed evidence is deliberately parent-owned. It only appears once the
+  // response surface is no longer active, so a review overlay can never reveal
+  // or duplicate an in-progress assessment mark.
+  const committedReviewEvidence = task
+    ? []
+    : Array.isArray(reviewEvidence)
+      ? reviewEvidence
+      : reviewEvidence
+        ? [reviewEvidence]
+        : [];
+  const restoredTaskEvidence = task && taskEvidence ? [taskEvidence] : [];
+  const parentOwnedEvidence = task ? restoredTaskEvidence : committedReviewEvidence;
+  // The task mark is also retained in local viewer state until React applies
+  // the post-commit props. Once the parent supplies the durable copy, hide
+  // that transient duplicate while still allowing fresh review annotations.
+  const visibleUserRois = task?.mode === "caliper"
+    ? []
+    : parentOwnedEvidence.length
+      ? userRois.filter((roi) => roi.concept === "learner_annotation")
+      : userRois;
 
   // A prop change must hide the previous patient's trace during the very first
   // render, before effects have a chance to run. Matching the requested window
@@ -366,7 +390,8 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
 
   function resetView() {
     setTimeWindow({ start: 0, end: waveformDuration });
-    setSelectedPoint(null);
+    // Fitting the viewport must not silently discard a committed response mark.
+    if (!task) setSelectedPoint(null);
   }
 
   function zoom(factor: number) {
@@ -471,7 +496,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
     }
     if (gradingMode === "deferred") {
       setClickFeedback(null);
-      setTaskFeedback("Point recorded. Correctness will be revealed after you commit your response.");
+      setTaskFeedback("Point recorded. Correctness will be revealed after you check your answer.");
       if (task?.mode === "point") onTaskEvidence?.({ mode: "point", point });
       return null;
     }
@@ -508,7 +533,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
     if (grading) return;
     if (task?.mode !== "region") return;
     if (gradingMode === "deferred") {
-      setTaskFeedback("Region recorded. Correctness will be revealed after you commit your response.");
+      setTaskFeedback("Region recorded. Correctness will be revealed after you check your answer.");
       onTaskEvidence?.({ mode: "region", roi });
       return;
     }
@@ -544,7 +569,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
       return;
     }
     if (gradingMode === "deferred") {
-      setTaskFeedback(`${task.measurement.toUpperCase()} span recorded at ${valueMs} ms. Correctness will be revealed after commit.`);
+      setTaskFeedback(`${task.measurement.toUpperCase()} span recorded at ${valueMs} ms. Correctness will be revealed after you check your answer.`);
       onTaskEvidence?.({ mode: "caliper", lead: roi.lead, timeStartSec: roi.timeStartSec, timeEndSec: roi.timeEndSec, valueMs });
       return;
     }
@@ -582,7 +607,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
       setMarchPoints((current) => {
         const duplicate = current.some((existing) => existing.lead === point.lead && Math.abs(existing.timeSec - point.timeSec) < 0.08);
         const next = duplicate ? current : [...current, point].sort((a, b) => a.timeSec - b.timeSec);
-        setTaskFeedback(`${next.length} of ${task.minimumMarkers} markers recorded. Correctness follows commit.`);
+        setTaskFeedback(`${next.length} of ${task.minimumMarkers} markers recorded. Correctness appears after you check your answer.`);
         onTaskEvidence?.({ mode: "march", points: next });
         return next;
       });
@@ -809,9 +834,35 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
   function clearTaskMarks() {
     setMarchPoints([]);
     setUserRois([]);
+    setSelectedPoint(null);
+    setClickFeedback(null);
+    setDragStart(null);
     setTaskFeedback(null);
     onTaskReset?.();
     if (task?.mode === "march") onTaskEvidence?.({ mode: "march", points: [] });
+  }
+
+  function undoTaskMark() {
+    if (!task) return;
+    setClickFeedback(null);
+    setTaskFeedback(null);
+    if (task.mode === "march") {
+      setMarchPoints((current) => {
+        const next = current.slice(0, -1);
+        if (next.length) onTaskEvidence?.({ mode: "march", points: next });
+        else onTaskReset?.();
+        return next;
+      });
+      return;
+    }
+    if (task.mode === "point") {
+      setSelectedPoint(null);
+      onTaskReset?.();
+      return;
+    }
+    setUserRois((current) => current.slice(0, -1));
+    setSelectedPoint(null);
+    onTaskReset?.();
   }
 
   const visibleSpan = timeWindow.end - timeWindow.start;
@@ -820,6 +871,13 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
   const canPanRight = !medianMode && !loading && timeWindow.end < waveformDuration - 1e-6;
   const panStep = Math.max(0.1, visibleSpan * 0.25);
   const hasLabelledRois = groundedRois.length + userRois.length > 0;
+  const hasTaskMarks = task?.mode === "point"
+    ? Boolean(selectedPoint || restoredTaskEvidence.some((evidence) => evidence.mode === "point"))
+    : task?.mode === "march"
+      ? marchPoints.length > 0 || restoredTaskEvidence.some((evidence) => evidence.mode === "march" && evidence.points.length > 0)
+      : task?.mode === "region" || task?.mode === "caliper"
+        ? userRois.length > 0 || restoredTaskEvidence.some((evidence) => evidence.mode === task.mode)
+        : false;
   const activeToolLabel = activeTool === "point"
     ? "Mark point"
     : activeTool === "region"
@@ -853,10 +911,14 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
         <div className="viewer-toolbar-main">
           <strong>
             {medianMode ? <HeartPulse size={16} aria-hidden="true" /> : <Crosshair size={16} aria-hidden="true" />}
-            {medianMode ? "Median beat" : rhythmStripMode ? "Rhythm strips" : effectiveToolbar === "clinical" ? "12-lead ECG" : "Interactive 12-lead ECG"}
+            {medianMode
+              ? "Median beat"
+              : rhythmStripMode
+                ? effectiveToolbar === "practice" ? "Rhythm strip" : "Rhythm strips"
+                : effectiveToolbar === "clinical" || effectiveToolbar === "practice" ? "12-lead ECG" : "Interactive 12-lead ECG"}
           </strong>
-          <div className="viewer-tool-hint">{toolHint}</div>
-          {!medianMode ? <div className="viewer-window-label">Window {timeWindow.start.toFixed(1)}–{timeWindow.end.toFixed(1)} s</div> : null}
+          {effectiveToolbar === "practice" && task ? null : <div className="viewer-tool-hint">{toolHint}</div>}
+          {!medianMode && effectiveToolbar !== "practice" ? <div className="viewer-window-label">Window {timeWindow.start.toFixed(1)}–{timeWindow.end.toFixed(1)} s</div> : null}
           {!medianMode && highlightedLeads.length ? (
             <span className="pill">{highlightedLeads.join(", ")} highlighted</span>
           ) : null}
@@ -868,7 +930,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
                 {activeTool === "point" ? <Target size={17} aria-hidden="true" /> : activeTool === "caliper" ? <Ruler size={17} aria-hidden="true" /> : activeTool === "annotate" ? <PencilLine size={17} aria-hidden="true" /> : <Crosshair size={17} aria-hidden="true" />}
                 <span>{activeToolLabel}</span>
               </span>
-            ) : (
+            ) : effectiveToolbar !== "practice" || reviewMode ? (
               <button
                 className={`icon-button viewer-tool-button${activeTool === "inspect" ? " active" : ""}`}
                 type="button"
@@ -878,7 +940,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
               >
                 <MousePointer2 size={17} aria-hidden="true" /><span>Inspect</span>
               </button>
-            )}
+            ) : null}
             {!task && reviewMode ? (
               <button
                 className={`icon-button viewer-tool-button${activeTool === "annotate" ? " active" : ""}`}
@@ -902,6 +964,17 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
               </button>
             ) : null}
           </div>
+
+          {task && effectiveToolbar === "practice" ? (
+            <div className="viewer-command-group" role="group" aria-label="Task marks">
+              <button className="icon-button viewer-tool-button" type="button" onClick={undoTaskMark} disabled={!hasTaskMarks} aria-label="Undo last ECG task mark">
+                <Undo2 size={17} aria-hidden="true" /><span>Undo</span>
+              </button>
+              <button className="icon-button viewer-tool-button danger" type="button" onClick={clearTaskMarks} disabled={!hasTaskMarks} aria-label="Clear ECG task marks">
+                <Trash2 size={17} aria-hidden="true" /><span>Clear</span>
+              </button>
+            </div>
+          ) : null}
 
           {!task && userRois.length ? (
             <div className="viewer-command-group" role="group" aria-label="Learner annotations">
@@ -930,7 +1003,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
           ) : null}
 
           <div className="viewer-command-group" role="group" aria-label="ECG view controls">
-            {medianAvailable && !task ? (
+            {medianAvailable && !task && effectiveToolbar !== "practice" ? (
               <button
                 className={`icon-button viewer-tool-button${medianMode ? " active" : ""}`}
                 type="button"
@@ -983,7 +1056,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
             {task?.mode === "march" ? ` Place at least ${task.minimumMarkers} markers; select Clear task marks to restart.` : ""}
             {grading ? " Grading..." : ""}
           </span>
-          {task?.mode === "march" || task?.mode === "region" || task?.mode === "caliper" ? (
+          {effectiveToolbar !== "practice" && (task?.mode === "march" || task?.mode === "region" || task?.mode === "caliper") ? (
             <button
               className="button subtle small"
               type="button"
@@ -1086,7 +1159,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
                 />
               </>
             )}
-            {[...groundedRois, ...userRois].map((roi, index) => {
+            {[...groundedRois, ...visibleUserRois].map((roi, index) => {
               const key = `${roi.lead}-${roi.label}-${index}`;
               return (
                 <RoiOverlay
@@ -1101,13 +1174,60 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
                 />
               );
             })}
+            {parentOwnedEvidence.map((evidence, index) => evidence.mode === "region" ? (
+              <g key={`review-region-${evidence.roi.lead}-${evidence.roi.timeStartSec}-${index}`} data-evidence-mode="region">
+                <RoiOverlay
+                  roi={evidence.roi}
+                  timeWindow={timeWindow}
+                  user
+                  showLabel
+                  clipPrefix={clipPrefix}
+                  displayLeads={rhythmStripMode ? rhythmStripLeads : undefined}
+                />
+              </g>
+            ) : null)}
             {overlays.map((action, index) => (
               <ActionOverlay key={`${action.type}-${action.lead}-${index}`} action={action} timeWindow={timeWindow} clipPrefix={clipPrefix} displayLeads={rhythmStripMode ? rhythmStripLeads : undefined} />
             ))}
             {clickFeedback ? <ClickMarker feedback={clickFeedback} timeWindow={timeWindow} clipPrefix={clipPrefix} displayLeads={rhythmStripMode ? rhythmStripLeads : undefined} /> : null}
-            {task?.mode === "march" ? marchPoints.map((point, index) => (
+            {task?.mode === "point" && selectedPoint && !clickFeedback && !restoredTaskEvidence.some((evidence) => evidence.mode === "point") ? (
+              <LearnerPointMarker point={selectedPoint} label="Your mark" timeWindow={timeWindow} clipPrefix={clipPrefix} displayLeads={rhythmStripMode ? rhythmStripLeads : undefined} />
+            ) : null}
+            {parentOwnedEvidence.map((evidence, index) => evidence.mode === "point" ? (
+              <LearnerPointMarker key={`review-point-${evidence.point.lead}-${evidence.point.timeSec}-${index}`} point={evidence.point} label="Your mark" timeWindow={timeWindow} clipPrefix={clipPrefix} displayLeads={rhythmStripMode ? rhythmStripLeads : undefined} />
+            ) : null)}
+            {task?.mode === "caliper" && !restoredTaskEvidence.some((evidence) => evidence.mode === "caliper") ? userRois.map((roi, index) => (
+              <LearnerCaliperOverlay
+                key={`task-caliper-${roi.lead}-${roi.timeStartSec}-${index}`}
+                lead={roi.lead}
+                timeStartSec={roi.timeStartSec}
+                timeEndSec={roi.timeEndSec}
+                valueMs={Math.round(Math.abs(roi.timeEndSec - roi.timeStartSec) * 1000)}
+                label={roi.label}
+                timeWindow={timeWindow}
+                clipPrefix={clipPrefix}
+                displayLeads={rhythmStripMode ? rhythmStripLeads : undefined}
+              />
+            )) : null}
+            {parentOwnedEvidence.map((evidence, index) => evidence.mode === "caliper" ? (
+              <LearnerCaliperOverlay
+                key={`review-caliper-${evidence.lead}-${evidence.timeStartSec}-${index}`}
+                lead={evidence.lead}
+                timeStartSec={evidence.timeStartSec}
+                timeEndSec={evidence.timeEndSec}
+                valueMs={evidence.valueMs}
+                label={`Your measurement · ${evidence.valueMs} ms`}
+                timeWindow={timeWindow}
+                clipPrefix={clipPrefix}
+                displayLeads={rhythmStripMode ? rhythmStripLeads : undefined}
+              />
+            ) : null)}
+            {task?.mode === "march" && !restoredTaskEvidence.some((evidence) => evidence.mode === "march") ? marchPoints.map((point, index) => (
               <TaskMarker key={`${point.lead}-${point.timeSec}-${index}`} point={point} label={`${index + 1}`} timeWindow={timeWindow} clipPrefix={clipPrefix} displayLeads={rhythmStripMode ? rhythmStripLeads : undefined} />
             )) : null}
+            {parentOwnedEvidence.map((evidence, evidenceIndex) => evidence.mode === "march" ? evidence.points.map((point, pointIndex) => (
+              <TaskMarker key={`review-march-${evidenceIndex}-${point.lead}-${point.timeSec}-${pointIndex}`} point={point} label={`${pointIndex + 1}`} timeWindow={timeWindow} clipPrefix={clipPrefix} displayLeads={rhythmStripMode ? rhythmStripLeads : undefined} />
+            )) : null)}
             <CalibrationMark
               height={presentationHeight}
               pxPerSec={printScale.pxPerSec}
@@ -1117,6 +1237,14 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
           </svg>
         )}
       </div>
+      {committedReviewEvidence.length ? (
+        <div className="viewer-review-evidence" role="note" aria-label="Your saved ECG evidence">
+          <strong>Your saved ECG evidence</strong>
+          <div className="viewer-review-evidence-list">
+            {committedReviewEvidence.map((evidence, index) => <span key={`${evidence.mode}-${index}`}>{viewerEvidenceSummary(evidence)}</span>)}
+          </div>
+        </div>
+      ) : null}
       {task ? (
         <details className="viewer-keyboard-task">
           <summary>Keyboard / precise-entry alternative</summary>
@@ -1148,7 +1276,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
               })()}
             </output>
             <button className="button" type="button" onClick={() => void submitKeyboardTask()} disabled={grading || !waveform}>
-              {task.mode === "march" ? "Add validated marker" : task.mode === "region" ? "Grade selected region" : task.mode === "caliper" ? "Use these caliper boundaries" : "Grade selected point"}
+              {task.mode === "march" ? "Add marker" : task.mode === "region" ? "Use selected region" : task.mode === "caliper" ? "Use these caliper boundaries" : "Use selected point"}
             </button>
           </div>
         </details>
@@ -1173,7 +1301,7 @@ export function ECGViewer({ ecgRef, waveformScope, actions = [], groundedRois = 
         </div>
       ) : null}
       {taskFeedback ? <div className="click-feedback neutral" role="status" aria-live="polite"><strong>Task evidence</strong><span>{taskFeedback}</span></div> : null}
-      {selectedPoint && (effectiveToolbar !== "clinical" || Boolean(task)) ? <div className="coordinate-readout">
+      {selectedPoint && effectiveToolbar !== "practice" && (effectiveToolbar !== "clinical" || Boolean(task)) ? <div className="coordinate-readout">
         <span className="coord-chip"><Crosshair size={14} aria-hidden="true" /> {selectedPoint.lead}</span>
         <span>{selectedPoint.timeSec.toFixed((waveform?.samplingFrequency ?? 100) >= 500 ? 3 : 2)} sec</span>
         <span>{selectedPoint.amplitudeMv.toFixed(3)} mV</span>
@@ -1609,6 +1737,71 @@ function RhythmLeadStripPanel({
         <text x={12} y={mid + 6} fontSize={14} fill="#7a8581">Lead unavailable in this waveform</text>
       )}
     </g>
+  );
+}
+
+function viewerEvidenceSummary(evidence: ViewerTaskEvidence) {
+  if (evidence.mode === "point") return `Point · Lead ${evidence.point.lead} · ${evidence.point.timeSec.toFixed(3)} s`;
+  if (evidence.mode === "region") return `Region · Lead ${evidence.roi.lead} · ${evidence.roi.timeStartSec.toFixed(3)}–${evidence.roi.timeEndSec.toFixed(3)} s`;
+  if (evidence.mode === "caliper") return `Measurement · Lead ${evidence.lead} · ${Math.round(evidence.valueMs)} ms`;
+  return `${evidence.points.length} rhythm marker${evidence.points.length === 1 ? "" : "s"}`;
+}
+
+function LearnerPointMarker({ point, label, timeWindow, clipPrefix, displayLeads }: { point: ECGPoint; label: string; timeWindow: TimeWindow; clipPrefix: string; displayLeads?: readonly string[] }) {
+  const scale = paperScale(timeWindow);
+  return (
+    <>
+      {placementsForLead(point.lead, timeWindow, displayLeads)
+        .filter((placement) => placementContainsTime(placement, point.timeSec))
+        .map((placement) => {
+          const x = (point.timeSec - timeWindow.start) * scale.pxPerSec;
+          const y = placement.y0 + placement.height / 2 - point.amplitudeMv * scale.pxPerMv;
+          return (
+            <g key={`learner-point-${placement.key}`} data-evidence-mode="point" aria-hidden="true" clipPath={`url(#${clipPrefix}-${placement.clipId})`}>
+              <circle cx={x} cy={y} r={12} fill="rgba(49,95,138,0.12)" stroke="#315f8a" strokeWidth={2.5} />
+              <line x1={x - 17} x2={x + 17} y1={y} y2={y} stroke="#315f8a" strokeWidth={1.5} />
+              <line x1={x} x2={x} y1={y - 17} y2={y + 17} stroke="#315f8a" strokeWidth={1.5} />
+              <text x={x + 17} y={y - 13} fontSize={12} fontWeight={800} fill="#315f8a" style={{ paintOrder: "stroke" }} stroke="#fffafa" strokeWidth={3}>{label}</text>
+            </g>
+          );
+        })}
+    </>
+  );
+}
+
+function LearnerCaliperOverlay({ lead, timeStartSec, timeEndSec, valueMs, label, timeWindow, clipPrefix, displayLeads }: {
+  lead: string;
+  timeStartSec: number;
+  timeEndSec: number;
+  valueMs: number;
+  label?: string;
+  timeWindow: TimeWindow;
+  clipPrefix: string;
+  displayLeads?: readonly string[];
+}) {
+  const scale = paperScale(timeWindow);
+  const start = Math.min(timeStartSec, timeEndSec);
+  const end = Math.max(timeStartSec, timeEndSec);
+  return (
+    <>
+      {placementsForLead(lead, timeWindow, displayLeads)
+        .filter((placement) => end >= placement.timeStart && start <= placement.timeEnd)
+        .map((placement) => {
+          const x1 = Math.max(placement.x0, (start - timeWindow.start) * scale.pxPerSec);
+          const x2 = Math.min(placement.x0 + placement.width, (end - timeWindow.start) * scale.pxPerSec);
+          const y = placement.y0 + placement.height - 28;
+          return (
+            <g key={`learner-caliper-${placement.key}`} data-evidence-mode="caliper" aria-hidden="true" clipPath={`url(#${clipPrefix}-${placement.clipId})`}>
+              <line x1={x1} x2={x2} y1={y} y2={y} stroke="#315f8a" strokeWidth={3} />
+              <line x1={x1} x2={x1} y1={y - 10} y2={y + 10} stroke="#315f8a" strokeWidth={2} />
+              <line x1={x2} x2={x2} y1={y - 10} y2={y + 10} stroke="#315f8a" strokeWidth={2} />
+              <text x={(x1 + x2) / 2} y={y - 14} textAnchor="middle" fontSize={13} fontWeight={700} fill="#315f8a" style={{ paintOrder: "stroke" }} stroke="#fffafa" strokeWidth={3}>
+                {label ?? `${Math.round(valueMs)} ms`}
+              </text>
+            </g>
+          );
+        })}
+    </>
   );
 }
 

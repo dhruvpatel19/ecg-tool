@@ -15,14 +15,22 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import parse_qs
 
 from .assessment_presentation import assessment_display_id
 from .clinical.provenance import assert_learner_item_provenance
 from .clinical.shift import blind_clinical_item
 from .ecg_capability import issue_ecg_capability, matches_ecg_capability
 from .learning_sessions import _resolve_completed_session
+from .objectives import objective_definition
 from .ontology import PRACTICE_GROUPS, concept_label
 from .subskill_tasks import build_subskill_task
+from .training_routes import (
+    TRAINING_CLASSIFICATION_CONTRACT_VERSION,
+    TRAINING_QUESTION_SNAPSHOT_VERSION,
+    build_training_classification_contract,
+    training_task_concept,
+)
 
 
 REPLAY_VERSION = "learning-session-replay-v1"
@@ -135,7 +143,7 @@ def _resolve_training_attempt(
         SELECT answers.id AS source_answer_id, answers.ordinal, answers.case_id,
                answers.response_json, answers.grade_json, answers.summary_json,
                answers.created_at, campaigns.status AS session_status,
-               campaigns.concept_id, campaigns.subskill,
+               campaigns.concept_id, campaigns.subskill, campaigns.context_key,
                slots.phase, slots.case_focus
         FROM training_campaign_answers AS answers
         JOIN training_campaigns AS campaigns
@@ -438,6 +446,7 @@ def _safe_task(task: object) -> dict[str, Any] | None:
         "step",
         "required",
         "gradingBoundary",
+        "frameworkVersion",
     ):
         if key in task and isinstance(task[key], (str, int, float, bool)):
             public[key] = task[key]
@@ -460,7 +469,130 @@ def _safe_task(task: object) -> dict[str, Any] | None:
             and _text(row.get("id"), 120)
             and _text(row.get("clause"), 1_000)
         ]
+    framework_steps = task.get("frameworkSteps")
+    if isinstance(framework_steps, list):
+        public["frameworkSteps"] = []
+        for row in framework_steps[:8]:
+            if not isinstance(row, dict):
+                continue
+            key = _token(row.get("key"))
+            label = _optional_text(row.get("label"), 200)
+            prompt = _optional_text(row.get("prompt"), 1_000)
+            placeholder = _optional_text(row.get("placeholder"), 1_000)
+            if None in {key, label, prompt, placeholder}:
+                continue
+            step: dict[str, Any] = {
+                "key": key,
+                "label": label,
+                "prompt": prompt,
+                "placeholder": placeholder,
+            }
+            choices = _texts(row.get("choices"), maximum=12, limit=300)
+            if choices:
+                step["choices"] = choices
+            public["frameworkSteps"].append(step)
     return public or None
+
+
+def _safe_systematic_interpretation(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    keys = (
+        "rate",
+        "rhythm",
+        "axis",
+        "intervals",
+        "conduction",
+        "st_t",
+        "hypertrophy",
+        "synthesis",
+    )
+    interpretation = {
+        key: _text(value.get(key), 2_000).strip()
+        for key in keys
+    }
+    return interpretation if any(interpretation.values()) else None
+
+
+def _safe_reviewed_framework(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in value[:8]:
+        if not isinstance(row, dict):
+            continue
+        key = _token(row.get("key"))
+        label = _optional_text(row.get("label"), 200)
+        review = _optional_text(row.get("review"), 2_000)
+        grounded = row.get("grounded")
+        if key is None or label is None or review is None or not isinstance(grounded, bool):
+            continue
+        rows.append(
+            {"key": key, "label": label, "review": review, "grounded": grounded}
+        )
+    return rows
+
+
+def _safe_training_question_snapshot(value: object) -> dict[str, Any] | None:
+    """Project one frozen, answer-free Focused Practice question contract."""
+
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != TRAINING_QUESTION_SNAPSHOT_VERSION
+    ):
+        return None
+    raw_classification = value.get("classification")
+    if (
+        not isinstance(raw_classification, dict)
+        or raw_classification.get("version")
+        != TRAINING_CLASSIFICATION_CONTRACT_VERSION
+        or raw_classification.get("kind") != "single_choice"
+        or not isinstance(raw_classification.get("required"), bool)
+    ):
+        return None
+    prompt = _optional_text(raw_classification.get("prompt"), 2_000)
+    raw_options = raw_classification.get("options")
+    if prompt is None or not isinstance(raw_options, list) or len(raw_options) != 2:
+        return None
+    options = [
+        {
+            "id": _optional_text(row.get("id"), 120),
+            "label": _optional_text(row.get("label"), 1_000),
+        }
+        for row in raw_options
+        if isinstance(row, dict)
+    ]
+    if (
+        len(options) != 2
+        or any(row["id"] is None or row["label"] is None for row in options)
+        or {row["id"] for row in options} != {"present", "absent"}
+    ):
+        return None
+    labels_by_id = {str(row["id"]): str(row["label"]) for row in options}
+    present_label = _optional_text(raw_classification.get("presentLabel"), 1_000)
+    absent_label = _optional_text(raw_classification.get("absentLabel"), 1_000)
+    if (
+        present_label != labels_by_id["present"]
+        or absent_label != labels_by_id["absent"]
+    ):
+        return None
+    raw_task = value.get("task")
+    task = _safe_task(raw_task)
+    if raw_task is not None and task is None:
+        return None
+    return {
+        "version": TRAINING_QUESTION_SNAPSHOT_VERSION,
+        "classification": {
+            "version": TRAINING_CLASSIFICATION_CONTRACT_VERSION,
+            "kind": "single_choice",
+            "prompt": prompt,
+            "presentLabel": present_label,
+            "absentLabel": absent_label,
+            "options": options,
+            "required": raw_classification["required"],
+        },
+        "task": task,
+    }
 
 
 def _safe_task_result(value: object) -> dict[str, Any] | None:
@@ -488,7 +620,183 @@ def _safe_task_result(value: object) -> dict[str, Any] | None:
             for row in rows[:12]
             if isinstance(row, dict)
         ]
+    if isinstance(value.get("systematicInterpretationComplete"), bool):
+        result["systematicInterpretationComplete"] = value[
+            "systematicInterpretationComplete"
+        ]
+    systematic = _safe_systematic_interpretation(
+        value.get("systematicInterpretation")
+    )
+    if systematic is not None:
+        result["systematicInterpretation"] = systematic
+    reviewed = _safe_reviewed_framework(value.get("reviewedFramework"))
+    if reviewed:
+        result["reviewedFramework"] = reviewed
     return result
+
+
+def _training_review_domain(concept: str) -> tuple[str, list[str]]:
+    """Mirror the reviewed Focused viewer domain without importing route internals."""
+
+    if "lead_territor" in concept or "frontal_lead_map" in concept:
+        return "qrs_complex", ["II", "III", "aVF"]
+    if "axis" in concept:
+        return "qrs_complex", ["I", "aVF"]
+    if "bundle" in concept or "qrs" in concept or "conduction" in concept:
+        return "qrs_complex", ["V1", "V6"]
+    if "av_block" in concept or concept.startswith("pr_"):
+        return "pr_interval", ["II"]
+    if "qt" in concept:
+        return "qt_segment", ["II", "V5"]
+    if (
+        any(token in concept for token in ("st_", "t_wave", "myocardial"))
+        or concept.endswith("_mi")
+    ):
+        leads = (
+            ["II", "III", "aVF"]
+            if "inferior" in concept
+            else ["I", "aVL", "V5", "V6"]
+            if "lateral" in concept
+            else ["V2", "V3", "V4"]
+        )
+        return ("t_wave" if "t_wave" in concept else "st_segment"), leads
+    if any(token in concept for token in ("atrial", "sinus", "flutter")):
+        return "p_wave", ["II"]
+    if any(token in concept for token in ("hypertrophy", "enlargement", "r_wave")):
+        return "qrs_complex", ["V1", "V5", "V6"]
+    return "qrs_complex", ["II"]
+
+
+def _packet_review_rois(packet: object) -> list[dict[str, Any]]:
+    if not isinstance(packet, dict):
+        return []
+    plus = packet.get("ptbxl_plus")
+    if not isinstance(plus, dict):
+        return []
+    fiducials = plus.get("fiducials")
+    if not isinstance(fiducials, dict):
+        return []
+    rois = fiducials.get("rois")
+    return [row for row in rois if isinstance(row, dict)] if isinstance(rois, list) else []
+
+
+def _review_roi_geometry(roi: dict[str, Any]) -> dict[str, Any] | None:
+    """Allowlist only coordinates that ECGViewer needs for a reviewed overlay."""
+
+    lead = _optional_text(roi.get("lead"), 8)
+    start = _number(roi.get("timeStartSec"), minimum=0.0, maximum=86_400.0)
+    end = _number(roi.get("timeEndSec"), minimum=0.0, maximum=86_400.0)
+    amp_min = _number(roi.get("ampMinMv"), minimum=-100.0, maximum=100.0)
+    amp_max = _number(roi.get("ampMaxMv"), minimum=-100.0, maximum=100.0)
+    if (
+        lead is None
+        or start is None
+        or end is None
+        or end <= start
+        or amp_min is None
+        or amp_max is None
+    ):
+        return None
+    return {
+        "lead": lead,
+        "timeStart": start,
+        "timeEnd": end,
+        "ampMin": min(amp_min, amp_max),
+        "ampMax": max(amp_min, amp_max),
+    }
+
+
+def _training_review_actions(
+    attempt: LearningReplayAttempt, *, packet: object
+) -> list[dict[str, Any]]:
+    """Project bounded post-commit references for a missed trace-native task.
+
+    These actions are a learner-facing redraw contract, not a grading record.
+    Concept keys, ROI labels, provenance, confidence, and correctness fields are
+    deliberately excluded from every returned action.
+    """
+
+    if attempt.mode != "training":
+        return []
+    data = attempt.data
+    subskill = _token(data.get("subskill"))
+    if subskill not in {"localize", "measure"}:
+        return []
+    summary = data.get("summary")
+    grade = data.get("grade")
+    response = data.get("response")
+    if not isinstance(summary, dict) or not isinstance(grade, dict) or not isinstance(response, dict):
+        return []
+    evidence_correct = grade.get("trainingSubskillEvidenceCorrect")
+    if evidence_correct is not False and summary.get("correct") is not False:
+        return []
+    if _safe_viewer_task_evidence(response.get("viewerTaskEvidence")) is None:
+        return []
+
+    campaign_concept = _token(data.get("concept_id")) or ""
+    case_focus = _token(data.get("case_focus")) or campaign_concept
+    review_concept = (
+        campaign_concept
+        if subskill == "measure" or response.get("expectedAnswer") == "present"
+        else case_focus
+    )
+    segment, preferred_leads = _training_review_domain(review_concept)
+    raw_rois = _packet_review_rois(packet)
+
+    # Rate is measured between consecutive ventricular anchors rather than
+    # across one component ROI. Use two reviewed QRS centers on the same lead.
+    if subskill == "measure" and review_concept == "rate":
+        for lead in preferred_leads:
+            anchors: list[dict[str, Any]] = []
+            for roi in raw_rois:
+                if roi.get("concept") != "qrs_complex" or roi.get("lead") != lead:
+                    continue
+                geometry = _review_roi_geometry(roi)
+                if geometry is not None:
+                    anchors.append(geometry)
+            anchors.sort(key=lambda row: float(row["timeStart"]))
+            if len(anchors) >= 2:
+                first = (float(anchors[0]["timeStart"]) + float(anchors[0]["timeEnd"])) / 2
+                second = (float(anchors[1]["timeStart"]) + float(anchors[1]["timeEnd"])) / 2
+                if second > first:
+                    return [{
+                        "type": "drawCaliper",
+                        "lead": lead,
+                        "timeStart": first,
+                        "timeEnd": second,
+                        "label": "Reviewed interval",
+                    }]
+        return []
+
+    by_lead: dict[str, dict[str, Any]] = {}
+    for roi in raw_rois:
+        lead = _optional_text(roi.get("lead"), 8)
+        if roi.get("concept") != segment or lead not in preferred_leads or lead in by_lead:
+            continue
+        geometry = _review_roi_geometry(roi)
+        if geometry is not None:
+            by_lead[lead] = geometry
+
+    ordered = [by_lead[lead] for lead in preferred_leads if lead in by_lead]
+    if subskill == "measure":
+        return [
+            {
+                "type": "drawCaliper",
+                "lead": geometry["lead"],
+                "timeStart": geometry["timeStart"],
+                "timeEnd": geometry["timeEnd"],
+                "label": "Reviewed interval",
+            }
+            for geometry in ordered[:1]
+        ]
+    return [
+        {
+            "type": "highlightROI",
+            **geometry,
+            "label": "Reviewed localization",
+        }
+        for geometry in ordered[:2]
+    ]
 
 
 def _training_projection(
@@ -503,37 +811,64 @@ def _training_projection(
     summary = data["summary"]
     concept = _token(data.get("concept_id")) or "unknown"
     subskill = _token(data.get("subskill")) or "unknown"
+    context_values = parse_qs(str(data.get("context_key") or ""), keep_blank_values=False)
+    requested_objective = _token(
+        str((context_values.get("receiptConcept") or [concept])[0]).strip()
+    ) or concept
+    definition = objective_definition(requested_objective)
+    if (
+        definition is None
+        or subskill not in definition.allowed_subskills
+        or concept not in definition.case_concepts
+    ):
+        requested_objective = concept
+        definition = objective_definition(requested_objective)
     case_focus = _token(data.get("case_focus")) or concept
-    task = None
-    try:
-        contract = build_subskill_task(
-            case_id=attempt.canonical_ecg_id,
-            case_concept=concept,
-            subskill=subskill,
-            case_focus=case_focus,
-            contrast_family=_contrast_family(concept),
-            variant=int(data.get("ordinal") or 0),
-            case_packet=packet_provider(case),
-        )
-        task = _safe_task(contract.public if contract else None)
-    except (KeyError, TypeError, ValueError):
+    snapshot = _safe_training_question_snapshot(response.get("questionSnapshot"))
+    if snapshot is not None:
+        classification = snapshot["classification"]
+        task = snapshot["task"]
+    else:
+        # Legacy rows predate persisted question contracts. Reconstruct them
+        # deterministically from the same public builders used at launch.
+        ordinal = int(data.get("ordinal") or 0)
+        classification = build_training_classification_contract(concept, ordinal)
         task = None
+        try:
+            legacy_task_concept = training_task_concept(
+                concept, subskill, requested_objective
+            )
+            contract = build_subskill_task(
+                case_id=attempt.canonical_ecg_id,
+                case_concept=legacy_task_concept,
+                subskill=subskill,
+                case_focus=case_focus,
+                contrast_family=_contrast_family(concept),
+                variant=ordinal,
+                case_packet=packet_provider(case),
+            )
+            task = _safe_task(contract.public if contract else None)
+        except (KeyError, TypeError, ValueError):
+            task = None
     question = {
         "kind": "training",
-        "prompt": f"Decide whether {concept_label(concept)} is supported by this ECG, then complete the recorded skill task.",
-        "target": {"objectiveId": concept, "subskill": subskill},
-        "phase": _optional_text(data.get("phase"), 80),
-        "classificationOptions": [
-            {"id": "present", "label": "Target supported"},
-            {"id": "absent", "label": "Target not supported"},
-        ],
+        "prompt": classification["prompt"],
+        "target": {
+            "objectiveId": requested_objective,
+            "objectiveLabel": (
+                definition.label if definition is not None else concept_label(requested_objective)
+            ),
+            "caseConceptId": concept,
+            "caseConceptLabel": concept_label(concept),
+            "subskill": subskill,
+        },
+        "classificationOptions": classification["options"],
         "subskillTask": task,
     }
     selected_answer = response.get("selectedAnswer")
     expected_answer = response.get("expectedAnswer")
     submission = {
         "selectedAnswer": selected_answer if selected_answer in {"present", "absent"} else None,
-        "confidence": _integer(response.get("confidence"), minimum=1, maximum=5),
         "hintsUsed": _integer(response.get("hintsUsed"), maximum=1_000),
         "evidenceNote": _text(response.get("evidenceNote")),
         "subskillTaskAnswer": _optional_text(response.get("subskillTaskAnswer"), 160),
@@ -547,19 +882,47 @@ def _training_projection(
         "subskillTaskValue": _number(
             response.get("subskillTaskValue"), minimum=0.0, maximum=100_000.0
         ),
+        "viewerTaskEvidence": _safe_viewer_task_evidence(
+            response.get("viewerTaskEvidence")
+        ),
     }
+    systematic_interpretation = _safe_systematic_interpretation(
+        response.get("structuredInterpretation")
+    )
+    if systematic_interpretation is not None:
+        submission["structuredInterpretation"] = systematic_interpretation
+    if subskill == "calibrate_confidence":
+        submission["confidence"] = _integer(
+            response.get("confidence"), minimum=1, maximum=5
+        )
     task_result = _safe_task_result(grade.get("trainingSubskillTaskResult"))
+    skill_correct = bool(summary.get("correct"))
     feedback = {
-        "score": _score(grade.get("score")),
-        "feedback": _text(grade.get("feedback"), 2_000),
+        # The selected skill is the scored Focused Practice construct. Keep
+        # the generic pattern grader as a separately named explanation so a
+        # correct measure/mechanism result cannot be presented as a failed
+        # question merely because the first classification differed.
+        "score": 1.0 if skill_correct else 0.0,
+        "selectedSkillFeedback": (
+            "The selected skill task was met."
+            if skill_correct
+            else "The selected skill task needs review."
+        ),
+        "patternFeedback": _text(grade.get("feedback"), 2_000),
         "classificationCorrect": bool(grade.get("trainingClassificationCorrect")),
-        "skillCorrect": bool(summary.get("correct")),
+        "skillCorrect": skill_correct,
         "misconceptions": _texts(summary.get("misconceptions"), limit=240),
     }
     answer_guide = {
         "expectedAnswer": expected_answer if expected_answer in {"present", "absent"} else None,
         "subskillTaskResult": task_result,
     }
+    if task_result and "systematicInterpretationComplete" in task_result:
+        answer_guide["systematicInterpretationComplete"] = task_result[
+            "systematicInterpretationComplete"
+        ]
+    if task_result and task_result.get("reviewedFramework"):
+        answer_guide["reviewedFramework"] = task_result["reviewedFramework"]
     return question, submission, feedback, answer_guide
 
 
@@ -597,21 +960,83 @@ def _safe_structured_answer(value: object) -> dict[str, Any]:
     return answer
 
 
+def _safe_viewer_task_evidence(value: object) -> dict[str, Any] | None:
+    """Project only learner-authored geometry needed to redraw a review mark."""
+
+    if not isinstance(value, dict):
+        return None
+    mode = value.get("mode")
+    if mode == "point":
+        point = value.get("point")
+        if not isinstance(point, dict):
+            return None
+        lead = _optional_text(point.get("lead"), 8)
+        time_sec = _number(point.get("timeSec"), minimum=0.0, maximum=86_400.0)
+        amplitude = _number(point.get("amplitudeMv"), minimum=-100.0, maximum=100.0)
+        if lead is None or time_sec is None or amplitude is None:
+            return None
+        return {
+            "mode": "point",
+            "point": {
+                "lead": lead,
+                "timeSec": time_sec,
+                "amplitudeMv": amplitude,
+            },
+        }
+    if mode == "region":
+        roi = value.get("roi")
+        if not isinstance(roi, dict):
+            return None
+        lead = _optional_text(roi.get("lead"), 8)
+        start = _number(roi.get("timeStartSec"), minimum=0.0, maximum=86_400.0)
+        end = _number(roi.get("timeEndSec"), minimum=0.0, maximum=86_400.0)
+        amp_min = _number(roi.get("ampMinMv"), minimum=-100.0, maximum=100.0)
+        amp_max = _number(roi.get("ampMaxMv"), minimum=-100.0, maximum=100.0)
+        if (
+            lead is None
+            or start is None
+            or end is None
+            or end <= start
+            or amp_min is None
+            or amp_max is None
+        ):
+            return None
+        return {
+            "mode": "region",
+            "roi": {
+                "lead": lead,
+                "timeStartSec": start,
+                "timeEndSec": end,
+                "ampMinMv": min(amp_min, amp_max),
+                "ampMaxMv": max(amp_min, amp_max),
+                "label": "Your selected region",
+                "concept": "learner_evidence",
+                "source": "user",
+                "confidence": "recorded",
+            },
+        }
+    if mode == "caliper":
+        lead = _optional_text(value.get("lead"), 8)
+        start = _number(value.get("timeStartSec"), minimum=0.0, maximum=86_400.0)
+        end = _number(value.get("timeEndSec"), minimum=0.0, maximum=86_400.0)
+        value_ms = _number(value.get("valueMs"), minimum=0.001, maximum=86_400_000.0)
+        if lead is None or start is None or end is None or end <= start or value_ms is None:
+            return None
+        return {
+            "mode": "caliper",
+            "lead": lead,
+            "timeStartSec": start,
+            "timeEndSec": end,
+            "valueMs": value_ms,
+        }
+    return None
+
+
 def _safe_trace(value: object) -> dict[str, Any] | None:
-    if not isinstance(value, dict) or value.get("mode") != "point":
+    evidence = _safe_viewer_task_evidence(value)
+    if evidence is None:
         return None
-    point = value.get("point")
-    if not isinstance(point, dict):
-        return None
-    lead = _optional_text(point.get("lead"), 8)
-    time_sec = _number(point.get("timeSec"), minimum=0.0, maximum=86_400.0)
-    amplitude = _number(point.get("amplitudeMv"), minimum=-100.0, maximum=100.0)
-    if lead is None or time_sec is None:
-        return None
-    return {
-        "mode": "point",
-        "point": {"lead": lead, "timeSec": time_sec, "amplitudeMv": amplitude},
-    }
+    return evidence
 
 
 def _safe_rapid_task_packet(value: object) -> dict[str, Any] | None:
@@ -1313,10 +1738,19 @@ def build_learning_replay(
     if not isinstance(case, dict):
         return None
     comparison_ecg_id: str | None = None
+    review_actions: list[dict[str, Any]] = []
     if attempt.mode == "training":
         projection = _training_projection(
             attempt, case=case, packet_provider=packet_provider
         )
+        try:
+            review_actions = _training_review_actions(
+                attempt, packet=packet_provider(case)
+            )
+        except (KeyError, TypeError, ValueError):
+            # A missing optional review anchor must not make the committed
+            # question, learner response, or waveform unavailable.
+            review_actions = []
         display_id = assessment_display_id("training", attempt.attempt_index)
         provenance = {
             "tracing": "real_deidentified_ecg",
@@ -1401,7 +1835,7 @@ def build_learning_replay(
             "waveformPresentation": comparison_presentation,
             "provenance": "same_patient_time_ordered_real_ecgs",
         }
-    return {
+    replay = {
         "version": REPLAY_VERSION,
         "fidelity": "reconstructed",
         "sessionRef": session_ref,
@@ -1420,6 +1854,9 @@ def build_learning_replay(
         "answerGuide": answer_guide,
         "provenance": provenance,
     }
+    if review_actions:
+        replay["reviewActions"] = review_actions
+    return replay
 
 
 __all__ = [

@@ -192,8 +192,11 @@ export default function LearningSessionReviewPage() {
   const supportRecorded = attempts.filter((attempt) => attempt.assistance !== null).length;
   const supportedAttempts = attempts.filter((attempt) => attempt.assistance !== null && attempt.assistance.hintsUsed > 0).length;
   const visibleAttempts = savedOnly ? attempts.filter((attempt) => attempt.flagged) : attempts;
-  const showsConfidence = session.mode !== "clinical";
-  const isPartialRapid = session.mode === "rapid" && session.status === "abandoned";
+  const focusedSkill = session.focusCompetencies[0]?.subskill;
+  const showsConfidence = session.mode === "rapid"
+    || (session.mode === "training" && focusedSkill === "calibrate_confidence");
+  const isPartialPractice = session.status === "abandoned" && (session.mode === "rapid" || session.mode === "training");
+  const partialSessionLabel = session.mode === "training" ? "Partial Focused set" : "Partial Rapid round";
 
   return (
     <div className={`page ${styles.page}`}>
@@ -202,22 +205,22 @@ export default function LearningSessionReviewPage() {
       <header className={styles.header}>
         <span className={styles.modeIcon} data-mode={session.mode} aria-hidden="true"><ModeIcon size={22} /></span>
         <div>
-          <p className="eyebrow">{isPartialRapid ? "Partial round review" : "Session review"}</p>
-          <h1>{isPartialRapid ? "Partial Rapid round" : presentation.label}</h1>
-          <p>{isPartialRapid ? "Ended" : "Completed"} {dateLabel(session.completedAt)} · {session.attempted} of {session.total} {isPartialRapid ? "submitted" : "questions completed"}</p>
+          <p className="eyebrow">{isPartialPractice ? "Partial practice review" : "Session review"}</p>
+          <h1>{isPartialPractice ? partialSessionLabel : presentation.label}</h1>
+          <p>{isPartialPractice ? "Ended" : "Completed"} {dateLabel(session.completedAt)} · {session.attempted} of {session.total} {isPartialPractice ? "submitted" : "questions completed"}</p>
         </div>
         <div className={styles.headlineOutcome}><span>{session.mode === "clinical" ? "Formative score" : "Score"}</span><strong>{sessionOutcomeLabel(session)}</strong></div>
       </header>
 
       <aside className={styles.reviewNotice} role="note">
         <ShieldCheck size={20} aria-hidden="true" />
-        <p><strong>Review only.</strong> {isPartialRapid
-          ? "This round ended early. Only submitted ECGs are shown; the unanswered ECG was discarded and was not scored. Reviewing cannot change your progress."
+        <p><strong>Review only.</strong> {isPartialPractice
+          ? `This ${session.mode === "training" ? "set" : "round"} ended early. Only submitted ECGs are shown; the unanswered ECG was discarded and was not scored. Reviewing cannot change your progress.`
           : `This session is finished, so opening a question won’t change your answers or progress.${session.mode === "clinical" ? " Clinical case results are formative: they shape recommendations but do not update scored skill progress." : ""}`}</p>
       </aside>
 
       <section className={styles.summary} aria-label="Session summary">
-        <article><BarChart3 size={18} aria-hidden="true" /><div><span>{isPartialRapid ? "Submitted ECGs scored" : "Questions scored"}</span><strong>{scoredAttempts}/{attempts.length}</strong></div></article>
+        <article><BarChart3 size={18} aria-hidden="true" /><div><span>{isPartialPractice ? "Submitted ECGs scored" : "Questions scored"}</span><strong>{scoredAttempts}/{attempts.length}</strong></div></article>
         {showsConfidence ? <article><Target size={18} aria-hidden="true" /><div><span>Lower-confidence answers</span><strong>{confidenceRecorded ? `${lowerConfidence} of ${confidenceRecorded}` : "—"}</strong></div></article> : null}
         <article><Lightbulb size={18} aria-hidden="true" /><div><span>Questions with hints</span><strong>{supportRecorded ? `${supportedAttempts} of ${supportRecorded}` : "—"}</strong></div></article>
         <article><Bookmark size={18} aria-hidden="true" /><div><span>Saved for review</span><strong>{session.flaggedCount}</strong></div></article>
@@ -228,7 +231,7 @@ export default function LearningSessionReviewPage() {
 
       <section className={styles.attempts} aria-labelledby="session-questions-heading">
         <header>
-          <div><p className="eyebrow">Review your work</p><h2 id="session-questions-heading">{isPartialRapid ? "Submitted ECGs" : "Questions"}</h2></div>
+          <div><p className="eyebrow">Review your work</p><h2 id="session-questions-heading">{isPartialPractice ? "Submitted ECGs" : "Questions"}</h2></div>
           <div className={styles.attemptHeaderActions}>
             <p>Open a question to see your answer, feedback, ECG, and related skills.</p>
             <button ref={savedOnlyButtonRef} type="button" aria-pressed={savedOnly} onClick={() => setSavedOnly((value) => !value)}><Bookmark size={14} aria-hidden="true" /> Saved ({session.flaggedCount})</button>
@@ -241,7 +244,7 @@ export default function LearningSessionReviewPage() {
               <details className={styles.attempt} key={attempt.index}>
                 <summary>
                   <span className={styles.attemptIndex}>{attempt.index}</span>
-                  <span className={styles.attemptCopy}><strong>{isPartialRapid ? "Submitted ECG" : "Question"} {attempt.index}</strong><small>{attempt.flagged ? "Saved · " : ""}{skillSummary(attempt.competencies)}</small></span>
+                  <span className={styles.attemptCopy}><strong>{isPartialPractice ? "Submitted ECG" : "Question"} {attempt.index}</strong><small>{attempt.flagged ? "Saved · " : ""}{skillSummary(attempt.competencies)}</small></span>
                   <span className={styles.attemptSignals}>
                     <strong>{scoreLabel(attempt.score)}</strong>
                     <small>{showsConfidence ? `${attempt.confidence !== null ? `Confidence ${attempt.confidence}/5` : "Confidence not recorded"} · ` : ""}{attempt.assistance === null

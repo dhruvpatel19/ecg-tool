@@ -5,7 +5,7 @@ import math
 import re
 from http.cookies import CookieError, SimpleCookie
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from fastapi import (
     Cookie,
@@ -158,6 +158,14 @@ from .rapid_tutor_context import (
     RapidTutorContextNotReady,
     build_rapid_round_tutor_context,
     deterministic_rapid_tutor_response,
+)
+from .training_tutor_context import (
+    TrainingTutorContextInvalid,
+    TrainingTutorContextNotFound,
+    TrainingTutorContextNotReady,
+    build_training_ecg_tutor_context,
+    build_training_set_tutor_context,
+    deterministic_training_tutor_response,
 )
 from .retention import competency_state
 from .schemas import (
@@ -2285,6 +2293,9 @@ def concepts(
     }
 
 
+_training_pool_receipt_available: Callable[[str, str], bool] | None = None
+
+
 def _independent_receipt_contract(
     definition: ObjectiveDefinition,
     runtime: ObjectiveRuntimeAvailability,
@@ -2299,7 +2310,12 @@ def _independent_receipt_contract(
     case_concept = _best_case_concept(definition, concept_counts)
     if not case_concept:
         return None
-    mode = _receipt_mode(definition, case_concept, subskill)
+    mode = _receipt_mode(
+        definition,
+        case_concept,
+        subskill,
+        training_receipt_available=_training_pool_receipt_available,
+    )
     if mode is None:
         return None
     return {
@@ -3145,6 +3161,7 @@ def _adaptive_plan_for_learner(learner: str) -> dict[str, Any]:
             for objective_id, availability in runtime.items()
         },
         clinical_concepts=clinical_concepts,
+        training_receipt_available=_training_pool_receipt_available,
     )
     return {
         "learnerId": learner,
@@ -4095,6 +4112,7 @@ class TutorMessageRequest(BaseModel):
     clinicalShiftContext: "ClinicalShiftTutorContextRef | None" = None
     adaptiveContext: "AdaptiveTutorContextRef | None" = None
     rapidRoundContext: "RapidRoundTutorContextRef | None" = None
+    trainingSetContext: "TrainingSetTutorContextRef | None" = None
 
     _bounded_viewer_state = field_validator("viewerState")(validate_tutor_viewer_state)
 
@@ -4126,7 +4144,31 @@ class RapidRoundTutorContextRef(BaseModel):
     version: str = Field(min_length=1, max_length=80)
 
 
+class TrainingSetTutorContextRef(BaseModel):
+    campaignId: str = Field(min_length=4, max_length=160)
+    answerCount: int = Field(ge=1, le=5000)
+    version: str = Field(min_length=1, max_length=80)
+
+
 TutorMessageRequest.model_rebuild()
+
+
+def _is_foundations_tutor_turn(request: TutorMessageRequest) -> bool:
+    """Fail closed on chat-authored progress for every native Foundations scene.
+
+    The native module currently uses the shared Guided tutor without a
+    server-graded assessment context. These identifiers only make the tutor
+    more restrictive: spoofing them cannot unlock data or evidence.
+    """
+
+    if request.mode != "tutorial":
+        return False
+    if request.lessonId == "foundations":
+        return True
+    scope_key = str(request.scopeKey or "")
+    if scope_key == "foundations" or scope_key.startswith("foundations:"):
+        return True
+    return request.viewerState.get("moduleId") == "foundations"
 
 
 def _safe_tutor_runtime_meta(result: dict[str, Any]) -> dict[str, Any]:
@@ -4422,6 +4464,74 @@ def _rapid_round_tutor_bundle(
     return bundle
 
 
+def _training_set_tutor_bundle(
+    request: TutorMessageRequest,
+    learner: str,
+) -> dict[str, Any] | None:
+    reference = request.trainingSetContext
+    if reference is None:
+        return None
+    if request.mode != "practice":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "training_set_context_mode_mismatch",
+                "message": "The completed-set coach is available only in Focused Practice mode.",
+            },
+        )
+    if request.caseId is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "training_set_context_mismatch",
+                "message": "A completed-set debrief cannot be rebound to one browser-selected ECG.",
+            },
+        )
+    try:
+        bundle = build_training_set_tutor_context(
+            training_campaign_store,
+            learner_id=learner,
+            campaign_id=reference.campaignId,
+            answer_count=reference.answerCount,
+            version=reference.version,
+        )
+    except TrainingTutorContextNotReady as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "training_set_context_not_ready", "message": str(exc)},
+        ) from exc
+    except TrainingTutorContextNotFound as exc:
+        raise HTTPException(
+            status_code=404, detail="Focused Practice set debrief not found"
+        ) from exc
+    except TrainingTutorContextInvalid as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "training_set_context_invalid",
+                "message": "The completed Focused Practice set no longer satisfies its grounding contract.",
+            },
+        ) from exc
+    context_id = str(bundle["reference"]["contextId"])
+    if request.lessonId not in {None, context_id} or request.scopeKey not in {
+        None,
+        context_id,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "training_set_context_mismatch",
+                "message": "The tutor request does not match the completed Focused Practice set.",
+            },
+        )
+    # Keep the learner's actual question intact. The model receives it as the
+    # question, while every performance fact comes from serverOwnedContext.
+    request.caseId = None
+    request.lessonId = context_id
+    request.scopeKey = context_id
+    return bundle
+
+
 def _adaptive_tutor_bundle(
     request: TutorMessageRequest,
     learner: str,
@@ -4581,6 +4691,7 @@ def tutor_message(
             request.clinicalShiftContext,
             request.adaptiveContext,
             request.rapidRoundContext,
+            request.trainingSetContext,
         )
     )
     if supplied_contexts > 1:
@@ -4594,11 +4705,13 @@ def tutor_message(
     clinical_bundle = _clinical_tutor_bundle(request, learner)
     clinical_shift_bundle = _clinical_shift_tutor_bundle(request, learner)
     rapid_round_bundle = _rapid_round_tutor_bundle(request, learner)
+    training_set_bundle = _training_set_tutor_bundle(request, learner)
     adaptive_bundle = _adaptive_tutor_bundle(request, learner)
     if (
         clinical_bundle is None
         and clinical_shift_bundle is None
         and rapid_round_bundle is None
+        and training_set_bundle is None
         and adaptive_bundle is None
     ):
         if request.viewerState.get("activity") == "adaptive_mastery_plan":
@@ -4609,10 +4722,22 @@ def tutor_message(
                     "message": "Open the server-issued mastery plan before asking its coach.",
                 },
             )
+        if request.viewerState.get("activity") == "training_set_debrief":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "training_set_context_required",
+                    "message": "Open the completed Focused Practice set before asking its coach.",
+                },
+            )
         _guard_uncommitted_clinical_tutor(learner, request.caseId)
         _guard_pending_assessment_case(request.caseId, learner_id=learner)
     authoritative_bundle = (
-        clinical_bundle or clinical_shift_bundle or rapid_round_bundle or adaptive_bundle
+        clinical_bundle
+        or clinical_shift_bundle
+        or rapid_round_bundle
+        or training_set_bundle
+        or adaptive_bundle
     )
     assessment_scope_mode = (
         str(request.scopeKey).partition(":")[0]
@@ -4629,6 +4754,7 @@ def tutor_message(
         # to the generic corpus tutor merely because the assessment committed.
         raise HTTPException(status_code=404, detail="Case not found")
     assessment_tutor_case: str | None = None
+    training_ecg_context: dict[str, Any] | None = None
     guided_tutor_case: str | None = None
     if (
         authoritative_bundle is None
@@ -4648,6 +4774,27 @@ def tutor_message(
             # A capability is useful only with the exact owner/session feedback
             # record that issued it. Never fall back to a corpus-wide search.
             raise HTTPException(status_code=404, detail="Case not found")
+        if assessment_scope_mode == "training":
+            try:
+                training_ecg_context = build_training_ecg_tutor_context(
+                    training_campaign_store,
+                    learner_id=learner,
+                    campaign_id=str(request.scopeKey).partition(":")[2],
+                    case_id=assessment_tutor_case,
+                )
+            except TrainingTutorContextNotFound as exc:
+                raise HTTPException(status_code=404, detail="Case not found") from exc
+            except (
+                TrainingTutorContextInvalid,
+                TrainingTutorContextNotReady,
+            ) as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "training_ecg_context_invalid",
+                        "message": "The committed Focused Practice ECG no longer satisfies its tutor grounding contract.",
+                    },
+                ) from exc
     if request.threadId:
         existing_thread = store.get_thread(request.threadId)
         if existing_thread and existing_thread.get("learnerId") != learner:
@@ -4744,6 +4891,18 @@ def tutor_message(
             "authoritativeRoundContext": True,
         }
         server_context = rapid_round_bundle["context"]
+    elif training_set_bundle:
+        # Browser aggregates are intentionally discarded. This fixed marker
+        # tells the provider which review surface is open without accepting any
+        # learner-score, receipt, or ECG claims from viewerState.
+        viewer_state = {
+            "activity": "training_set_debrief",
+            "surface": "review",
+            "committed": True,
+            "completedCaseCount": training_set_bundle["reference"]["answerCount"],
+            "authoritativeTrainingSetContext": True,
+        }
+        server_context = training_set_bundle["context"]
     elif adaptive_bundle:
         # This is a fixed UI marker, not the caller's viewerState. The complete
         # authoritative plan lives in serverOwnedContext below.
@@ -4753,6 +4912,20 @@ def tutor_message(
             "authoritativePlanContext": True,
         }
         server_context = adaptive_bundle["context"]
+    elif training_ecg_context:
+        viewer_state = {
+            key: value
+            for key, value in request.viewerState.items()
+            if key != "structuredInterpretation"
+        }
+        viewer_state.update(
+            {
+                "activity": "training_ecg_debrief",
+                "committed": True,
+                "authoritativeTrainingEcgContext": True,
+            }
+        )
+        server_context = training_ecg_context
     else:
         viewer_state = request.viewerState
         server_context = None
@@ -4796,12 +4969,49 @@ def tutor_message(
             }
         result["objectiveUpdates"] = []
         result["viewerActions"] = []
+    if training_set_bundle:
+        # Set review is explanatory only. Even a schema-valid provider reply
+        # cannot create competency evidence or drive an ECG that is no longer
+        # the active assessment item.
+        remote = result.get("remoteCall") if isinstance(result.get("remoteCall"), dict) else {}
+        if result.get("schemaError") is not None or remote.get("status") in {
+            "failed",
+            "request_rejected",
+            "not_configured",
+            "unknown",
+        }:
+            telemetry = {
+                key: result.get(key)
+                for key in (
+                    "schemaError",
+                    "provider",
+                    "remoteProviderConfigured",
+                    "remoteCall",
+                    "remoteUsage",
+                    "claimCheck",
+                    "viewerActionStatus",
+                )
+                if key in result
+            }
+            result = {
+                **deterministic_training_tutor_response(
+                    training_set_bundle["context"]
+                ),
+                **telemetry,
+            }
+        result["objectiveUpdates"] = []
+        result["viewerActions"] = []
     if adaptive_bundle:
         # The generic tutor schema includes capabilities used elsewhere. The
         # plan coach is read-only: enforce that contract after generation so a
         # valid-but-errant provider response still cannot mutate, annotate, or
         # redirect beyond the current scheduler-issued plan.
         result = enforce_adaptive_tutor_response(result, adaptive_bundle["context"])
+    if _is_foundations_tutor_turn(request):
+        # Foundations interactions are formative until their reviewed manifest
+        # and server-owned grader exist. Tutor output may explain or annotate,
+        # but it can never create a progress/mastery mutation.
+        result["objectiveUpdates"] = []
     store.append_tutor_message(
         thread_id,
         "tutor",
@@ -4826,6 +5036,11 @@ def tutor_message(
             "rapidRoundContextId": (
                 rapid_round_bundle["reference"]["contextId"]
                 if rapid_round_bundle
+                else None
+            ),
+            "trainingSetContextId": (
+                training_set_bundle["reference"]["contextId"]
+                if training_set_bundle
                 else None
             ),
             "adaptiveContextVersion": (
@@ -5257,12 +5472,14 @@ from .clinical.provenance import assert_serving_bank_provenance  # noqa: E402
 from .clinical.real_items import vetted_real_items  # noqa: E402
 from .clinical_routes import build_clinical_router  # noqa: E402
 from .rapid_routes import build_rapid_router  # noqa: E402
-from .training_routes import build_training_router  # noqa: E402
+from .training_routes import TrainingPoolResolver, build_training_router  # noqa: E402
 from .training_store import TrainingCampaignStore  # noqa: E402
 from .store.clinical_item_store import ClinicalItemStore  # noqa: E402
 
 clinical_item_store = ClinicalItemStore(settings.sqlite_path)
 training_campaign_store = TrainingCampaignStore(settings.sqlite_path, store.connect)
+training_pool_resolver = TrainingPoolResolver(repo)
+_training_pool_receipt_available = training_pool_resolver.has_durable_exact_target
 
 
 def clinical_packet(ecg_id: str) -> dict[str, Any] | None:
@@ -5314,6 +5531,7 @@ app.include_router(
         blind_packet,
         blind_summary,
         effective_learner,
+        training_pool_resolver,
     )
 )
 

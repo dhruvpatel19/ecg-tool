@@ -9,7 +9,7 @@ errors, case diversity, and the currently eligible real-ECG inventory.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote
 
 from .assessment_contracts import rapid_synthesis_contract_available
@@ -21,7 +21,7 @@ from .subskill_tasks import training_independent_receipt_available
 
 
 _STUDY_PLAN_RETURN = quote("/home?panel=plan", safe="")
-_TRAINING_STAGE_LENGTH = 25
+_TRAINING_STAGE_LENGTH = 10
 _RAPID_STAGE_LENGTH = 10
 _BASELINE_RAPID_STAGE_LENGTH = 5
 _RAPID_PACES = {"untimed", "ward", "emergency"}
@@ -151,26 +151,42 @@ _TRAINING_RECEIPT_SUBSKILLS = {
 
 
 def _receipt_mode(
-    definition: ObjectiveDefinition, case_concept: str, subskill: str
+    definition: ObjectiveDefinition,
+    case_concept: str,
+    subskill: str,
+    *,
+    training_receipt_available: Callable[[str, str], bool] | None = None,
 ) -> str | None:
     """Return the mode with an implemented independent receipt contract.
 
     Proxy objective-to-case mappings stay formative unless the task itself is
-    explicitly objective-level. Rapid synthesis is also formative until every
-    sweep domain has deterministic grading; Training tasks currently close
-    exact corpus concepts only. Clinical application remains formative pending
+    explicitly objective-level. The one reviewed exception is raw QT
+    measurement on a QTc-authored case: classification stays QTc-specific,
+    while the trace and numeric task independently grade the QT interval.
+    Rapid synthesis is also formative until every sweep domain has
+    deterministic grading. Clinical application remains formative pending
     named clinician sign-off and therefore cannot enter this mastery queue.
     """
     if subskill == "synthesize":
         return "rapid" if rapid_synthesis_contract_available(
             definition.id, case_concept
         ) else None
-    if definition.id != case_concept:
+    qt_measurement_proxy = (
+        definition.id == "qt_interval"
+        and case_concept == "qtc_prolongation"
+        and subskill == "measure"
+    )
+    if definition.id != case_concept and not qt_measurement_proxy:
         return None
     if subskill == "recognize":
         return "rapid"
     if subskill in _TRAINING_RECEIPT_SUBSKILLS:
         if not training_independent_receipt_available(case_concept, subskill):
+            return None
+        if (
+            training_receipt_available is not None
+            and not training_receipt_available(case_concept, subskill)
+        ):
             return None
         return "train"
     return None
@@ -313,7 +329,11 @@ def _preferred_session_contract(
     requested = preferences.get("defaultSessionLength", _RAPID_STAGE_LENGTH)
     if isinstance(requested, bool) or requested not in {5, 10, 25, 50}:
         requested = _RAPID_STAGE_LENGTH
-    training_length = 10 if int(requested) == 5 else int(requested)
+    # Focused Practice intentionally offers short, cognitively manageable
+    # 5/10/20-ECG sets. Keep planner/calendar links identical to that visible
+    # contract instead of silently asking the page to clamp legacy 25/50
+    # preferences after navigation.
+    training_length = 5 if int(requested) == 5 else 10 if int(requested) == 10 else 20
     rapid_pace = str(preferences.get("rapidPace") or "untimed")
     if rapid_pace not in _RAPID_PACES:
         rapid_pace = "untimed"
@@ -434,6 +454,7 @@ def build_mastery_plan(
     runtime_evidence: dict[str, str] | None = None,
     runtime_subskills: dict[str, set[str]] | None = None,
     clinical_concepts: set[str] | None = None,
+    training_receipt_available: Callable[[str, str], bool] | None = None,
     preferences: dict[str, Any] | None = None,
     as_of: datetime | None = None,
 ) -> dict[str, Any]:
@@ -461,7 +482,12 @@ def build_mastery_plan(
             ):
                 continue
             actual = observed.get((definition.id, subskill), {})
-            receipt_mode = _receipt_mode(definition, case_concept, subskill)
+            receipt_mode = _receipt_mode(
+                definition,
+                case_concept,
+                subskill,
+                training_receipt_available=training_receipt_available,
+            )
             if receipt_mode is None:
                 continue
             candidates.append({

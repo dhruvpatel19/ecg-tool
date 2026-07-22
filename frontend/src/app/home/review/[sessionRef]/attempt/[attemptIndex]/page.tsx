@@ -42,6 +42,8 @@ const labelOverrides: Record<string, string> = {
   subskillTaskResult: "Skill task result",
   classificationCorrect: "Classification correct",
   skillCorrect: "Skill response correct",
+  selectedSkillFeedback: "Selected skill",
+  patternFeedback: "Pattern decision",
   firstLookFinding: "First-look finding",
   firstLookConfidence: "First-look confidence",
   fillInValue: "Your measured value",
@@ -257,6 +259,310 @@ function RapidTaskReview({ replay }: { replay: LearningSessionReplay }) {
   );
 }
 
+type FocusedChoice = { id: string; label: string };
+const focusedInterpretationKeys = [
+  "rate",
+  "rhythm",
+  "axis",
+  "intervals",
+  "conduction",
+  "st_t",
+  "hypertrophy",
+  "synthesis",
+] as const;
+type FocusedInterpretationKey = (typeof focusedInterpretationKeys)[number];
+type FocusedFrameworkStep = {
+  key: FocusedInterpretationKey;
+  label: string;
+  prompt: string;
+  placeholder: string;
+  choices: string[];
+};
+
+function isFocusedInterpretationKey(value: unknown): value is FocusedInterpretationKey {
+  return typeof value === "string" && focusedInterpretationKeys.some((key) => key === value);
+}
+
+function focusedInterpretation(value: unknown): Partial<Record<FocusedInterpretationKey, string>> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(focusedInterpretationKeys.flatMap((key) => (
+    typeof value[key] === "string" ? [[key, value[key]]] : []
+  ))) as Partial<Record<FocusedInterpretationKey, string>>;
+}
+type FocusedTask = {
+  kind: "single_choice" | "matching" | "numeric_fill_in" | "confidence_commit";
+  subskill: string;
+  prompt: string;
+  options: FocusedChoice[];
+  choices: FocusedChoice[];
+  rows: Array<{ id: string; clause: string }>;
+  unit: string | null;
+  frameworkVersion: string | null;
+  frameworkSteps: FocusedFrameworkStep[];
+};
+
+function focusedChoices(value: unknown): FocusedChoice[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).map((choice) => ({
+    id: typeof choice.id === "string" ? choice.id : "",
+    label: typeof choice.label === "string" ? choice.label : "",
+  })).filter((choice) => choice.id && choice.label);
+}
+
+function focusedQuestionSnapshot(replay: LearningSessionReplay) {
+  const snapshot = replay.question.questionSnapshot ?? replay.question.question_snapshot;
+  return isRecord(snapshot) ? snapshot : null;
+}
+
+function focusedTaskFromReplay(replay: LearningSessionReplay): FocusedTask | null {
+  const snapshot = focusedQuestionSnapshot(replay);
+  const raw = isRecord(replay.question.subskillTask)
+    ? replay.question.subskillTask
+    : snapshot && isRecord(snapshot.task)
+      ? snapshot.task
+      : null;
+  if (!isRecord(raw)) return null;
+  const kind = raw.kind;
+  if (kind !== "single_choice" && kind !== "matching" && kind !== "numeric_fill_in" && kind !== "confidence_commit") return null;
+  const rows = Array.isArray(raw.rows)
+    ? raw.rows.filter(isRecord).map((row) => ({
+      id: typeof row.id === "string" ? row.id : "",
+      clause: typeof row.clause === "string" ? row.clause : "",
+    })).filter((row) => row.id && row.clause)
+    : [];
+  const frameworkSteps = Array.isArray(raw.frameworkSteps)
+    ? raw.frameworkSteps.filter(isRecord).flatMap((step): FocusedFrameworkStep[] => {
+      if (
+        !isFocusedInterpretationKey(step.key)
+        || typeof step.label !== "string"
+        || typeof step.prompt !== "string"
+        || !step.label
+        || !step.prompt
+      ) return [];
+      return [{
+        key: step.key,
+        label: step.label,
+        prompt: step.prompt,
+        placeholder: typeof step.placeholder === "string" ? step.placeholder : "",
+        choices: Array.isArray(step.choices)
+          ? step.choices.filter((choice): choice is string => typeof choice === "string")
+          : [],
+      }];
+    }).slice(0, 8)
+    : [];
+  return {
+    kind,
+    subskill: typeof raw.subskill === "string" ? raw.subskill : "",
+    prompt: typeof raw.prompt === "string" ? raw.prompt : "Review the selected skill response.",
+    options: focusedChoices(raw.options),
+    choices: focusedChoices(raw.choices),
+    rows,
+    unit: typeof raw.unit === "string" ? raw.unit : null,
+    frameworkVersion: typeof raw.frameworkVersion === "string" ? raw.frameworkVersion : null,
+    frameworkSteps,
+  };
+}
+
+function FocusedTargetIdentity({ replay }: { replay: LearningSessionReplay }) {
+  const snapshot = focusedQuestionSnapshot(replay);
+  const target = isRecord(replay.question.target)
+    ? replay.question.target
+    : snapshot && isRecord(snapshot.target)
+      ? snapshot.target
+      : null;
+  const objectiveLabel = target && typeof target.objectiveLabel === "string"
+    ? target.objectiveLabel.trim()
+    : snapshot && typeof snapshot.objectiveLabel === "string"
+      ? snapshot.objectiveLabel.trim()
+      : "";
+  const caseConceptLabel = target && typeof target.caseConceptLabel === "string"
+    ? target.caseConceptLabel.trim()
+    : snapshot && typeof snapshot.caseConceptLabel === "string"
+      ? snapshot.caseConceptLabel.trim()
+      : "";
+  if (!objectiveLabel || !caseConceptLabel || objectiveLabel.localeCompare(caseConceptLabel, undefined, { sensitivity: "accent" }) === 0) return null;
+
+  return (
+    <dl className={styles.focusedTargetIdentity} aria-label="Focused practice context">
+      <div><dt>Practice objective</dt><dd>{objectiveLabel}</dd></div>
+      <div><dt>ECG example</dt><dd>{caseConceptLabel}</dd></div>
+    </dl>
+  );
+}
+
+function focusedTaskResult(replay: LearningSessionReplay) {
+  return isRecord(replay.answerGuide.subskillTaskResult)
+    ? replay.answerGuide.subskillTaskResult
+    : null;
+}
+
+function taskResultText(result: Record<string, unknown> | null, key: string) {
+  return result && typeof result[key] === "string" ? result[key] as string : null;
+}
+
+function taskResultNumber(result: Record<string, unknown> | null, key: string) {
+  return result && typeof result[key] === "number" && Number.isFinite(result[key])
+    ? result[key] as number
+    : null;
+}
+
+function FocusedSystematicReview({ replay, task }: { replay: LearningSessionReplay; task: FocusedTask }) {
+  const result = focusedTaskResult(replay);
+  const submittedResponse = focusedInterpretation(replay.submission.structuredInterpretation);
+  const submitted = Object.keys(submittedResponse).length
+    ? submittedResponse
+    : focusedInterpretation(result?.systematicInterpretation);
+  const topLevelReviewed = Array.isArray(replay.answerGuide.reviewedFramework)
+    ? replay.answerGuide.reviewedFramework.filter(isRecord)
+    : [];
+  const resultReviewed = result && Array.isArray(result.reviewedFramework)
+    ? result.reviewedFramework.filter(isRecord)
+    : [];
+  const reviewed = topLevelReviewed.length ? topLevelReviewed : resultReviewed;
+  const complete = typeof replay.answerGuide.systematicInterpretationComplete === "boolean"
+    ? replay.answerGuide.systematicInterpretationComplete
+    : result && typeof result.systematicInterpretationComplete === "boolean"
+      ? result.systematicInterpretationComplete
+      : null;
+  if (!task.frameworkSteps.length) return null;
+
+  return (
+    <section className={styles.systematicReview} aria-label="Systematic ECG interpretation review">
+      <header className={styles.systematicHeader}>
+        <div><span>Full ECG interpretation</span><h4>Review your eight-step read</h4></div>
+        {complete !== null ? <strong data-complete={complete || undefined}>{complete ? "All 8 steps recorded" : "Interpretation incomplete"}</strong> : null}
+      </header>
+      <ol className={styles.systematicSteps}>
+        {task.frameworkSteps.map((step, index) => {
+          const review = reviewed.find((row) => row.key === step.key);
+          const submittedText = submitted[step.key];
+          const learnerText = typeof submittedText === "string" && submittedText.trim()
+            ? submittedText.trim()
+            : "No response recorded";
+          const reviewText = review && typeof review.review === "string" && review.review.trim()
+            ? review.review.trim()
+            : "Reviewed guidance unavailable";
+          const grounded = review?.grounded === true;
+          return (
+            <li key={step.key}>
+              <header><span>{index + 1}</span><div><strong>{step.label}</strong><small>{step.prompt}</small></div></header>
+              <dl>
+                <div><dt>Your interpretation</dt><dd>{learnerText}</dd></div>
+                <div data-grounded={grounded || undefined}>
+                  <dt>{grounded ? "Reviewed ECG evidence" : "Reviewed framework"}</dt>
+                  <dd>{reviewText}</dd>
+                </div>
+              </dl>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+function FocusedTaskReview({ replay }: { replay: LearningSessionReplay }) {
+  const task = focusedTaskFromReplay(replay);
+  if (!task) return null;
+  const result = focusedTaskResult(replay);
+  const resultCorrect = result && typeof result.correct === "boolean" ? result.correct : null;
+  const choiceLabel = (choices: FocusedChoice[], id: string | null) => (
+    id ? choices.find((choice) => choice.id === id)?.label ?? null : null
+  );
+  const selectedAnswer = taskResultText(result, "submittedAnswer")
+    ?? (typeof replay.submission.subskillTaskAnswer === "string" ? replay.submission.subskillTaskAnswer : null);
+  const reviewedAnswer = taskResultText(result, "correctAnswer");
+
+  return (
+    <article className={styles.focusedTaskReview} aria-label="Focused skill review">
+      <header className={styles.focusedTaskHeader}>
+        <div>
+          <span>Selected skill</span>
+          {task.subskill ? <strong>{humanize(task.subskill)}</strong> : null}
+        </div>
+        {resultCorrect !== null ? (
+          <span className={styles.focusedTaskStatus} data-correct={resultCorrect || undefined}>
+            {resultCorrect ? "Skill met" : "Review this skill"}
+          </span>
+        ) : null}
+      </header>
+      <h3>{task.prompt}</h3>
+
+      {task.kind === "single_choice" ? (
+        <ol className={styles.focusedChoiceReview}>
+          {task.options.map((option, index) => {
+            const selected = option.id === selectedAnswer;
+            const reviewed = option.id === reviewedAnswer;
+            return (
+              <li key={option.id} data-selected={selected || undefined} data-reviewed={reviewed || undefined}>
+                <span>{String.fromCharCode(65 + index)}</span>
+                <div>
+                  <strong>{option.label}</strong>
+                  <small>{selected ? "Your selection" : ""}{selected && reviewed ? " · " : ""}{reviewed ? "Reviewed answer" : ""}</small>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
+
+      {task.kind === "matching" ? (
+        <ol className={styles.focusedMatchingReview}>
+          {task.rows.map((row) => {
+            const resultRows = result && Array.isArray(result.rows) ? result.rows.filter(isRecord) : [];
+            const rowResult = resultRows.find((candidate) => candidate.rowId === row.id);
+            const submittedMatches = isRecord(replay.submission.subskillTaskMatches)
+              ? replay.submission.subskillTaskMatches
+              : {};
+            const submittedId = rowResult && typeof rowResult.submittedChoiceId === "string"
+              ? rowResult.submittedChoiceId
+              : typeof submittedMatches[row.id] === "string"
+                ? submittedMatches[row.id] as string
+                : null;
+            const correctId = rowResult && typeof rowResult.correctChoiceId === "string"
+              ? rowResult.correctChoiceId
+              : null;
+            const rowCorrect = rowResult && typeof rowResult.correct === "boolean" ? rowResult.correct : null;
+            return (
+              <li key={row.id} data-correct={rowCorrect === true || undefined}>
+                <strong>{row.clause}</strong>
+                <dl>
+                  <div><dt>Your match</dt><dd>{choiceLabel(task.choices, submittedId) ?? "No match recorded"}</dd></div>
+                  <div><dt>Reviewed match</dt><dd>{choiceLabel(task.choices, correctId) ?? "Reviewed match unavailable"}</dd></div>
+                </dl>
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
+
+      {task.kind === "numeric_fill_in" ? (() => {
+        const submitted = taskResultNumber(result, "submittedValue")
+          ?? (typeof replay.submission.subskillTaskValue === "number" ? replay.submission.subskillTaskValue : null);
+        const expected = taskResultNumber(result, "expectedValue");
+        const tolerance = taskResultNumber(result, "tolerance");
+        const unit = taskResultText(result, "unit") ?? task.unit ?? "";
+        return (
+          <dl className={styles.focusedNumericReview}>
+            <div><dt>Your measurement</dt><dd>{submitted ?? "Not recorded"}{submitted !== null && unit ? ` ${unit}` : ""}</dd></div>
+            <div><dt>Reviewed measurement</dt><dd>{expected ?? "Unavailable"}{expected !== null && unit ? ` ${unit}` : ""}</dd></div>
+            <div><dt>Accepted tolerance</dt><dd>{tolerance !== null ? `±${tolerance}${unit ? ` ${unit}` : ""}` : "Unavailable"}</dd></div>
+          </dl>
+        );
+      })() : null}
+
+      {task.kind === "confidence_commit" && task.subskill === "calibrate_confidence" ? (
+        <div className={styles.focusedConfidenceReview}>
+          <span>Your confidence</span>
+          <strong>{typeof replay.submission.confidence === "number" ? `${replay.submission.confidence} of 5` : "Not recorded"}</strong>
+          <small>Calibration compares your certainty with the reviewed outcome over repeated ECGs.</small>
+        </div>
+      ) : null}
+      {task.subskill === "synthesize" ? <FocusedSystematicReview replay={replay} task={task} /> : null}
+    </article>
+  );
+}
+
 function ClinicalStageTimeline({ replay }: { replay: LearningSessionReplay }) {
   const stages = Array.isArray(replay.question.steps)
     ? replay.question.steps.filter(isRecord)
@@ -355,7 +661,9 @@ function QuestionCard({ replay }: { replay: LearningSessionReplay }) {
     : [];
   const supplementalQuestion = Object.fromEntries(
     Object.entries(question).filter(([key, value]) => (
-      !separatelyRenderedQuestionFields.has(key) && isMeaningful(value)
+      !separatelyRenderedQuestionFields.has(key)
+      && !(replay.mode === "training" && ["target", "phase", "questionSnapshot", "question_snapshot"].includes(key))
+      && isMeaningful(value)
     )),
   );
 
@@ -367,6 +675,7 @@ function QuestionCard({ replay }: { replay: LearningSessionReplay }) {
       {typeof question.situation === "string" && question.situation ? <p className={styles.situation}>{humanize(question.situation)}</p> : null}
       {typeof question.stem === "string" && question.stem ? <p className={styles.stem}>{question.stem}</p> : null}
       {typeof question.prompt === "string" && question.prompt ? <p className={styles.prompt}>{question.prompt}</p> : null}
+      {replay.mode === "training" ? <FocusedTargetIdentity replay={replay} /> : null}
       {options.length ? (
         <ol className={styles.options}>
           {options.map((option, index) => (
@@ -376,9 +685,10 @@ function QuestionCard({ replay }: { replay: LearningSessionReplay }) {
           ))}
         </ol>
       ) : null}
+      {replay.mode === "training" ? <FocusedTaskReview replay={replay} /> : null}
       {replay.mode === "rapid" ? <RapidTaskReview replay={replay} /> : null}
       {replay.mode === "clinical" ? <ClinicalStageTimeline replay={replay} /> : null}
-      {isRecord(question.subskillTask) ? <details className={styles.questionDetails}><summary>Skill task</summary><FriendlyRecord value={question.subskillTask} /></details> : null}
+      {replay.mode !== "training" && isRecord(question.subskillTask) ? <details className={styles.questionDetails}><summary>Skill task</summary><FriendlyRecord value={question.subskillTask} /></details> : null}
       {isRecord(question.testedObjectiveManifest) ? <details className={styles.questionDetails}><summary>Skills checked in this item</summary><FriendlyRecord value={question.testedObjectiveManifest} /></details> : null}
       {replay.mode !== "clinical" && Array.isArray(question.steps) && question.steps.length ? <details className={styles.questionDetails}><summary>Decision steps</summary><FriendlyValue fieldKey="steps" value={question.steps} /></details> : null}
       {Object.keys(supplementalQuestion).length ? <details className={styles.questionDetails}><summary>Additional question details</summary><FriendlyRecord value={supplementalQuestion} /></details> : null}
@@ -403,12 +713,23 @@ function ReplayWaveformCard({
   waveformPresentation: LearningSessionReplay["waveformPresentation"];
   provenance?: string;
 }) {
+  const isCurrentTracing = ecgRef === replay.ecgRef;
+  const savedEvidence = isCurrentTracing
+    ? replay.submission.viewerTaskEvidence ?? replay.submission.traceEvidence ?? null
+    : null;
+  const reviewedActions = isCurrentTracing ? replay.reviewActions ?? [] : [];
   return (
     <article className={styles.waveformCard}>
       <header>
         <div><p>{eyebrow}</p><h3>{title}</h3></div>
         {provenance ? <span><ShieldCheck size={13} aria-hidden="true" /> {provenance}</span> : null}
       </header>
+      {savedEvidence || reviewedActions.length ? (
+        <div className={styles.evidenceLegend} aria-label="ECG evidence legend">
+          {savedEvidence ? <span data-kind="learner">Your saved mark / measurement</span> : null}
+          {reviewedActions.length ? <span data-kind="reviewed">Reviewed reference</span> : null}
+        </div>
+      ) : null}
       {available ? (
         <div className={styles.viewer}>
           <ECGViewer
@@ -418,6 +739,8 @@ function ReplayWaveformCard({
             presentation={waveformPresentation.kind === "rhythm_strip"
               ? { kind: "rhythm_strip", leads: waveformPresentation.leads ?? [] }
               : { kind: "twelve_lead" }}
+            actions={reviewedActions}
+            reviewEvidence={savedEvidence}
             reviewMode
           />
         </div>
@@ -489,16 +812,36 @@ export default function LearningSessionReplayPage() {
     );
   }
 
+  const trainingSubmissionFields = new Set([
+    "selectedAnswer",
+    "confidence",
+    "subskillTaskAnswer",
+    "subskillTaskMatches",
+    "subskillTaskValue",
+    "structuredInterpretation",
+  ]);
   const submissionSummary = Object.fromEntries(
-    Object.entries(replay.submission).filter(([key]) => !["taskResponses", "stepAnswers"].includes(key)),
+    Object.entries(replay.submission).filter(([key]) => (
+      !["taskResponses", "stepAnswers", "viewerTaskEvidence", "traceEvidence"].includes(key)
+      && !(replay.mode === "training" && trainingSubmissionFields.has(key))
+    )),
   );
   const feedbackSummary = Object.fromEntries(
     Object.entries(replay.feedback).filter(([key]) => !["taskFeedback", "stepFeedback"].includes(key)),
   );
   const answerGuideSummary = Object.fromEntries(
-    Object.entries(replay.answerGuide).filter(([key]) => key !== "correctStepAnswers"),
+    Object.entries(replay.answerGuide).filter(([key]) => (
+      key !== "correctStepAnswers"
+      && !(replay.mode === "training" && [
+        "expectedAnswer",
+        "subskillTaskResult",
+        "systematicInterpretationComplete",
+        "reviewedFramework",
+      ].includes(key))
+    )),
   );
-  const isPartialRapid = replay.mode === "rapid" && replay.sessionStatus === "abandoned";
+  const isPartialPractice = replay.sessionStatus === "abandoned" && (replay.mode === "rapid" || replay.mode === "training");
+  const partialSessionLabel = replay.mode === "training" ? "Partial Focused set" : "Partial Rapid round";
 
   return (
     <div className={`page ${styles.page}`}>
@@ -506,13 +849,13 @@ export default function LearningSessionReplayPage() {
 
       <header className={styles.header}>
         <span className={styles.modeIcon} data-mode={replay.mode} aria-hidden="true"><ModeIcon size={22} /></span>
-        <div><p className="eyebrow">{isPartialRapid ? "Submitted ECG review" : "Question review"}</p><h1>{replay.displayId}</h1><p>{isPartialRapid ? "Partial Rapid round" : presentation.label} · Submitted {submittedLabel(replay.submittedAt)}</p></div>
+        <div><p className="eyebrow">{isPartialPractice ? "Submitted ECG review" : "Question review"}</p><h1>{replay.displayId}</h1><p>{isPartialPractice ? partialSessionLabel : presentation.label} · Submitted {submittedLabel(replay.submittedAt)}</p></div>
         <span className={styles.reviewOnly}><ShieldCheck size={14} aria-hidden="true" /> Review only</span>
       </header>
 
       <aside className={styles.boundary} role="note">
         <ShieldCheck size={20} aria-hidden="true" />
-        <p><strong>Your work is locked.</strong> You can explore this {isPartialRapid ? "submitted ECG" : "completed question"}, but nothing here is graded or saved. The layout may look a little different from your original session.</p>
+        <p><strong>Your work is locked.</strong> You can explore this {isPartialPractice ? "submitted ECG" : "completed question"}, but nothing here is graded or saved. The layout may look a little different from your original session.</p>
       </aside>
 
       <section className={styles.viewerSection} aria-labelledby="replay-ecg-heading">
@@ -552,10 +895,12 @@ export default function LearningSessionReplayPage() {
             <p className="eyebrow">How you did</p><h2 id="replay-feedback-heading"><CheckCircle2 size={18} aria-hidden="true" /> Feedback</h2>
             <FriendlyRecord value={feedbackSummary} />
           </section>
-          <section aria-labelledby="replay-guide-heading">
-            <p className="eyebrow">Learn from it</p><h2 id="replay-guide-heading"><BookOpenCheck size={18} aria-hidden="true" /> Answer guide</h2>
-            <FriendlyRecord value={answerGuideSummary} />
-          </section>
+          {replay.mode !== "training" || Object.keys(answerGuideSummary).length ? (
+            <section aria-labelledby="replay-guide-heading">
+              <p className="eyebrow">Learn from it</p><h2 id="replay-guide-heading"><BookOpenCheck size={18} aria-hidden="true" /> Answer guide</h2>
+              <FriendlyRecord value={answerGuideSummary} />
+            </section>
+          ) : null}
         </aside>
       </div>
 

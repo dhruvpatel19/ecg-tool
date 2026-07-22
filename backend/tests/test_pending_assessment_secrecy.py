@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import os
+import random
 import uuid
 
 from fastapi.testclient import TestClient
 
+import app.training_routes as training_routes_module
 from app.main import app, clinical_item_store, repo, store, training_campaign_store
 
 
@@ -82,7 +83,21 @@ def _tutor(client: TestClient, case_id: str, scope_key: str | None = None):
     return client.post("/tutor/message", json=payload)
 
 
-def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit() -> None:
+def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit(
+    monkeypatch,
+) -> None:
+    # Production plans are intentionally randomized per learner. Pin only this
+    # adversarial test's randomizer so two owners share a canonical tracing and
+    # the stricter overlapping-pending boundary is exercised deterministically.
+    original_build_plan = training_routes_module._build_plan
+
+    def reproducible_plan(*args, **kwargs):
+        kwargs["rng"] = random.Random(20260718)
+        return original_build_plan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        training_routes_module, "_build_plan", reproducible_plan
+    )
     with TestClient(app) as owner, TestClient(app) as other, TestClient(app) as outsider:
         owner_user = _register(owner, "sec_train")
         _register(other, "sec_other")
@@ -111,9 +126,9 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
         assert body["current"]["kind"] == "pending"
         assert body["current"]["packet"]["ptbxl_plus"]["fiducials"]["rois"] == []
 
-        # A second learner can legitimately receive the same deterministic
-        # corpus ECG. Their pending boundary must not later erase the first
-        # learner's already-committed debrief.
+        # A second learner can legitimately receive the same corpus ECG. Their
+        # pending boundary must not later erase the first learner's already-
+        # committed debrief.
         other_started = other.post(
             "/training/campaigns",
             json={
@@ -314,18 +329,6 @@ def test_training_pending_case_is_blind_across_auth_and_reveals_only_on_commit()
                 "length": 10,
             },
         )
-        if os.getenv("ECG_TEST_USE_CI_CORPUS") == "1":
-            # The committed CI fixture is the 103-real-PTB Clinical subset and
-            # intentionally lacks another same-role ECG for this exact 10-item
-            # roster. In that constrained corpus the safe contract is to fail
-            # closed. The full release corpus continues through the replacement
-            # assertions below.
-            assert restarted.status_code == 409, restarted.text
-            assert (
-                restarted.json()["detail"]["code"]
-                == "training_live_exposure_conflict"
-            )
-            return
         assert restarted.status_code == 200, restarted.text
         restarted_body = restarted.json()
         restarted_campaign_id = restarted_body["campaign"]["campaignId"]
