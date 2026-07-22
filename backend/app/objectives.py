@@ -73,11 +73,6 @@ GUIDED_OBJECTIVE_IDS = (
     "syncope_bradycardia_transfer", "tachyarrhythmia_mixed", "tachycardia_matrix",
     "tachycardia_with_pulse", "ventricular_conduction_mixed", "wide_complex_tachycardia",
     "wide_qrs_qt_confound", "wolff_parkinson_white",
-    "foundations_waveform_landmarks", "foundations_calibration",
-    "foundations_signal_quality", "foundations_rate",
-    "foundations_atrial_source", "foundations_pr_qrs",
-    "foundations_recovery", "foundations_twelve_lead_navigation",
-    "foundations_axis", "foundations_systematic_sweep",
 )
 
 # These objectives were emitted by earlier Guided curricula but are no longer
