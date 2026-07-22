@@ -33,6 +33,19 @@ _EMERGENCY_RHYTHM_CONCEPTS = RUNTIME_OBJECTIVE_IDS
 # only offer one of these reviewed concept -> scene repairs, and the resulting
 # work remains formative regardless of completion or score.
 _GUIDED_REMEDIATION_DESTINATIONS: dict[str, tuple[str, str, str]] = {
+    # Objective-specific Foundations repairs take precedence over their broad
+    # case-family aliases. This keeps a calibration gap from being routed to a
+    # generic normal-ECG scene merely because both use the same tracing family.
+    "foundations_waveform_landmarks": ("foundations", "S1", "Waveform landmarks"),
+    "foundations_calibration": ("foundations", "S2", "Calibration and measurement"),
+    "foundations_signal_quality": ("foundations", "S3", "Task-specific signal quality"),
+    "foundations_rate": ("foundations", "S4", "Ventricular rate"),
+    "foundations_atrial_source": ("foundations", "S5", "Atrial source and P–QRS relationship"),
+    "foundations_pr_qrs": ("foundations", "S6", "PR and QRS measurement"),
+    "foundations_recovery": ("foundations", "S7", "Recovery landmarks"),
+    "foundations_twelve_lead_navigation": ("foundations", "S8", "Twelve-lead navigation"),
+    "foundations_axis": ("foundations", "S9", "Frontal QRS axis"),
+    "foundations_systematic_sweep": ("foundations", "S10", "The complete descriptive sweep"),
     "normal_ecg": ("leads-vectors", "M02.S1", "Why one beat looks different in twelve leads"),
     "rate": ("rhythm-ectopy", "M03.S3", "Rate when rhythm is not tidy"),
     "sinus_rhythm": ("rhythm-ectopy", "M03.S4", "Sinus is a source, not a speed"),
@@ -296,7 +309,9 @@ def _guided_remediation(
 ) -> dict[str, Any] | None:
     if not cell:
         return None
-    destination = _GUIDED_REMEDIATION_DESTINATIONS.get(cell["caseConcept"])
+    destination = _GUIDED_REMEDIATION_DESTINATIONS.get(
+        cell["objectiveId"]
+    ) or _GUIDED_REMEDIATION_DESTINATIONS.get(cell["caseConcept"])
     trigger = _guided_remediation_reason(cell)
     if not destination or not trigger:
         return None

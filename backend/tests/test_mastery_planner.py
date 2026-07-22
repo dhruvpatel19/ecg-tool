@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 from app.mastery_planner import (
     _GUIDED_REMEDIATION_DESTINATIONS,
+    _guided_remediation,
     _receipt_mode,
     build_mastery_plan,
 )
@@ -689,6 +690,7 @@ def test_saved_goal_only_breaks_unseen_ties_and_never_displaces_due_evidence() -
 
 def test_every_guided_remediation_destination_is_an_authored_routable_scene() -> None:
     module_files = {
+        "foundations": "m01Foundations.ts",
         "leads-vectors": "m02LeadsVectors.ts",
         "rhythm-ectopy": "m03RhythmLogic.ts",
         "av-brady": "m04AvConduction.ts",
@@ -721,3 +723,36 @@ def test_every_guided_remediation_destination_is_an_authored_routable_scene() ->
         assert f'id: "{module_id}"' in source, concept
         assert f'id: "{scene_id}"' in source, concept
         assert scene_title.strip(), concept
+
+
+def test_foundations_remediation_uses_the_exact_objective_scene_before_case_alias() -> None:
+    expected = {
+        "foundations_waveform_landmarks": "S1",
+        "foundations_calibration": "S2",
+        "foundations_signal_quality": "S3",
+        "foundations_rate": "S4",
+        "foundations_atrial_source": "S5",
+        "foundations_pr_qrs": "S6",
+        "foundations_recovery": "S7",
+        "foundations_twelve_lead_navigation": "S8",
+        "foundations_axis": "S9",
+        "foundations_systematic_sweep": "S10",
+    }
+    for objective_id, scene_id in expected.items():
+        destination = _guided_remediation(
+            {
+                "objectiveId": objective_id,
+                "caseConcept": "normal_ecg",
+                "label": "Foundations",
+                "highConfidenceWrong": 1,
+                "independentAttempts": 1,
+                "independentMastery": 0.0,
+                "lapses": 0,
+            },
+            before_stage_order=1,
+        )
+        assert destination is not None
+        assert destination["moduleId"] == "foundations"
+        assert destination["sceneId"] == scene_id
+        assert destination["href"] == f"/learn/foundations?scene={scene_id}"
+        assert destination["updatesIndependentMastery"] is False
