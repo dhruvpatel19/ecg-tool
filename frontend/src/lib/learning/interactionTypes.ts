@@ -27,7 +27,8 @@ export type InteractionKind =
   | "model_explore"
   | "numeric_entry"
   | "pairing"
-  | "categorize";
+  | "categorize"
+  | "waveform_lab";
 
 export type FeedbackBranch = {
   id: string;
@@ -154,12 +155,14 @@ export type CompareDimension = {
   label: string;
   leftAnswer: string;
   rightAnswer: string;
+  thirdAnswer?: string;
 };
 
 export type CompareInteraction = InteractionBase & {
   kind: "compare";
   leftCaseConcept: string;
   rightCaseConcept: string;
+  thirdCaseConcept?: string;
   dimensions: CompareDimension[];
 };
 
@@ -171,6 +174,14 @@ export type RubricCriterion = {
   misconceptionIfMissing?: string;
 };
 
+export type ForbiddenFreeResponseClaim = {
+  id: string;
+  label: string;
+  /** Terms that may not be asserted as positive claims in this response. */
+  terms: string[];
+  misconception: string;
+};
+
 export type FreeResponseInteraction = InteractionBase & {
   kind: "free_response";
   responseLabel: string;
@@ -178,6 +189,7 @@ export type FreeResponseInteraction = InteractionBase & {
   minimumCharacters: number;
   rubric: RubricCriterion[];
   sentenceFrame?: string;
+  forbiddenClaims?: ForbiddenFreeResponseClaim[];
 };
 
 export type ClinicalStage = {
@@ -261,6 +273,50 @@ export type CategorizeInteraction = InteractionBase & {
   correctCategoryByItem: Record<string, string>;
 };
 
+export type AuthoredWaveformTrace =
+  | "normal_beat"
+  | "alternate_beat"
+  | "calibration_beat"
+  | "regular_strip"
+  | "irregular_strip"
+  | "artifact_strip"
+  | "long_pr_beat"
+  | "wide_qrs_beat"
+  | "st_t_beat";
+
+export type AuthoredWaveformTarget = {
+  id: string;
+  label: string;
+  /** Point target in milliseconds from the beginning of the authored trace. */
+  timeMs?: number;
+  /** Region or interval start in milliseconds. */
+  startMs?: number;
+  /** Region or interval end in milliseconds. */
+  endMs?: number;
+};
+
+/**
+ * A deterministic, code-native ECG task used when a reviewed patient tracing
+ * cannot truthfully provide scored landmark geometry. These interactions can
+ * complete a guided learning action, but they never constitute patient-case
+ * or independent-mastery evidence.
+ */
+export type WaveformLabInteraction = InteractionBase & {
+  kind: "waveform_lab";
+  trace: AuthoredWaveformTrace;
+  lead: string;
+  durationMs: number;
+  paperSpeedMmSec: 25 | 50;
+  gainMmMv: 5 | 10 | 20;
+  task: "point_targets" | "interval" | "march" | "region";
+  targets: AuthoredWaveformTarget[];
+  requiredTargetIds: string[];
+  toleranceMs: number;
+  minimumMarkers?: number;
+  expectedPattern?: "regular" | "variable";
+  showCalibration?: boolean;
+};
+
 export type LearningInteraction =
   | SingleSelectInteraction
   | MultiSelectInteraction
@@ -278,7 +334,8 @@ export type LearningInteraction =
   | ModelExploreInteraction
   | NumericEntryInteraction
   | PairingInteraction
-  | CategorizeInteraction;
+  | CategorizeInteraction
+  | WaveformLabInteraction;
 
 export type InteractionEvidence = {
   interactionId: string;
@@ -294,7 +351,27 @@ export type InteractionEvidence = {
   measuredValueMs?: number;
   misconceptions: string[];
   feedbackBranch: FeedbackBranch["when"];
+  /**
+   * The learner used all three teaching attempts and the worked solution was
+   * shown. This closes the guided action without turning the response into a
+   * correct or independent observation.
+   */
+  solutionRevealed?: boolean;
 };
+
+export const UNSUCCESSFUL_ATTEMPTS_BEFORE_SOLUTION = 3;
+
+export function evidenceRevealsSolution(evidence: InteractionEvidence | null | undefined) {
+  if (!evidence || evidence.correct || evidence.feedbackBranch === "not_assessable") return false;
+  // The attempt fallback keeps progress written by an older client resumable
+  // after the explicit solutionRevealed field was introduced.
+  return evidence.solutionRevealed === true
+    || evidence.attempts >= UNSUCCESSFUL_ATTEMPTS_BEFORE_SOLUTION;
+}
+
+export function interactionEvidenceResolved(evidence: InteractionEvidence | null | undefined) {
+  return Boolean(evidence?.correct || evidenceRevealsSolution(evidence));
+}
 
 export type SourceReference = {
   document: string;
@@ -311,6 +388,9 @@ export type CaseContract = {
   allowedUses: Array<"mechanism" | "worked_example" | "scored_recognition" | "measurement" | "transfer">;
   fallback: "authored_simulation" | "contrast_only" | "lock_scene";
   forbiddenClaims: string[];
+  /** Opaque server allowlist key; raw corpus ids never ship in the browser. */
+  casePoolSlot?: string;
+  retryCasePoolSlot?: string;
 };
 
 export type VerbatimSceneCopy = {
@@ -378,6 +458,13 @@ export type ProductionScene = {
   layout: SceneLayoutContract;
   tutor: TutorSceneContract;
   caseContract?: CaseContract;
+  learningContract?: {
+    objectiveId: string;
+    bloom: Array<"understand" | "apply" | "analyze" | "evaluate" | "synthesize">;
+    prerequisiteSceneIds: string[];
+    evidenceCeiling: "none" | "guided" | "independent_immediate_candidate";
+    criticalRules: string[];
+  };
   interactions: LearningInteraction[];
   completionRule: {
     requiredInteractionIds: string[];

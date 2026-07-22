@@ -24,6 +24,7 @@ import {
 import { conceptLabel } from "@/lib/coordinates";
 import { competencyPracticeHref } from "@/lib/competencyRoutes";
 import { competencySkillLabel as skillLabel } from "@/lib/learning/skillLabels";
+import { foundationsSceneHref, foundationsSceneNavigation } from "@/lib/learning/foundationsNavigation";
 import styles from "./ActivityPanel.module.css";
 
 type OutcomeFilter = "all" | "scored" | "unverified";
@@ -137,10 +138,21 @@ function activityTitle(
   competencies: PresentedCompetency[],
   objectiveLabels: Map<string, string>,
 ) {
+  const foundationsScene = item.lesson?.moduleId === "foundations"
+    ? foundationsSceneNavigation(item.lesson.sceneId)
+    : null;
+  if (foundationsScene) return foundationsScene.title;
   const primary = competencies[0];
   if (primary) return objectiveName(primary.objectiveId, objectiveLabels);
   return item.objectiveId
     ? objectiveName(item.objectiveId, objectiveLabels)
+    : modePresentation[item.mode].label;
+}
+
+function activityModeLabel(item: LearningActivityItem) {
+  return item.lesson?.moduleId === "foundations"
+    && foundationsSceneNavigation(item.lesson.sceneId)
+    ? "Foundations lesson"
     : modePresentation[item.mode].label;
 }
 
@@ -256,6 +268,10 @@ export function ActivityPanel({ competencyObjectives }: ActivityPanelProps = {})
       const competencies = presentedCompetencies(item);
       const searchable = [
         modePresentation[item.mode].label,
+        item.lesson?.moduleId === "foundations" ? "Foundations" : "",
+        item.lesson?.moduleId === "foundations"
+          ? foundationsSceneNavigation(item.lesson.sceneId)?.title ?? ""
+          : "",
         item.objectiveId ? conceptLabel(item.objectiveId) : "",
         item.objectiveId ? objectiveLabels.get(item.objectiveId) ?? "" : "",
         skillLabel(item.subskill),
@@ -461,7 +477,7 @@ export function ActivityPanel({ competencyObjectives }: ActivityPanelProps = {})
                   <span className={styles.itemCopy}>
                     <span className={styles.itemTitle}>
                       <strong>{activityTitle(item, competencies, objectiveLabels)}</strong>
-                      <span>{presentation.label}</span>
+                      <span>{activityModeLabel(item)}</span>
                     </span>
                     <span className={styles.itemLine}>{activityContext(competencies, item.subskill)} · {occurredLabel(item.occurredAt)}</span>
                     <span className={styles.tags}>
@@ -492,10 +508,22 @@ export function ActivityPanel({ competencyObjectives }: ActivityPanelProps = {})
                     <div className={styles.reviewAction}>
                       <div>
                         <strong>{item.review.sessionStatus === "abandoned" ? "Submitted ECG available" : "Question review available"}</strong>
-                        <span>{item.review.sessionStatus === "abandoned" ? "This answer was committed before the round ended early." : "Reopen the exact ECG, your answer, and its feedback."}</span>
+                        <span>{item.review.sessionStatus === "abandoned" ? "This answer was saved before the round ended early." : "Reopen the exact ECG, your answer, and its feedback."}</span>
                       </div>
                       <Link href={`/home/review/${encodeURIComponent(item.review.sessionRef)}/attempt/${item.review.attemptIndex}`}>
                         <ScanLine size={15} aria-hidden="true" /> Review question &amp; ECG <ArrowRight size={14} aria-hidden="true" />
+                      </Link>
+                    </div>
+                  ) : null}
+
+                  {item.lesson?.moduleId === "foundations" && foundationsSceneHref(item.lesson.sceneId) ? (
+                    <div className={styles.reviewAction}>
+                      <div>
+                        <strong>Foundations scene available</strong>
+                        <span>Return to the exact scene with your saved pathway position intact.</span>
+                      </div>
+                      <Link href={foundationsSceneHref(item.lesson.sceneId)!}>
+                        <GraduationCap size={15} aria-hidden="true" /> Reopen this scene <ArrowRight size={14} aria-hidden="true" />
                       </Link>
                     </div>
                   ) : null}

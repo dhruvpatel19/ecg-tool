@@ -8,7 +8,9 @@ import {
 
 export function generateStaticParams() {
   return PRODUCTION_CURRICULUM
-    .filter((entry) => entry.kind === "native")
+    // Foundations has a static owner-bound migration wrapper at the same URL.
+    // Excluding it here prevents duplicate static generation for that route.
+    .filter((entry) => entry.kind === "native" && entry.id !== "foundations")
     .map((entry) => ({ moduleId: entry.id }));
 }
 

@@ -156,7 +156,7 @@ export function compactInteraction(
     | { kind: "region"; concept: string; allowedLeads?: string[]; minimumDurationMs?: number }
     | { kind: "point"; concept: string; gradePrompt: string; allowedLeads?: string[] }
     | { kind: "vector_lab"; initialAngleDeg: number; targetAngleDeg: number; toleranceDeg: number; targetLabel: string; predictions?: Extract<LearningInteraction, { kind: "vector_lab" }>["predictions"] }
-    | { kind: "compare"; leftCaseConcept: string; rightCaseConcept: string; dimensions: Extract<LearningInteraction, { kind: "compare" }>["dimensions"] }
+    | { kind: "compare"; leftCaseConcept: string; rightCaseConcept: string; thirdCaseConcept?: string; dimensions: Extract<LearningInteraction, { kind: "compare" }>["dimensions"] }
     | { kind: "sequence"; cards: Extract<LearningInteraction, { kind: "sequence" }>["cards"]; correctOrder: string[] }
     | { kind: "single_select"; options: Extract<LearningInteraction, { kind: "single_select" }>["options"]; correctOptionId: string }
     | { kind: "multi_select"; options: Extract<LearningInteraction, { kind: "multi_select" }>["options"]; correctOptionIds: string[]; minimumCorrect?: number; rejectExtraSelections?: boolean }

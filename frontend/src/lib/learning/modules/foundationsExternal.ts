@@ -1,19 +1,21 @@
 import type { ExternalModuleCoverageDescriptor } from "@/lib/learning/validateCurriculum";
+import { FOUNDATIONS_RUNTIME_MANIFEST } from "@/lib/learning/modules/foundationsMigration";
 
 /**
- * Foundations is a mature, same-origin hosted experience. It participates in
- * curriculum order and source-coverage validation, but it is deliberately not
- * represented as a ProductionModule because it does not execute native scenes.
+ * @deprecated Historical audit compatibility only. Foundations now runs as
+ * M01_FOUNDATIONS_MODULE in the native production registry. Do not import this
+ * descriptor into the learner runtime or use it to restore the retired public
+ * prototype.
  */
 export const FOUNDATIONS_EXTERNAL_MODULE: ExternalModuleCoverageDescriptor = {
   kind: "external_host",
-  id: "foundations",
+  id: FOUNDATIONS_RUNTIME_MANIFEST.id,
   order: 1,
-  title: "Foundations — Reading an ECG",
+  title: FOUNDATIONS_RUNTIME_MANIFEST.title,
   shortTitle: "Foundations",
-  route: "/learn/foundations",
-  duration: "About 25 minutes · 13 resumable scenes",
-  outcome: "Orient to the calibrated 12-lead page; identify waves and interval boundaries; measure rate, PR, and QRS; and complete a systematic descriptive read before assigning pathology.",
+  route: FOUNDATIONS_RUNTIME_MANIFEST.route,
+  duration: "About 1½–2 hours · four resumable chapters · 13 scenes",
+  outcome: "Check calibration and task-specific quality; identify waveform landmarks; estimate ventricular rate; describe the visible P–QRS relationship; classify coarse axis; measure PR and QRS; and communicate an evidence-linked descriptive read.",
   prerequisiteIds: [],
   sourceRequirementIds: ["SPEC-11.1", "SPEC-11.3", "SPEC-11.5"],
   sources: [
@@ -39,9 +41,9 @@ export const FOUNDATIONS_EXTERNAL_MODULE: ExternalModuleCoverageDescriptor = {
     "SPEC-11.5": ["P onset", "QRS onset", "rate/context"],
   },
   implementation: {
-    artifact: "frontend/public/foundations/index.html",
-    sceneCount: 13,
-    progressContract: "foundations_state_v1 localStorage plus same-origin foundations progress postMessage events",
+    artifact: "frontend/src/lib/learning/modules/m01Foundations.ts",
+    sceneCount: FOUNDATIONS_RUNTIME_MANIFEST.sceneIds.length,
+    progressContract: "server-owned production-curriculum scene rows, durable guided-evidence outbox, native deep links, and legacy-read/native-write migration",
   },
 };
 

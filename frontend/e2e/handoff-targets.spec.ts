@@ -99,7 +99,7 @@ test("competency CTAs fail closed and preserve the exact receipt contract", () =
   }, "https://evil.test/steal")).toContain("returnTo=%2Fhome%3Fpanel%3Dcompetencies");
 });
 
-test("every Guided to Rapid handoff launches an explicit exact receipt while preserving its source objective", () => {
+test("every Guided to Rapid handoff launches an explicit exact skill receipt while preserving its source objective", () => {
   const rapidHandoffs = NATIVE_PRODUCTION_MODULES.flatMap((module) => module.scenes.flatMap((scene) => (
     scene.handoffs
       .filter((handoff) => handoff.mode === "rapid")
@@ -118,7 +118,7 @@ test("every Guided to Rapid handoff launches an explicit exact receipt while pre
       handoff.destination.receiptConcept ?? handoff.destination.focus,
     );
     expect(url.searchParams.get("subskill")).toBe(handoff.destination.subskill);
-    expect(handoff.destination.subskill).toBe("recognize");
+    expect(["recognize", "measure", "discriminate", "synthesize"]).toContain(handoff.destination.subskill);
     expect(url.searchParams.get("returnTo")).toBe(`/learn/${module.id}?scene=${scene.id}`);
   }
 });

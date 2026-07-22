@@ -4,10 +4,10 @@
   "private": true,
   "scripts": {
     "sync:foundations": "node scripts/sync-foundations.mjs",
-    "predev": "node scripts/sync-foundations.mjs",
+    "predev": "node scripts/check-foundations-boundary.mjs",
     "dev": "next dev",
     "start": "next start",
-    "prebuild": "node scripts/sync-foundations.mjs && node scripts/check-deployment-env.mjs",
+    "prebuild": "node scripts/check-foundations-boundary.mjs && node scripts/check-deployment-env.mjs",
     "build": "next build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

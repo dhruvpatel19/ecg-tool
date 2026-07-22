@@ -15,7 +15,7 @@ export interface ModuleProgress {
   totalScenes: number;
   done: boolean;
   started: boolean;
-  bestAccuracy: number; // 0..100, from the Foundations capstone
+  bestAccuracy: number; // 0..100, retained from the legacy Foundations capstone
 }
 
 const FOUNDATIONS_KEY_PREFIX = "foundations_state_v1:";
@@ -36,7 +36,12 @@ export function readFoundationsProgress(totalScenes = 13, ownerKey = "guest"): M
   try {
     const raw = window.localStorage.getItem(`${FOUNDATIONS_KEY_PREFIX}${ownerKey}`);
     if (raw) {
-      const s = JSON.parse(raw) as { completed?: Record<string, boolean>; skipped?: Record<string, boolean>; current?: number };
+      const s = JSON.parse(raw) as {
+        completed?: Record<string, boolean>;
+        skipped?: Record<string, boolean>;
+        needsReview?: Record<string, boolean>;
+        current?: number;
+      };
       const skipped = new Set(validFoundationSceneIds(
         s?.skipped ? Object.entries(s.skipped).filter(([, value]) => value === true).map(([sceneId]) => sceneId) : [],
         totalScenes,
@@ -45,8 +50,14 @@ export function readFoundationsProgress(totalScenes = 13, ownerKey = "guest"): M
         s?.completed ? Object.entries(s.completed).filter(([, complete]) => complete === true).map(([sceneId]) => sceneId) : [],
         totalScenes,
       ).filter((sceneId) => !skipped.has(sceneId)).length;
+      const needsReview = validFoundationSceneIds(
+        s?.needsReview
+          ? Object.entries(s.needsReview).filter(([, value]) => value === true).map(([sceneId]) => sceneId)
+          : [],
+        totalScenes,
+      );
       const currentScene = Number.isInteger(s?.current) ? Math.max(0, Math.min(totalScenes - 1, Number(s.current))) : 0;
-      started = completedScenes > 0 || currentScene > 0;
+      started = completedScenes > 0 || needsReview.length > 0 || skipped.size > 0 || currentScene > 0;
     }
   } catch {
     // corrupt/unavailable storage → treat as not started

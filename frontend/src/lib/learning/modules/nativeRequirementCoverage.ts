@@ -3,9 +3,34 @@ import type { NativeRequirementCoverageDescriptor } from "@/lib/learning/validat
 /**
  * Mechanical audit trail from every binding ECG_PLATFORM_SPEC.md §11 subtopic
  * taught in a native module to the exact production scene that teaches it.
- * Foundations is mapped separately by its external-host coverage descriptor.
+ * Foundations now runs in the native production renderer and is mapped here
+ * with the same scene-level traceability as every other module.
  */
 export const NATIVE_REQUIREMENT_COVERAGE: NativeRequirementCoverageDescriptor[] = [
+  {
+    requirementId: "SPEC-11.1",
+    moduleId: "foundations",
+    scenes: [
+      { sceneId: "S2", coveredSubtopics: ["paper speed", "calibration", "amplitude", "time"] },
+      { sceneId: "S8", coveredSubtopics: ["12-lead layout"] },
+    ],
+  },
+  {
+    requirementId: "SPEC-11.3",
+    moduleId: "foundations",
+    scenes: [
+      { sceneId: "S2", coveredSubtopics: ["calibration"] },
+      { sceneId: "S4", coveredSubtopics: ["regular method", "irregular method"] },
+    ],
+  },
+  {
+    requirementId: "SPEC-11.5",
+    moduleId: "foundations",
+    scenes: [
+      { sceneId: "S5", coveredSubtopics: ["rate/context"] },
+      { sceneId: "S6", coveredSubtopics: ["P onset", "QRS onset"] },
+    ],
+  },
   {
     requirementId: "SPEC-11.2",
     moduleId: "leads-vectors",

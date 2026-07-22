@@ -266,6 +266,42 @@ progress.rapid-clockbar::-moz-progress-bar {
   display: none;
 }
 
+/* Guided lessons can dock the tutor in the response rail. The tracing remains
+   visible and interactive, so asking for help does not break spatial context. */
+.learning-tutor-layer[data-tutor-placement="rail"] {
+  position: static;
+  inset: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.learning-tutor-layer[data-tutor-placement="rail"] .learning-tutor-drawer {
+  position: static;
+  width: 100%;
+  height: auto;
+  max-height: calc(100dvh - 84px);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow: 0 14px 38px rgba(8, 35, 26, 0.1);
+}
+
+.learning-tutor-layer[data-tutor-placement="rail"] .learning-tutor-drawer-header {
+  min-height: 52px;
+  padding: 8px 9px 8px 12px;
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent-soft));
+}
+
+.learning-tutor-layer[data-tutor-placement="rail"] .learning-tutor-drawer-body {
+  max-height: calc(100dvh - 138px);
+  padding: 9px;
+}
+
+.learning-tutor-layer[data-tutor-placement="rail"] .tutor-chat {
+  min-height: min(620px, calc(100dvh - 265px));
+}
+
 /* Rapid adopts the shell without changing its established control selectors. */
 .rapid-pace-grid {
   display: grid;

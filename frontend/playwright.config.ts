@@ -48,7 +48,10 @@ export default defineConfig({
   // Boot the dev server with the proxy wired to the backend. Reuse a server that is
   // already running locally so you can keep `npm run dev` open while iterating.
   webServer: {
-    command: `next dev --port ${PORT}`,
+    // Invoke through npm so the project-local Next binary resolves on Windows
+    // as well as Linux CI. Calling `next` directly only worked when an older
+    // server already happened to be listening on the test port.
+    command: `npx next dev --port ${PORT}`,
     url: BASE_URL,
     timeout: 120_000,
     reuseExistingServer: !process.env.CI,

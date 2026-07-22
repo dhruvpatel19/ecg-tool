@@ -21,8 +21,8 @@ _LESSON_BY_ID = {lesson["id"]: lesson for lesson in TUTORIALS}
 MODULES: list[dict[str, Any]] = [
     {
         "id": "foundations",
-        "title": "Foundations of the ECG Read",
-        "overview": "Calibration, the 12-lead layout and territories, rate, and basic rhythm — the scaffolding every interpretation hangs on.",
+        "title": "Foundations of ECG Interpretation",
+        "overview": "Learn what the ECG trace represents, check calibration and task-specific quality, measure basic timing features, navigate the 12-lead page, and complete an evidence-linked descriptive sweep.",
         # The standalone 13-scene module previews leads/rate/rhythm itself; the
         # backend lesson selector remains orientation-only so later pathology
         # modules own each native case lesson exactly once.

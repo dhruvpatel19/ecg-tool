@@ -25,6 +25,7 @@ import { TutorChat } from "@/components/TutorChat";
 import { ActivityPanel } from "@/components/my-learning/ActivityPanel";
 import { CalendarPanel } from "@/components/my-learning/CalendarPanel";
 import { CompetencyPanel } from "@/components/my-learning/CompetencyPanel";
+import { FoundationsStatusCard } from "@/components/my-learning/FoundationsStatusCard";
 import { SessionHistory } from "@/components/my-learning/SessionHistory";
 import { StudyPlanPanel } from "@/components/my-learning/StudyPlanPanel";
 import {
@@ -630,6 +631,8 @@ function LearningHome() {
               <div><span>Ready to review</span><strong>{competenciesLoading ? "…" : competenciesFailed ? "—" : dueSkills.length}</strong><small>{competenciesFailed ? "timing unavailable" : overdueCount ? `${overdueCount} need${overdueCount === 1 ? "s" : ""} attention` : "nothing overdue"}</small></div>
             </article>
           </section>
+
+          <FoundationsStatusCard learnerId={user?.userId} />
 
           <div className={styles.dashboardGrid}>
             <section className={`${styles.card} ${styles.recentCard}`} aria-labelledby="recent-practice-heading">

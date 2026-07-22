@@ -47,6 +47,8 @@ export type ProductionCurriculumValidationOptions = {
   requireContiguousOrder?: boolean;
 };
 
+const OPAQUE_CASE_POOL_SLOT = /^[a-z][a-z0-9_-]*(?::[A-Za-z][A-Za-z0-9_-]*)+$/;
+
 function validateInteraction(interaction: LearningInteraction, path: string): CurriculumValidationIssue[] {
   const issues: CurriculumValidationIssue[] = [];
   if (!interaction.prompt.trim()) issues.push({ path, message: "Interaction prompt is required." });
@@ -94,8 +96,28 @@ function validateInteraction(interaction: LearningInteraction, path: string): Cu
   if (interaction.kind === "march" && interaction.minimumMarkers < 3) {
     issues.push({ path, message: "Marching requires at least three markers." });
   }
+  if (interaction.kind === "compare") {
+    const ids = interaction.dimensions.map((dimension) => dimension.id);
+    if (!ids.length || new Set(ids).size !== ids.length) {
+      issues.push({ path, message: "Comparison dimensions must be present and uniquely identified." });
+    }
+    if (interaction.dimensions.some((dimension) => !dimension.label.trim() || !dimension.leftAnswer.trim() || !dimension.rightAnswer.trim())) {
+      issues.push({ path, message: "Every comparison row needs a label and authored answers for both primary columns." });
+    }
+    if (interaction.thirdCaseConcept && interaction.dimensions.some((dimension) => !dimension.thirdAnswer?.trim())) {
+      issues.push({ path, message: "A three-column comparison needs an authored third answer in every row." });
+    }
+    if (!interaction.thirdCaseConcept && interaction.dimensions.some((dimension) => dimension.thirdAnswer)) {
+      issues.push({ path, message: "A third comparison answer requires a third case concept." });
+    }
+  }
   if (interaction.kind === "free_response" && !interaction.rubric.some((criterion) => criterion.required)) {
     issues.push({ path, message: "A free response needs at least one required rubric criterion." });
+  }
+  if (interaction.kind === "free_response" && interaction.forbiddenClaims?.some((claim) => (
+    !claim.id.trim() || !claim.label.trim() || !claim.misconception.trim() || !claim.terms.length || claim.terms.some((term) => !term.trim())
+  ))) {
+    issues.push({ path, message: "Every forbidden free-response claim needs an id, label, misconception, and non-empty terms." });
   }
   if (interaction.kind === "clinical_stage" && !interaction.stages.length) {
     issues.push({ path, message: "A clinical-stage interaction needs at least one stage." });
@@ -111,6 +133,12 @@ function validateInteraction(interaction: LearningInteraction, path: string): Cu
   }
   if (interaction.kind === "model_explore") {
     const ids = new Set(interaction.frames.map((frame) => frame.id));
+    if (ids.size !== interaction.frames.length) {
+      issues.push({ path, message: "Model frame ids must be unique." });
+    }
+    if (interaction.frames.some((frame) => !frame.label.trim() || !frame.narration.trim())) {
+      issues.push({ path, message: "Every model frame needs a visible label and mechanism narration." });
+    }
     if (!interaction.requiredFrameIds.length || interaction.requiredFrameIds.some((id) => !ids.has(id))) {
       issues.push({ path, message: "Every required model frame must exist." });
     }
@@ -130,6 +158,27 @@ function validateInteraction(interaction: LearningInteraction, path: string): Cu
     const categories = new Set(interaction.categories.map((item) => item.id));
     if (Object.entries(interaction.correctCategoryByItem).some(([item, category]) => !items.has(item) || !categories.has(category))) {
       issues.push({ path, message: "Every category mapping must reference defined items and categories." });
+    }
+  }
+  if (interaction.kind === "waveform_lab") {
+    const ids = new Set(interaction.targets.map((target) => target.id));
+    if (!interaction.requiredTargetIds.length || interaction.requiredTargetIds.some((id) => !ids.has(id))) {
+      issues.push({ path, message: "Every required authored-waveform target must exist." });
+    }
+    if (interaction.durationMs <= 0 || interaction.toleranceMs <= 0) {
+      issues.push({ path, message: "Authored-waveform duration and tolerance must be positive." });
+    }
+    if (interaction.task === "march" && (interaction.minimumMarkers ?? 0) < 3) {
+      issues.push({ path, message: "Authored-waveform marching requires at least three markers." });
+    }
+    if ((interaction.task === "interval" || interaction.task === "region") && interaction.requiredTargetIds.some((id) => {
+      const target = interaction.targets.find((item) => item.id === id);
+      return target?.startMs === undefined || target.endMs === undefined;
+    })) {
+      issues.push({ path, message: "Every required authored interval/region needs start and end boundaries." });
+    }
+    if (interaction.task === "point_targets" && interaction.requiredTargetIds.some((id) => interaction.targets.find((item) => item.id === id)?.timeMs === undefined)) {
+      issues.push({ path, message: "Every required authored point target needs a time." });
     }
   }
   return issues;
@@ -170,6 +219,16 @@ export function validateProductionCurriculum(
       if (!scene.layout.focusOrder.length) issues.push({ path: `${scenePath}.layout`, message: "A keyboard/screen-reader focus order is required." });
       if (!scene.tutor.socraticPrompts.length) issues.push({ path: `${scenePath}.tutor`, message: "At least one Socratic prompt is required." });
       if (!scene.tutor.hintLadder.length) issues.push({ path: `${scenePath}.tutor`, message: "A tutor hint ladder is required." });
+      if (scene.learningContract) {
+        if (!scene.learningContract.objectiveId.trim()) issues.push({ path: `${scenePath}.learningContract`, message: "A learning objective id is required." });
+        if (!scene.learningContract.bloom.length) issues.push({ path: `${scenePath}.learningContract`, message: "At least one Bloom level is required." });
+        const scenePosition = module.scenes.findIndex((item) => item.id === scene.id);
+        for (const prerequisiteSceneId of scene.learningContract.prerequisiteSceneIds) {
+          const prerequisitePosition = module.scenes.findIndex((item) => item.id === prerequisiteSceneId);
+          if (prerequisitePosition < 0) issues.push({ path: `${scenePath}.learningContract`, message: `Unknown prerequisite scene: ${prerequisiteSceneId}.` });
+          else if (prerequisitePosition >= scenePosition) issues.push({ path: `${scenePath}.learningContract`, message: `Prerequisite ${prerequisiteSceneId} must precede ${scene.id}.` });
+        }
+      }
       // A scene may deliberately have no cross-mode launch when the receiving
       // mode cannot assess the same construct with an exact executable
       // destination. Requiring a link here previously forced clinically false
@@ -192,6 +251,18 @@ export function validateProductionCurriculum(
       }
       if (scene.caseContract?.allowedUses.includes("scored_recognition") && scene.caseContract.fallback === "contrast_only") {
         issues.push({ path: `${scenePath}.caseContract`, message: "A scored-recognition case cannot fall back to contrast-only use." });
+      }
+      if (scene.caseContract?.casePoolSlot && !OPAQUE_CASE_POOL_SLOT.test(scene.caseContract.casePoolSlot)) {
+        issues.push({ path: `${scenePath}.caseContract.casePoolSlot`, message: "Case pool slots must be opaque namespaced keys, not corpus identifiers." });
+      }
+      if (scene.caseContract?.retryCasePoolSlot && !OPAQUE_CASE_POOL_SLOT.test(scene.caseContract.retryCasePoolSlot)) {
+        issues.push({ path: `${scenePath}.caseContract.retryCasePoolSlot`, message: "Retry case pool slots must be opaque namespaced keys, not corpus identifiers." });
+      }
+      if (scene.caseContract?.retryCasePoolSlot && !scene.caseContract.casePoolSlot) {
+        issues.push({ path: `${scenePath}.caseContract`, message: "A retry pool slot requires a primary case pool slot." });
+      }
+      if (module.id === "foundations" && scene.caseContract && !scene.caseContract.casePoolSlot) {
+        issues.push({ path: `${scenePath}.caseContract`, message: "Foundations case contracts require a server-governed opaque pool slot." });
       }
     }
   }

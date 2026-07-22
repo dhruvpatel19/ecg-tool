@@ -15,7 +15,7 @@ import {
 type WorkspaceContextValue = {
   drawerId: string;
   drawerOpen: boolean;
-  openDrawer: () => void;
+  openDrawer: (trigger?: HTMLButtonElement | null) => void;
   closeDrawer: () => void;
   triggerRef: React.RefObject<HTMLButtonElement | null>;
 };
@@ -45,7 +45,8 @@ export function LearningWorkspaceShell({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
 
-  function openDrawer() {
+  function openDrawer(trigger?: HTMLButtonElement | null) {
+    if (trigger) triggerRef.current = trigger;
     setDrawerOpen(true);
   }
 
@@ -84,7 +85,7 @@ export function SessionBar({
   tutorAvailable = false,
   tutorLabel = "Open tutor",
 }: SessionBarProps) {
-  const { drawerId, drawerOpen, openDrawer, triggerRef } = useWorkspaceContext();
+  const { drawerId, drawerOpen, openDrawer } = useWorkspaceContext();
   return (
     <header className={`learning-session-bar${className ? ` ${className}` : ""}`}>
       {children}
@@ -92,16 +93,37 @@ export function SessionBar({
         <button
           className="button subtle small learning-tutor-trigger"
           type="button"
-          ref={triggerRef}
           aria-controls={drawerId}
           aria-expanded={drawerOpen}
           aria-haspopup="dialog"
-          onClick={openDrawer}
+          onClick={(event) => openDrawer(event.currentTarget)}
         >
           <MessageSquare size={15} aria-hidden="true" /> {tutorLabel}
         </button>
       ) : null}
     </header>
+  );
+}
+
+export function TutorTrigger({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  const { drawerId, drawerOpen, openDrawer } = useWorkspaceContext();
+  return (
+    <button
+      className={className}
+      type="button"
+      aria-controls={drawerId}
+      aria-expanded={drawerOpen}
+      aria-haspopup="dialog"
+      onClick={(event) => openDrawer(event.currentTarget)}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -191,9 +213,13 @@ function trapDialogFocus(event: KeyboardEvent<HTMLElement>) {
 export function TutorDrawer({
   children,
   title = "ECG tutor",
+  placement = "overlay",
+  className = "",
 }: {
   children?: ReactNode;
   title?: string;
+  placement?: "overlay" | "rail";
+  className?: string;
 }) {
   const { drawerId, drawerOpen, closeDrawer } = useWorkspaceContext();
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -203,6 +229,18 @@ export function TutorDrawer({
   useEffect(() => {
     if (!drawerOpen) return;
     const frame = window.requestAnimationFrame(() => closeRef.current?.focus());
+    if (placement === "rail") {
+      function closeDockedTutor(event: globalThis.KeyboardEvent) {
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.preventDefault();
+        closeDrawer();
+      }
+      document.addEventListener("keydown", closeDockedTutor);
+      return () => {
+        window.cancelAnimationFrame(frame);
+        document.removeEventListener("keydown", closeDockedTutor);
+      };
+    }
     function keepModalKeyboardReachable(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") {
         if (event.defaultPrevented) return;
@@ -222,19 +260,19 @@ export function TutorDrawer({
       window.cancelAnimationFrame(frame);
       document.removeEventListener("keydown", keepModalKeyboardReachable);
     };
-  }, [closeDrawer, drawerOpen]);
+  }, [closeDrawer, drawerOpen, placement]);
 
   if (!children) return null;
 
   return (
-    <div className="learning-tutor-layer" hidden={!drawerOpen} data-drawer-state={drawerOpen ? "open" : "closed"}>
-      <button className="learning-tutor-backdrop" type="button" tabIndex={-1} aria-label="Close tutor" onClick={closeDrawer} />
+    <div className={`learning-tutor-layer${className ? ` ${className}` : ""}`} hidden={!drawerOpen} data-drawer-state={drawerOpen ? "open" : "closed"} data-tutor-placement={placement}>
+      {placement === "overlay" ? <button className="learning-tutor-backdrop" type="button" tabIndex={-1} aria-label="Close tutor" onClick={closeDrawer} /> : null}
       <aside
         ref={dialogRef}
         className="learning-tutor-drawer"
         id={drawerId}
         role="dialog"
-        aria-modal="true"
+        aria-modal={placement === "overlay" ? "true" : undefined}
         aria-labelledby={titleId}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -242,13 +280,13 @@ export function TutorDrawer({
             closeDrawer();
             return;
           }
-          trapDialogFocus(event);
+          if (placement === "overlay") trapDialogFocus(event);
         }}
       >
         <header className="learning-tutor-drawer-header">
           <h2 id={titleId}>{title}</h2>
           <button className="button subtle small" type="button" ref={closeRef} onClick={closeDrawer}>
-            <X size={16} aria-hidden="true" /> Close tutor
+            <X size={16} aria-hidden="true" /> {placement === "rail" ? "Return" : "Close tutor"}
           </button>
         </header>
         <div className="learning-tutor-drawer-body">{children}</div>

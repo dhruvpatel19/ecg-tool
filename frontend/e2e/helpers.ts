@@ -32,6 +32,22 @@ export function collectConsoleErrors(page: Page): string[] {
   return errors;
 }
 
+/** Complete an authored module model when a test needs to exercise the scored ECG task. */
+export async function completeAuthoredModel(page: Page): Promise<void> {
+  const lessonIdeas = page.getByRole("navigation", { name: "Lesson ideas" });
+  const activeTask = page.locator("#production-active-interaction");
+  await lessonIdeas.or(activeTask).first().waitFor({ state: "visible", timeout: 30_000 });
+  if (await lessonIdeas.count() === 0) return;
+  const ideas = lessonIdeas.getByRole("button");
+  const count = await ideas.count();
+  for (let index = 0; index < count; index += 1) {
+    await ideas.nth(index).click();
+  }
+  const start = page.getByRole("button", { name: "Start the ECG task" });
+  await start.waitFor({ state: "visible" });
+  await start.click();
+}
+
 /** A username unlikely to collide across runs, for the auth registration test. */
 export function randomUsername(prefix = "e2e"): string {
   const suffix = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

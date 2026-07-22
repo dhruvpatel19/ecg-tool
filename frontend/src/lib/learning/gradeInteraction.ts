@@ -1,6 +1,8 @@
+import { UNSUCCESSFUL_ATTEMPTS_BEFORE_SOLUTION } from "@/lib/learning/interactionTypes";
 import type {
   CaliperInteraction,
   FeedbackBranch,
+  ForbiddenFreeResponseClaim,
   InteractionEvidence,
   LearningInteraction,
   MarchInteraction,
@@ -16,7 +18,61 @@ type GradeContext = {
   };
 };
 
-const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const normalize = (value: string) => value
+  .toLowerCase()
+  .replace(/[’']/g, "'")
+  .replace(/\bcan['’]?t\b/g, "cannot")
+  .replace(/\bwon['’]?t\b/g, "will not")
+  .replace(/\bdoesn['’]?t\b/g, "does not")
+  .replace(/\bdon['’]?t\b/g, "do not")
+  .replace(/[^a-z0-9]+/g, " ")
+  .trim();
+
+function explicitlyBoundsForbiddenOccurrence(
+  normalized: string,
+  cursor: number,
+  needle: string,
+  claimId: string,
+) {
+  const preceding = normalized.slice(Math.max(0, cursor - 120), cursor).trim();
+  const following = normalized.slice(cursor + needle.length, cursor + needle.length + 90).trim();
+  if (claimId === "diagnosis") {
+    return /\b(?:cannot|unable to|not able to)\s+(?:diagnose|establish|confirm|infer|conclude|assign|call|support)\s*$/.test(preceding)
+      || /\b(?:insufficient|inadequate|not enough)\s+(?:evidence|information|context)(?:\s+[a-z0-9]+){0,3}\s+to\s+(?:diagnose|establish|confirm|support)\s*$/.test(preceding)
+      || /\bnot\s+diagnostic\s+of\s*$/.test(preceding)
+      || (needle === "diagnosis" && /\bno\s*$/.test(preceding))
+      || /^(?:cannot|can not)\s+be\s+(?:diagnosed|established|confirmed|determined|supported)\b/.test(following);
+  }
+  if (claimId === "treatment") {
+    return /\b(?:cannot|unable to|not able to)\s+(?:recommend|determine|select|prescribe)\s*$/.test(preceding)
+      || /\b(?:cannot|unable to|not able to)\s+(?:diagnose|establish|confirm)(?:\s+[a-z0-9]+){1,4}\s+or\s+(?:recommend|determine)\s*$/.test(preceding)
+      || (/\bno\s*$/.test(preceding) && /^(?:recommendation|recommendations)\b/.test(following))
+      || /^(?:cannot|can not)\s+be\s+(?:recommended|determined|selected|prescribed)\b/.test(following);
+  }
+  if (claimId === "urgency") {
+    return /\b(?:cannot|unable to|not able to)\s+(?:determine|assign|infer|establish)\s*$/.test(preceding)
+      || /^(?:cannot|can not)\s+be\s+(?:determined|assigned|inferred|established)\b/.test(following)
+      || (/\bno\s*$/.test(preceding) && /^(?:claim|conclusion|determination)\b/.test(following));
+  }
+  return false;
+}
+
+function assertsForbiddenClaim(text: string, claim: ForbiddenFreeResponseClaim) {
+  const normalized = normalize(text);
+  return claim.terms.some((term) => {
+    const needle = normalize(term);
+    if (!needle) return false;
+    let cursor = normalized.indexOf(needle);
+    while (cursor >= 0) {
+      // Only explicit epistemic boundaries exempt a term. Generic negation is
+      // unsafe here: "no doubt this is STEMI" and "not only ischemia" are
+      // positive assertions, while "can't diagnose ischemia" is a valid limit.
+      if (!explicitlyBoundsForbiddenOccurrence(normalized, cursor, needle, claim.id)) return true;
+      cursor = normalized.indexOf(needle, cursor + needle.length);
+    }
+    return false;
+  });
+}
 
 const SEMANTIC_EQUIVALENTS: Record<string, string[]> = {
   same: ["single", "one", "shared"],
@@ -173,7 +229,7 @@ export function gradeInteraction(
   } else if (interaction.kind === "point" || interaction.kind === "region") {
     const result = response as { correct?: boolean; noTarget?: boolean; point?: ECGPoint; points?: ECGPoint[] } | null;
     notAssessable = Boolean(result?.noTarget);
-    correct = notAssessable || Boolean(result?.correct);
+    correct = !notAssessable && Boolean(result?.correct);
     score = correct ? 1 : 0;
     selectedPoints = result?.points ?? (result?.point ? [result.point] : undefined);
   } else if (interaction.kind === "caliper") {
@@ -183,8 +239,8 @@ export function gradeInteraction(
     const expected = numericMeasurement(interaction, context);
     notAssessable = Boolean(structured?.noTarget);
     if (notAssessable) {
-      correct = true;
-      score = 1;
+      correct = false;
+      score = 0;
     } else if (expected === null && structured?.correct !== undefined) {
       // Guided keeps packet measurements server-side. The region endpoint has
       // already committed and graded these exact boundaries, so its bounded
@@ -206,16 +262,23 @@ export function gradeInteraction(
     selectedPoints = Array.isArray(response) ? response as ECGPoint[] : [];
     ({ score, correct, partial } = gradeMarch(interaction, selectedPoints));
   } else if (interaction.kind === "compare") {
-    const answers = response && typeof response === "object" ? response as Record<string, { left?: string; right?: string }> : {};
+    const answers = response && typeof response === "object" ? response as Record<string, { left?: string; right?: string; third?: string }> : {};
     const fieldScores = interaction.dimensions.flatMap((dimension) => {
       const answer = answers[dimension.id];
-      return [semanticFieldScore(answer?.left ?? "", dimension.leftAnswer), semanticFieldScore(answer?.right ?? "", dimension.rightAnswer)];
+      return [
+        semanticFieldScore(answer?.left ?? "", dimension.leftAnswer),
+        semanticFieldScore(answer?.right ?? "", dimension.rightAnswer),
+        ...(interaction.thirdCaseConcept && dimension.thirdAnswer
+          ? [semanticFieldScore(answer?.third ?? "", dimension.thirdAnswer)]
+          : []),
+      ];
     });
     score = fieldScores.length ? fieldScores.reduce((sum, value) => sum + value, 0) / fieldScores.length : 0;
     correct = fieldScores.length > 0 && fieldScores.every((value) => value >= 0.6) && score >= 0.72;
     partial = !correct && score > 0;
   } else if (interaction.kind === "free_response") {
-    const text = normalize(String(response ?? ""));
+    const rawText = String(response ?? "");
+    const text = normalize(rawText);
     const criteria = interaction.rubric.map((criterion) => ({
       ...criterion,
       met: criterion.acceptedConcepts.some((concept) => text.includes(normalize(concept)) || semanticFieldScore(text, concept) >= 0.7),
@@ -224,9 +287,14 @@ export function gradeInteraction(
     const requiredMet = required.filter((criterion) => criterion.met).length;
     const optionalMet = criteria.filter((criterion) => !criterion.required && criterion.met).length;
     score = required.length ? (requiredMet + optionalMet * 0.35) / (required.length + criteria.filter((c) => !c.required).length * 0.35) : 0;
-    correct = requiredMet === required.length && String(response ?? "").trim().length >= interaction.minimumCharacters;
+    const forbidden = (interaction.forbiddenClaims ?? []).filter((claim) => assertsForbiddenClaim(rawText, claim));
+    correct = requiredMet === required.length && rawText.trim().length >= interaction.minimumCharacters && forbidden.length === 0;
     partial = !correct && requiredMet > 0;
     misconceptions = criteria.filter((criterion) => criterion.required && !criterion.met && criterion.misconceptionIfMissing).map((criterion) => criterion.misconceptionIfMissing as string);
+    if (forbidden.length) {
+      score = Math.min(score, 0.5);
+      misconceptions.push(...forbidden.map((claim) => claim.misconception));
+    }
   } else if (interaction.kind === "clinical_stage") {
     const answers = response && typeof response === "object" ? response as Record<string, string> : {};
     const unsafe = interaction.stages.some((stage) => stage.unsafeOptionIds?.includes(answers[stage.id]));
@@ -261,7 +329,7 @@ export function gradeInteraction(
     const expected = numericMeasurement(interaction, context);
     if (context.serverMeasurementGrade) {
       notAssessable = context.serverMeasurementGrade.noTarget;
-      correct = notAssessable || context.serverMeasurementGrade.correct;
+      correct = !notAssessable && context.serverMeasurementGrade.correct;
       score = correct ? 1 : 0;
     } else if (Number.isFinite(value) && expected !== null) {
       const difference = Math.abs(value - expected);
@@ -283,9 +351,104 @@ export function gradeInteraction(
     score = entries.length ? hits / entries.length : 0;
     correct = hits === entries.length;
     partial = !correct && hits > 0;
+  } else if (interaction.kind === "waveform_lab") {
+    const requiredTargets = interaction.requiredTargetIds
+      .map((id) => interaction.targets.find((target) => target.id === id))
+      .filter((target): target is NonNullable<typeof target> => Boolean(target));
+    if (interaction.task === "point_targets") {
+      const points = response && typeof response === "object"
+        ? response as Record<string, number>
+        : {};
+      const hits = requiredTargets.filter((target) => (
+        target.timeMs !== undefined
+        && Number.isFinite(Number(points[target.id]))
+        && Math.abs(Number(points[target.id]) - target.timeMs) <= interaction.toleranceMs
+      )).length;
+      score = requiredTargets.length ? hits / requiredTargets.length : 0;
+      correct = requiredTargets.length > 0 && hits === requiredTargets.length;
+      partial = !correct && hits > 0;
+    } else if (interaction.task === "interval" || interaction.task === "region") {
+      const selection = response && typeof response === "object"
+        ? response as { startMs?: number; endMs?: number }
+        : {};
+      const target = requiredTargets[0];
+      const start = Number(selection.startMs);
+      const end = Number(selection.endMs);
+      if (target?.startMs !== undefined && target.endMs !== undefined && Number.isFinite(start) && Number.isFinite(end)) {
+        const orderedStart = Math.min(start, end);
+        const orderedEnd = Math.max(start, end);
+        const startDifference = Math.abs(orderedStart - target.startMs);
+        const endDifference = Math.abs(orderedEnd - target.endMs);
+        const boundaryHits = Number(startDifference <= interaction.toleranceMs) + Number(endDifference <= interaction.toleranceMs);
+        score = boundaryHits / 2;
+        correct = boundaryHits === 2;
+        partial = !correct && boundaryHits > 0;
+        measuredValueMs = Math.round(orderedEnd - orderedStart);
+      }
+    } else {
+      const markers = Array.isArray(response)
+        ? response.map(Number).filter((value) => Number.isFinite(value)).sort((a, b) => a - b)
+        : [];
+      const expected = requiredTargets
+        .map((target) => target.timeMs)
+        .filter((value): value is number => value !== undefined)
+        .sort((a, b) => a - b);
+      const used = new Set<number>();
+      const matchedIndices: number[] = [];
+      let hits = 0;
+      for (const marker of markers) {
+        let nearestIndex = -1;
+        let nearestDifference = Number.POSITIVE_INFINITY;
+        expected.forEach((target, index) => {
+          const difference = Math.abs(marker - target);
+          if (!used.has(index) && difference < nearestDifference) {
+            nearestIndex = index;
+            nearestDifference = difference;
+          }
+        });
+        if (nearestIndex >= 0 && nearestDifference <= interaction.toleranceMs) {
+          used.add(nearestIndex);
+          matchedIndices.push(nearestIndex);
+          hits += 1;
+        }
+      }
+      const minimum = interaction.minimumMarkers ?? expected.length;
+      const extraMarkers = Math.max(0, markers.length - hits);
+      const orderedMatches = [...matchedIndices].sort((a, b) => a - b);
+      const consecutive = orderedMatches.every((index, position) => (
+        position === 0 || index === orderedMatches[position - 1] + 1
+      ));
+      // Pattern truth comes from the authored target sequence after the learner
+      // clicks have been matched inside tolerance. Using raw click edges here
+      // would reject valid consecutive marks simply because one click was early
+      // and the next was late within the accepted window.
+      const matchedTargetTimes = orderedMatches.map((index) => expected[index]);
+      const intervals = matchedTargetTimes.slice(1).map((marker, index) => marker - matchedTargetTimes[index]);
+      const intervalSpread = intervals.length
+        ? Math.max(...intervals) - Math.min(...intervals)
+        : Number.POSITIVE_INFINITY;
+      const patternMatches = interaction.expectedPattern === "regular"
+        ? intervalSpread <= interaction.toleranceMs * 2
+        : interaction.expectedPattern === "variable"
+          ? intervalSpread > interaction.toleranceMs
+          : true;
+      score = Math.max(0, Math.min(1, hits / Math.max(1, minimum) - extraMarkers * 0.1));
+      // A partial regular-strip task must use consecutive beats. Otherwise an
+      // alternating subset can look perfectly regular while representing the
+      // wrong R–R interval and therefore the wrong rate.
+      const sequenceMatches = interaction.expectedPattern !== "regular"
+        || expected.length <= minimum
+        || consecutive;
+      correct = hits >= minimum && extraMarkers === 0 && patternMatches && sequenceMatches;
+      if (!patternMatches || !sequenceMatches) score = Math.min(score, 0.7);
+      partial = !correct && hits > 0;
+    }
   }
 
   const feedbackBranch: FeedbackBranch["when"] = notAssessable ? "not_assessable" : correct ? "correct" : partial ? "partially_correct" : "incorrect";
+  const solutionRevealed = !notAssessable
+    && !correct
+    && attempts >= UNSUCCESSFUL_ATTEMPTS_BEFORE_SOLUTION;
   // Resolve the branch here so malformed scene content is caught during use as
   // well as by the static curriculum validator.
   branchFor(interaction.feedback, feedbackBranch);
@@ -296,13 +459,14 @@ export function gradeInteraction(
     partial,
     score: Number(Math.max(0, Math.min(1, score)).toFixed(3)),
     attempts,
-    assistance: notAssessable || attempts > interaction.maxAttemptsBeforeScaffold ? "scaffolded" : "independent",
-    hintsUsed: attempts > interaction.maxAttemptsBeforeScaffold ? 1 : 0,
+    assistance: notAssessable || solutionRevealed || attempts > interaction.maxAttemptsBeforeScaffold ? "scaffolded" : "independent",
+    hintsUsed: solutionRevealed || attempts > interaction.maxAttemptsBeforeScaffold ? 1 : 0,
     response,
     selectedPoints,
     measuredValueMs,
     misconceptions,
     feedbackBranch,
+    solutionRevealed,
   };
 }
 

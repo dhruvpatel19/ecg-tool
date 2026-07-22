@@ -384,10 +384,10 @@ const s5Interactions: LearningInteraction[] = [
     leftCaseConcept: "poor_r_wave_progression_current",
     rightCaseConcept: "prior_or_reacquired_progression",
     dimensions: [
-      { id: "gain", label: "Gain", leftAnswer: "Current gain", rightAnswer: "Must match" },
-      { id: "placement", label: "Chest-lead placement", leftAnswer: "Verify", rightAnswer: "Corrected or comparable" },
-      { id: "qrs", label: "Whole-QRS morphology", leftAnswer: "Describe", rightAnswer: "Compare matched leads" },
-      { id: "change", label: "Temporal claim", leftAnswer: "Current finding", rightAnswer: "Only if comparison valid" },
+      { id: "gain", label: "Gain", leftAnswer: "Record the current calibration before judging voltage", rightAnswer: "Confirm identical gain or normalize before comparison" },
+      { id: "placement", label: "Chest-lead placement", leftAnswer: "Verify landmarks and progression coherence", rightAnswer: "Use a corrected or demonstrably comparable acquisition" },
+      { id: "qrs", label: "Whole-QRS morphology", leftAnswer: "Describe the complete current V1-V6 sequence", rightAnswer: "Compare the same leads and whole complexes, not R height alone" },
+      { id: "change", label: "Temporal claim", leftAnswer: "The current progression remains independently describable", rightAnswer: "Call change only after the pair passes every validity check" },
     ],
   }),
   compactInteraction({
