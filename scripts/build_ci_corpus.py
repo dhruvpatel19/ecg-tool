@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build the deterministic, real-PTB corpus used by clean CI runners.
 
-The asset contains exactly the distinct PTB-XL ECGs bound to the authored
-Clinical bank, including every authenticated prior used by a longitudinal
-episode. It is a source-test dependency, not the production corpus or a
-substitute for the exhaustive 22,497-case release audit.
+The asset contains every distinct PTB-XL ECG bound to the authored Clinical
+bank, its authenticated longitudinal priors, and the governed Foundations
+contrast pools. It is a source-test dependency, not the production corpus or a
+substitute for the exhaustive release audit.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from app.clinical.real_items import (  # noqa: E402
     REAL_ECGS_BY_SCENARIO,
     vetted_real_items,
 )
+from app.foundations_case_pools import preferred_foundations_case_ids  # noqa: E402
 from app.store import CaseStore, LocalWaveformStore  # noqa: E402
 
 
@@ -43,6 +44,14 @@ PRIVATE_METADATA_KEYS = {
     "device",
     "validated_by",
 }
+
+FOUNDATIONS_CI_POOL_SLOTS = (
+    "foundations:S5:component",
+    "foundations:S10:modeled",
+    "foundations:S11:guided",
+    "foundations:S12:integration",
+    "foundations:equivalent-retry",
+)
 
 
 def sanitized_packet(
@@ -142,8 +151,22 @@ def main() -> None:
     comparison_case_ids = set(AUTHENTIC_LONGITUDINAL_PRIOR_BY_CURRENT.values())
     if clinical_case_ids & comparison_case_ids:
         raise RuntimeError("longitudinal prior ECGs must be distinct from served Clinical ECGs")
+    foundations_case_ids = {
+        case_id
+        for slot in FOUNDATIONS_CI_POOL_SLOTS
+        for case_id in (
+            preferred_foundations_case_ids(
+                slot,
+                learner_id="ci-foundations-pool-audit",
+                secret="ci-foundations-pool-audit",
+            )
+            or ()
+        )
+    }
+    if len(foundations_case_ids) != 24:
+        raise RuntimeError("CI subset must cover all 24 governed Foundations ECGs")
     case_ids = sorted(
-        clinical_case_ids | comparison_case_ids,
+        clinical_case_ids | comparison_case_ids | foundations_case_ids,
         key=int,
     )
     longitudinal_metadata = ci_longitudinal_metadata()
@@ -206,6 +229,7 @@ def main() -> None:
                 "purpose": "clean-runner source tests only",
                 "clinicalCaseCount": len(clinical),
                 "comparisonEcgCount": len(comparison_case_ids),
+                "foundationsCaseCount": len(foundations_case_ids),
                 "distinctRealEcgCount": len(case_ids),
                 "longitudinalLinkage": "fixture-scoped opaque pair handles and synthetic order only",
                 "patientIdentifiersRemoved": True,

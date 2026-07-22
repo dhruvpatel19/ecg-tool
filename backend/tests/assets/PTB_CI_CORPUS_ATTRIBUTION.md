@@ -1,11 +1,12 @@
 # PTB-derived clean-runner test corpus
 
-`ptb_ci_corpus.tar.gz` contains a minimized subset of 106 real ECG waveforms
-from PTB-XL: 103 tracings bound to authored Clinical encounters and three
-authenticated prior tracings used by the longitudinal episodes. It also carries
-the PTB-XL+ derived evidence needed to validate the bank on a clean CI runner.
-It is source-test data only; production uses the complete independently audited
-release corpus.
+`ptb_ci_corpus.tar.gz` contains a minimized subset of 118 real ECG waveforms
+from PTB-XL: 103 tracings bound to authored Clinical encounters, three
+authenticated prior tracings used by longitudinal episodes, and all 24 ECGs in
+the governed Foundations contrast pools (12 overlap with the Clinical set and
+12 are additional). It also carries the PTB-XL+ derived evidence needed to
+validate both banks on a clean CI runner. It is source-test data only;
+production uses the complete independently audited release corpus.
 
 The export removes stable patient identifiers, recording dates, source file
 paths, staff/site/device fields, and validator identifiers. For the three

@@ -92,6 +92,10 @@ def test_activity_endpoint_is_owner_bound_paginated_and_private() -> None:
             "receipt_json",
         ):
             assert forbidden not in serialized
+        assert payload["items"][0]["lesson"] == {
+            "moduleId": "leads-vectors",
+            "sceneId": "m02-s1",
+        }
 
         assert other.get(
             "/learning/activity",

@@ -66,6 +66,7 @@ from .auth import (
 )
 from .auth_mailer import BoundedAuthTaskDispatcher, build_auth_mailer
 from .config import get_settings
+from .foundations_case_pools import preferred_foundations_case_ids
 from .coordinates import ViewerGeometry, point_to_ecg_coordinate
 from .corpus_repository import build_repository
 from .curriculum import curriculum_view
@@ -3582,6 +3583,26 @@ def pathway_progress(
     }
 
 
+@app.post("/learners/{learner_id}/foundations-native-migration")
+def migrate_foundations_native_progress(
+    learner_id: str,
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+) -> dict[str, Any]:
+    """Project legacy Foundations practice into native, non-mastering rows.
+
+    This owner-bound transaction is deliberately separate from the generic
+    monotonic pathway merge: an earlier completion flag cannot satisfy the
+    rebuilt module's stronger evidence-linked completion rule.
+    """
+
+    learner = effective_learner(authorization, learner_id, session_cookie)
+    return {
+        "learnerId": learner,
+        **store.migrate_foundations_to_native(learner),
+    }
+
+
 @app.post("/learners/{learner_id}/pathway-progress")
 def upsert_pathway_progress(
     learner_id: str,
@@ -4091,12 +4112,16 @@ def tutor_foundations(
     """Concept tutor for the Foundations learning module: answers beginner ECG-reading
     questions without needing an ECG image, strictly describe-not-diagnose."""
     learner = effective_learner(authorization, session_cookie=session_cookie)
-    return tutor_service.foundations(
+    result = tutor_service.foundations(
         request.learnerMessage,
         request.scope,
         learner_id=learner,
         remote_reservation=_remote_tutor_reservation(learner, http_request),
     )
+    # Compatibility endpoint only: chat can explain Foundations concepts but
+    # cannot author learner progress or mastery evidence.
+    result["objectiveUpdates"] = []
+    return result
 
 
 class TutorMessageRequest(BaseModel):
@@ -5245,6 +5270,7 @@ def tutorial(
     requiredMeasurements: str | None = Query(default=None, max_length=800),
     requiredRois: str | None = Query(default=None, max_length=800),
     requiresPerBeatLandmarks: bool = False,
+    casePoolSlot: str | None = Query(default=None, max_length=80),
     authorization: str | None = Header(default=None),
     session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> dict[str, Any]:
@@ -5254,6 +5280,20 @@ def tutorial(
     if not lesson:
         raise HTTPException(status_code=404, detail="Tutorial not found")
     learner = effective_learner(authorization, session_cookie=session_cookie)
+    try:
+        preferred_case_ids = preferred_foundations_case_ids(
+            casePoolSlot,
+            learner_id=learner,
+            secret=settings.registration_rate_limit_secret,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_foundations_case_pool",
+                "message": "The requested Foundations case slot is not available.",
+            },
+        ) from exc
     requested_concept = concept if concept in CONCEPT_BY_ID else lesson.get("caseConcept")
     excluded_case_id: str | None = None
     if excludeCaseId:
@@ -5268,7 +5308,15 @@ def tutorial(
             # responses never disclose this value after the capability rollout.
             excluded_case_id = excludeCaseId
     excluded = ({excluded_case_id} if excluded_case_id else set()) | _pending_assessment_case_ids()
-    selection = next_case(repo, store, learner, requested_concept, teaching_exemplar=True, exclude_case_ids=excluded)
+    selection = next_case(
+        repo,
+        store,
+        learner,
+        requested_concept,
+        teaching_exemplar=True,
+        exclude_case_ids=excluded,
+        preferred_case_ids=preferred_case_ids,
+    )
     selected = selection["case"]
     if selected is None:
         # Keep the route usable while making the data boundary explicit. This
@@ -5276,9 +5324,24 @@ def tutorial(
         # unavailable requested finding is present.
         # Never re-serve the rejected pathology as if it were a canonical
         # example. Use an eligible normal/contrast tracing and label it clearly.
-        fallback = next_case(repo, store, learner, "normal_ecg", teaching_exemplar=True, exclude_case_ids=excluded)
+        fallback = next_case(
+            repo,
+            store,
+            learner,
+            "normal_ecg",
+            teaching_exemplar=True,
+            exclude_case_ids=excluded,
+            preferred_case_ids=preferred_case_ids,
+        )
         if fallback.get("case") is None:
-            fallback = next_case(repo, store, learner, "normal_ecg", exclude_case_ids=excluded)
+            fallback = next_case(
+                repo,
+                store,
+                learner,
+                "normal_ecg",
+                exclude_case_ids=excluded,
+                preferred_case_ids=preferred_case_ids,
+            )
         selected = fallback["case"]
         selection = {
             **selection,
@@ -5334,11 +5397,27 @@ def tutorial(
         required_rois=_guided_requirement_tokens(requiredRois, "requiredRois"),
         requires_per_beat_landmarks=requiresPerBeatLandmarks,
     )
+    selected_case_id = str(selected["caseId"]) if selected else ""
+    preferred_pool_matched = bool(
+        preferred_case_ids and selected_case_id in set(preferred_case_ids)
+    )
+    if casePoolSlot:
+        guided_eligibility = {
+            "eligible": False,
+            "missingRequirementCount": int(guided_eligibility["missingRequirementCount"]) + 1,
+            "message": (
+                "This server-allocated Foundations ECG is a governed teaching contrast. "
+                "The authored action, not this patient tracing, supplies the graded target."
+            ),
+        }
     public_selection = {
         "requestedConceptUnavailable": requested_unavailable,
         "excludedBorderlineCount": len(selection.get("exemplarRejections") or []),
+        "preferredCasePoolMatched": preferred_pool_matched,
         "reason": (
-            "A contrast ECG was selected because no eligible target exemplar is available."
+            "A governed Foundations contrast ECG was selected; the authored action supplies the graded target."
+            if casePoolSlot
+            else "A contrast ECG was selected because no eligible target exemplar is available."
             if requested_unavailable
             else "An eligible teaching ECG was selected without disclosing its answer labels."
         ),

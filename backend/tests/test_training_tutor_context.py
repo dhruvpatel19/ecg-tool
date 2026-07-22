@@ -16,6 +16,38 @@ from app.training_tutor_context import (
 )
 
 
+def _nested_string_values(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return {
+            nested
+            for item in value.values()
+            for nested in _nested_string_values(item)
+        }
+    if isinstance(value, (list, tuple)):
+        return {
+            nested
+            for item in value
+            for nested in _nested_string_values(item)
+        }
+    return {value} if isinstance(value, str) else set()
+
+
+def _nested_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {
+            nested
+            for item in value.values()
+            for nested in _nested_keys(item)
+        }
+    if isinstance(value, (list, tuple)):
+        return {
+            nested
+            for item in value
+            for nested in _nested_keys(item)
+        }
+    return set()
+
+
 def _authenticate_test_user(client: TestClient, prefix: str) -> dict:
     """Create an isolated real session without consuming public auth limits."""
 
@@ -190,7 +222,8 @@ def test_builder_reconstructs_bounded_answer_free_training_set_context() -> None
         str(slot["caseId"])
         for slot in training_campaign_store.all_slots(campaign_id)
     }
-    assert all(case_id not in encoded for case_id in canonical_ids)
+    assert "caseId" not in _nested_keys(context)
+    assert canonical_ids.isdisjoint(_nested_string_values(context))
     for forbidden in (
         "response_json",
         "grade_json",

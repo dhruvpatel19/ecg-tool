@@ -5,7 +5,9 @@ from pathlib import Path
 
 from app.objectives import (
     FOUNDATIONAL_OBJECTIVE_IDS,
+    FOUNDATIONS_OBJECTIVE_IDS,
     GUIDED_OBJECTIVE_IDS,
+    LEGACY_FOUNDATIONAL_OBJECTIVE_IDS,
     NEUTRAL_WAVEFORM_OBJECTIVES,
     OBJECTIVES,
     SUBSKILLS,
@@ -54,6 +56,36 @@ def test_prior_registry_cells_remain_visible_and_semantically_valid() -> None:
         ("waveform_components", "localize"),
     }
     assert all(validate_objective_subskill(objective, subskill) for objective, subskill in prior_pairs)
+
+
+def test_native_foundations_objectives_are_additive_and_formative_until_server_graded() -> None:
+    assert FOUNDATIONS_OBJECTIVE_IDS == {
+        "foundations_waveform_landmarks",
+        "foundations_calibration",
+        "foundations_signal_quality",
+        "foundations_rate",
+        "foundations_atrial_source",
+        "foundations_pr_qrs",
+        "foundations_recovery",
+        "foundations_twelve_lead_navigation",
+        "foundations_axis",
+        "foundations_systematic_sweep",
+    }
+    assert LEGACY_FOUNDATIONAL_OBJECTIVE_IDS == {
+        "ecg_grid_calibration",
+        "pr_interval",
+        "waveform_components",
+    }
+    assert LEGACY_FOUNDATIONAL_OBJECTIVE_IDS.isdisjoint(FOUNDATIONS_OBJECTIVE_IDS)
+    assert FOUNDATIONAL_OBJECTIVE_IDS == (
+        LEGACY_FOUNDATIONAL_OBJECTIVE_IDS | FOUNDATIONS_OBJECTIVE_IDS
+    )
+    for objective_id in FOUNDATIONS_OBJECTIVE_IDS:
+        objective = OBJECTIVES[objective_id]
+        assert objective.case_concepts
+        assert objective.allowed_subskills
+        assert objective.evidence_ceiling == "formative_or_simulation"
+        assert "server-owned analytic grader" in str(objective.unavailable_reason)
 
 
 def test_every_objective_has_a_mapping_or_explicit_unavailable_reason() -> None:
