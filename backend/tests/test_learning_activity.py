@@ -34,6 +34,7 @@ def _database() -> sqlite3.Connection:
             id INTEGER PRIMARY KEY,
             learner_id TEXT NOT NULL,
             module_id TEXT NOT NULL,
+            scene_id TEXT NOT NULL DEFAULT 'm02-s1',
             score REAL NOT NULL,
             confidence INTEGER,
             assistance TEXT NOT NULL,
@@ -248,13 +249,13 @@ def test_guided_rows_are_projected_and_assessment_receipt_events_are_deduplicate
     conn = _database()
     conn.execute(
         "INSERT INTO guided_learning_events VALUES "
-        "(1, 'learner-a', 'leads-vectors', .5, 3, 'assisted', 0, 'axis_normal', "
+        "(1, 'learner-a', 'leads-vectors', 'm02-s1', .5, 3, 'assisted', 0, 'axis_normal', "
         "'[\"localize\"]', 'guided', '[\"axis_confusion\"]', '{\"answer\":\"secret\"}', "
         "'2026-07-13T13:00:00+00:00')"
     )
     conn.execute(
         "INSERT INTO guided_learning_events VALUES "
-        "(2, 'learner-a', 'train', 1, 5, 'unassisted', 1, 'axis_normal', "
+        "(2, 'learner-a', 'train', 'm02-s1', 1, 5, 'unassisted', 1, 'axis_normal', "
         "'[\"localize\"]', 'independent_transfer', '[]', '{}', "
         "'2026-07-13T13:01:00+00:00')"
     )
@@ -284,6 +285,10 @@ def test_guided_rows_are_projected_and_assessment_receipt_events_are_deduplicate
         "evidence": "formative",
         "reviewRecommended": True,
         "review": None,
+        "lesson": {
+            "moduleId": "leads-vectors",
+            "sceneId": "m02-s1",
+        },
     }
 
 
@@ -291,7 +296,7 @@ def test_guided_projection_preserves_every_valid_unique_subskill() -> None:
     conn = _database()
     conn.execute(
         "INSERT INTO guided_learning_events VALUES "
-        "(1, 'learner-a', 'leads-vectors', .8, 4, 'unassisted', 1, 'axis_normal', "
+        "(1, 'learner-a', 'leads-vectors', 'm02-s1', .8, 4, 'unassisted', 1, 'axis_normal', "
         "'[null, \"localize\", \"measure\", \"localize\", \"bad token\", "
         "\"explain_mechanism\", 42]', 'guided', '[]', '{}', "
         "'2026-07-13T13:00:00+00:00')"

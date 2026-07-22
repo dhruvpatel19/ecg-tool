@@ -330,6 +330,17 @@ def _project_row(row: sqlite3.Row, *, secret: str, learner_id: str) -> dict[str,
         "evidence": evidence,
         "reviewRecommended": review_recommended,
         "review": review,
+        # Authored lesson coordinates are safe navigation metadata. They let
+        # the learner reopen the exact native scene without exposing a case,
+        # response, grade contract, or answer-bearing feedback.
+        "lesson": (
+            {
+                "moduleId": str(row["module_id"]),
+                "sceneId": str(row["scene_id"]),
+            }
+            if source == "guided" and row["module_id"] and row["scene_id"]
+            else None
+        ),
     }
 
 
@@ -477,7 +488,9 @@ def get_learning_activity(
                     WHEN ca.id IS NOT NULL AND cs.status = 'complete'
                     THEN 'complete'
                     ELSE NULL
-                END AS review_session_status
+                END AS review_session_status,
+                NULL AS module_id,
+                NULL AS scene_id
             FROM attempts a
             LEFT JOIN training_campaign_answers ta ON ta.attempt_id = a.id
             LEFT JOIN rapid_round_answers ra ON ra.attempt_id = a.id
@@ -518,7 +531,9 @@ def get_learning_activity(
                 NULL AS review_mode,
                 NULL AS review_session_id,
                 NULL AS review_attempt_index,
-                NULL AS review_session_status
+                NULL AS review_session_status,
+                g.module_id AS module_id,
+                g.scene_id AS scene_id
             FROM guided_learning_events g
             WHERE g.learner_id = ?
               AND g.module_id NOT IN ('train', 'rapid', 'clinical')

@@ -235,6 +235,7 @@ def next_case(
     subskill_id: str | None = None,
     as_of: datetime | None = None,
     selector_context: Literal["generic", "rapid"] = "generic",
+    preferred_case_ids: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     schedule_time = (as_of or datetime.now(UTC)).astimezone(UTC)
     profile = store.ensure_profile(learner_id)
@@ -446,6 +447,22 @@ def next_case(
         return value
 
     ranked = sorted(candidates, key=score, reverse=True)
+    if preferred_case_ids:
+        preferred_rank = {
+            case_id: index for index, case_id in enumerate(preferred_case_ids)
+        }
+        adaptive_rank = {
+            str(candidate["case_id"]): index
+            for index, candidate in enumerate(ranked)
+        }
+        ranked = sorted(
+            ranked,
+            key=lambda candidate: (
+                0 if str(candidate["case_id"]) in preferred_rank else 1,
+                preferred_rank.get(str(candidate["case_id"]), 0),
+                adaptive_rank[str(candidate["case_id"])],
+            ),
+        )
     selected = ranked[0]
     case = None
     exemplar_rejections: list[dict[str, Any]] = []

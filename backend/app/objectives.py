@@ -73,6 +73,11 @@ GUIDED_OBJECTIVE_IDS = (
     "syncope_bradycardia_transfer", "tachyarrhythmia_mixed", "tachycardia_matrix",
     "tachycardia_with_pulse", "ventricular_conduction_mixed", "wide_complex_tachycardia",
     "wide_qrs_qt_confound", "wolff_parkinson_white",
+    "foundations_waveform_landmarks", "foundations_calibration",
+    "foundations_signal_quality", "foundations_rate",
+    "foundations_atrial_source", "foundations_pr_qrs",
+    "foundations_recovery", "foundations_twelve_lead_navigation",
+    "foundations_axis", "foundations_systematic_sweep",
 )
 
 # These objectives were emitted by earlier Guided curricula but are no longer
@@ -91,19 +96,79 @@ RETIRED_GUIDED_OBJECTIVE_IDS = frozenset({
 NEUTRAL_WAVEFORM_OBJECTIVES = frozenset({"qrs_complex"})
 
 # These trace-native foundations appeared in earlier Guided curricula and have
-# valid student evidence in existing learning records. They remain canonical
-# objectives even when the current module wording changes, so a registry update
-# can never silently orphan earned work.
-FOUNDATIONAL_OBJECTIVE_IDS = frozenset({
+# valid student evidence in existing learning records. They remain canonical so
+# a registry update can never silently orphan earned work.
+LEGACY_FOUNDATIONAL_OBJECTIVE_IDS = frozenset({
     "ecg_grid_calibration",
     "pr_interval",
     "waveform_components",
 })
 
+# Additive objective ids for the rebuilt native Foundations module. They are
+# deliberately distinct from historical concepts: old lesson completion can be
+# displayed as prior guided practice, but it cannot be silently promoted into a
+# new objective's independent or retained evidence.
+FOUNDATIONS_OBJECTIVE_IDS = frozenset({
+    "foundations_waveform_landmarks",
+    "foundations_calibration",
+    "foundations_signal_quality",
+    "foundations_rate",
+    "foundations_atrial_source",
+    "foundations_pr_qrs",
+    "foundations_recovery",
+    "foundations_twelve_lead_navigation",
+    "foundations_axis",
+    "foundations_systematic_sweep",
+})
+
+FOUNDATIONAL_OBJECTIVE_IDS = (
+    LEGACY_FOUNDATIONAL_OBJECTIVE_IDS | FOUNDATIONS_OBJECTIVE_IDS
+)
+
 _FOUNDATIONAL_SUBSKILLS: dict[str, tuple[str, ...]] = {
     "ecg_grid_calibration": ("measure", "explain_mechanism", "calibrate_confidence"),
     "pr_interval": ("localize", "measure", "explain_mechanism", "calibrate_confidence"),
     "waveform_components": ("recognize", "localize", "discriminate", "explain_mechanism", "calibrate_confidence"),
+    "foundations_waveform_landmarks": ("localize", "discriminate", "explain_mechanism"),
+    "foundations_calibration": ("localize", "measure", "discriminate", "explain_mechanism", "calibrate_confidence"),
+    "foundations_signal_quality": ("localize", "discriminate", "calibrate_confidence"),
+    "foundations_rate": ("localize", "measure", "discriminate", "explain_mechanism"),
+    "foundations_atrial_source": ("localize", "discriminate", "explain_mechanism", "calibrate_confidence"),
+    "foundations_pr_qrs": ("localize", "measure", "discriminate", "calibrate_confidence"),
+    "foundations_recovery": ("localize", "measure", "discriminate", "explain_mechanism", "synthesize", "calibrate_confidence"),
+    "foundations_twelve_lead_navigation": (
+        "recognize",
+        "localize",
+        "discriminate",
+        "explain_mechanism",
+        "synthesize",
+        "calibrate_confidence",
+    ),
+    "foundations_axis": ("localize", "discriminate", "explain_mechanism", "calibrate_confidence"),
+    "foundations_systematic_sweep": ("localize", "measure", "discriminate", "explain_mechanism", "synthesize", "calibrate_confidence"),
+}
+
+# Case-family aliases describe where a future server grader could obtain a
+# suitable representation. They do not themselves unlock grading; every v2
+# Foundations objective remains formative until its reviewed manifest and
+# server-owned scorer are connected below.
+_FOUNDATIONS_CASE_MAPPINGS: dict[str, tuple[tuple[str, ...], str]] = {
+    "foundations_waveform_landmarks": (("normal_ecg",), "waveform_fundamentals"),
+    "foundations_calibration": (("normal_ecg",), "waveform_fundamentals"),
+    "foundations_signal_quality": (("normal_ecg",), "signal_quality"),
+    "foundations_rate": (("rate",), "foundations"),
+    "foundations_atrial_source": (("sinus_rhythm",), "rhythm"),
+    "foundations_pr_qrs": (
+        ("normal_ecg", "av_block_first_degree", "qrs_duration"),
+        "intervals",
+    ),
+    "foundations_recovery": (("normal_ecg", "qtc_prolongation"), "repolarization"),
+    "foundations_twelve_lead_navigation": (("normal_ecg",), "lead_vectors"),
+    "foundations_axis": (
+        ("axis_normal", "left_axis_deviation", "right_axis_deviation"),
+        "axis",
+    ),
+    "foundations_systematic_sweep": (("normal_ecg",), "integration"),
 }
 
 # Explicit compatibility additions are preferable to silently remapping
@@ -177,6 +242,13 @@ _FORMATIVE_ONLY = {
     "r_wave_progression": "No reliable Tier A/B R-wave-progression case is available in the active corpus.",
     "poor_r_wave_progression": "No reliable Tier A/B poor-R-wave-progression case is connected; a normal tracing may teach lead order but cannot prove pathology recognition.",
     "pericarditis_pattern": "No reliable Tier A/B pericarditis-pattern case is available in the active corpus.",
+    **{
+        objective_id: (
+            "Native Foundations practice is formative until its reviewed case manifest "
+            "and server-owned analytic grader are connected."
+        )
+        for objective_id in FOUNDATIONS_OBJECTIVE_IDS
+    },
 }
 
 # Canonical concepts for which the automated-screened Clinical bank contains an
@@ -492,6 +564,16 @@ def objective_runtime_availability(
 def _label(objective_id: str) -> str:
     overrides = {
         "av_block_2_to_1": "2:1 AV block",
+        "foundations_waveform_landmarks": "Waveform landmarks",
+        "foundations_calibration": "Calibration and measurement",
+        "foundations_signal_quality": "Task-specific signal quality",
+        "foundations_rate": "Ventricular rate",
+        "foundations_atrial_source": "Atrial source and P–QRS relationship",
+        "foundations_pr_qrs": "PR and QRS measurement",
+        "foundations_recovery": "Recovery landmarks",
+        "foundations_twelve_lead_navigation": "Twelve-lead navigation",
+        "foundations_axis": "Frontal QRS axis",
+        "foundations_systematic_sweep": "Systematic descriptive sweep",
         "qtc_prolongation": "QTc prolongation",
         "qrs_duration": "QRS duration",
         "st_t_morphology": "ST–T morphology",
@@ -525,6 +607,8 @@ def _label(objective_id: str) -> str:
 
 
 def _case_mapping(objective_id: str) -> tuple[tuple[str, ...], str]:
+    if objective_id in _FOUNDATIONS_CASE_MAPPINGS:
+        return _FOUNDATIONS_CASE_MAPPINGS[objective_id]
     if objective_id == "qrs_complex":
         # Normal ECG is the inventory anchor only; localization itself is
         # diagnosis-neutral and may be observed on any eligible tracing.

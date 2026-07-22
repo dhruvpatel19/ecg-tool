@@ -103,10 +103,11 @@ _LEARNING_PREFERENCE_ALLOWED = {
 # the cross-mode resume projection. Pathway progress is a client-written
 # record, so treating an arbitrary module/scene string as navigation would turn
 # the resume endpoint into an open redirect in another form. The tuple is
-# (pathway id, native scene prefix, authored scene count); Foundations owns its
-# current scene inside the same-origin module and therefore has no scene query.
+# (pathway id, native scene prefix, authored scene count). Foundations now uses
+# the shared native runtime; the old aggregate row remains a read-only migration
+# source and is never treated as a routable scene.
 _GUIDED_RESUME_MODULES: dict[str, tuple[str, str | None, int]] = {
-    "foundations": ("foundations-curriculum", None, 13),
+    "foundations": ("production-curriculum", "S", 13),
     "leads-vectors": ("production-curriculum", "M02.S", 15),
     "rhythm-ectopy": ("production-curriculum", "M03.S", 16),
     "av-brady": ("production-curriculum", "m04-s", 11),
@@ -1749,9 +1750,299 @@ class LearningStore:
         return [self._pathway_progress_dict(row) for row in rows]
 
     @staticmethod
+    def _legacy_foundations_scene_ids(value: Any) -> set[str]:
+        allowed = {f"S{index}" for index in range(13)}
+        if isinstance(value, dict):
+            values = [key for key, enabled in value.items() if enabled is True]
+        elif isinstance(value, list):
+            values = value
+        else:
+            values = []
+        return {str(item) for item in values if str(item) in allowed}
+
+    def _foundations_resume_scene(self, rows: list[sqlite3.Row]) -> str:
+        resumable = []
+        for row in rows:
+            try:
+                state = json.loads(row["state_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                state = {}
+            if (
+                str(row["status"]) in {"viewed", "attempted", "needs-review"}
+                and re.fullmatch(r"S(?:[0-9]|1[0-2])", str(row["scene_id"]))
+                and not (isinstance(state, dict) and state.get("reviewLater") is True)
+            ):
+                resumable.append(row)
+        if not resumable:
+            return "S0"
+        resumable.sort(
+            key=lambda row: (
+                self._resume_timestamp(str(row["updated_at"])),
+                self._resume_timestamp(str(row["created_at"])),
+                -int(str(row["scene_id"])[1:]),
+            ),
+            reverse=True,
+        )
+        return str(resumable[0]["scene_id"])
+
+    def migrate_foundations_to_native(self, learner_id: str) -> dict[str, Any]:
+        """Idempotently project the legacy aggregate into honest native rows.
+
+        The generic pathway upsert is monotonic and therefore cannot reinterpret
+        an earlier ``complete`` flag under the rebuilt rubric. This dedicated
+        transaction preserves prior practice as presentation metadata while no
+        legacy scene, score, or test-out marker becomes native completion or
+        independent evidence.
+        """
+
+        self.ensure_profile(learner_id)
+        now = utc_now()
+        migration_version = "foundations-native-v2"
+        with self.connect() as conn:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            legacy = conn.execute(
+                "SELECT status, active_interaction_index, completed_action_ids_json, "
+                "state_json, created_at, updated_at FROM pathway_progress "
+                "WHERE learner_id = ? AND pathway_id = 'foundations-curriculum' "
+                "AND module_id = 'foundations' AND scene_id = 'foundations-progress'",
+                (learner_id,),
+            ).fetchone()
+            native_rows = conn.execute(
+                "SELECT * FROM pathway_progress WHERE learner_id = ? "
+                "AND pathway_id = 'production-curriculum' AND module_id = 'foundations' "
+                "AND scene_id GLOB 'S*' ORDER BY scene_id",
+                (learner_id,),
+            ).fetchall()
+
+            if legacy is None:
+                return {
+                    "migrationVersion": migration_version,
+                    "result": "not_needed",
+                    "resumeSceneId": self._foundations_resume_scene(native_rows),
+                    "items": [self._pathway_progress_dict(row) for row in native_rows],
+                    "legacyPracticePreserved": False,
+                }
+
+            try:
+                aggregate_state = json.loads(legacy["state_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                aggregate_state = {}
+            if not isinstance(aggregate_state, dict):
+                aggregate_state = {}
+            foundation_state = aggregate_state.get("foundationState")
+            if not isinstance(foundation_state, dict):
+                foundation_state = {}
+            source_digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "state": foundation_state,
+                        "completedActionIds": legacy["completed_action_ids_json"],
+                        "activeInteractionIndex": legacy["active_interaction_index"],
+                        "sourceUpdatedAt": legacy["updated_at"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            prior_receipt: dict[str, Any] | None = None
+            for row in native_rows:
+                try:
+                    row_state = json.loads(row["state_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    row_state = {}
+                candidate = row_state.get("foundationsMigration") if isinstance(row_state, dict) else None
+                if isinstance(candidate, dict) and candidate.get("migrationVersion") == migration_version:
+                    prior_receipt = candidate
+                    break
+            if prior_receipt is not None:
+                result = "replay" if prior_receipt.get("legacySnapshotDigest") == source_digest else "source_conflict"
+                return {
+                    "migrationVersion": migration_version,
+                    "result": result,
+                    "resumeSceneId": self._foundations_resume_scene(native_rows),
+                    "items": [self._pathway_progress_dict(row) for row in native_rows],
+                    "legacyPracticePreserved": True,
+                }
+
+            try:
+                legacy_completed_actions = json.loads(
+                    legacy["completed_action_ids_json"] or "[]"
+                )
+            except (TypeError, json.JSONDecodeError):
+                legacy_completed_actions = []
+            completed = self._legacy_foundations_scene_ids(
+                foundation_state.get("completed") or legacy_completed_actions
+            )
+            skipped = self._legacy_foundations_scene_ids(foundation_state.get("skipped"))
+            completed -= skipped
+            needs_review = self._legacy_foundations_scene_ids(foundation_state.get("needsReview"))
+            needs_review -= skipped | completed
+            try:
+                current_index = int(
+                    foundation_state.get("current", legacy["active_interaction_index"])
+                )
+            except (TypeError, ValueError):
+                current_index = 0
+            current_index = max(0, min(12, current_index))
+            current_scene = f"S{current_index}"
+            known_native = {str(row["scene_id"]): row for row in native_rows}
+            had_native_work = any(
+                str(row["status"]) != "not-started" for row in native_rows
+            )
+
+            allowed_reference_ids = {
+                "boxes", "rate", "pr", "qrs", "st", "t", "qt", "rwave", "axis"
+            }
+            raw_reference = foundation_state.get("nv")
+            unlocked_reference_ids = sorted(
+                key for key, enabled in raw_reference.items()
+                if isinstance(raw_reference, dict)
+                and key in allowed_reference_ids
+                and enabled is True
+            ) if isinstance(raw_reference, dict) else []
+            raw_tested_out = foundation_state.get("testedOut")
+            legacy_placement_parts = sorted(
+                str(key) for key, enabled in raw_tested_out.items()
+                if isinstance(raw_tested_out, dict)
+                and str(key) in {"1", "2", "3", "4"}
+                and enabled is True
+            ) if isinstance(raw_tested_out, dict) else []
+            raw_accuracy = foundation_state.get(
+                "bestAccuracy", aggregate_state.get("bestAccuracy", 0)
+            )
+            try:
+                legacy_accuracy = max(0.0, min(100.0, float(raw_accuracy)))
+            except (TypeError, ValueError):
+                legacy_accuracy = 0.0
+            guidance = str(foundation_state.get("guidance") or "balanced")
+            if guidance not in {"step_by_step", "balanced", "minimal"}:
+                guidance = "balanced"
+
+            receipt = {
+                "migrationVersion": migration_version,
+                "sourcePathwayId": "foundations-curriculum",
+                "sourceUpdatedAt": str(legacy["updated_at"]),
+                "targetPathwayId": "production-curriculum",
+                "migratedAt": now,
+                "legacySnapshotDigest": source_digest,
+                "result": "complete",
+            }
+            for index in range(13):
+                scene_id = f"S{index}"
+                if scene_id in known_native:
+                    continue
+                if scene_id in skipped:
+                    status = "skipped"
+                elif scene_id in needs_review:
+                    status = "needs-review"
+                elif scene_id in completed:
+                    status = "viewed" if scene_id == "S0" else "attempted"
+                elif scene_id == current_scene:
+                    status = "viewed"
+                else:
+                    status = "not-started"
+                state: dict[str, Any] = {
+                    "schemaVersion": "foundations-native-v2",
+                    "legacyPathStatus": (
+                        "finished_in_v1" if scene_id in completed
+                        else "skipped_in_v1" if scene_id in skipped
+                        else "needs_review_in_v1" if scene_id in needs_review
+                        else "not_recorded_in_v1"
+                    ),
+                    "legacyVerificationRequired": scene_id in completed,
+                }
+                if scene_id == "S0":
+                    state.update({
+                        "foundationsMigration": receipt,
+                        "legacyPresentation": {
+                            "guidance": guidance,
+                            "unlockedReferenceIds": unlocked_reference_ids,
+                            "placementHistory": [
+                                {"part": part, "result": "passed_legacy_single_item"}
+                                for part in legacy_placement_parts
+                            ],
+                            "legacyCapstoneScore": legacy_accuracy,
+                        },
+                    })
+                conn.execute(
+                    "INSERT INTO pathway_progress (learner_id, pathway_id, module_id, "
+                    "scene_id, status, active_interaction_index, completed_action_ids_json, "
+                    "state_json, source, created_at, updated_at) "
+                    "VALUES (?, 'production-curriculum', 'foundations', ?, ?, 0, '[]', ?, "
+                    "'server', ?, ?)",
+                    (learner_id, scene_id, status, json.dumps(state, sort_keys=True), now, now),
+                )
+
+            # If native work predated this migration, attach the receipt without
+            # downgrading or unioning that work. S0 is guaranteed to exist after
+            # the loop above.
+            s0 = conn.execute(
+                "SELECT state_json FROM pathway_progress WHERE learner_id = ? "
+                "AND pathway_id = 'production-curriculum' AND module_id = 'foundations' "
+                "AND scene_id = 'S0'",
+                (learner_id,),
+            ).fetchone()
+            try:
+                s0_state = json.loads(s0["state_json"] or "{}") if s0 else {}
+            except (TypeError, json.JSONDecodeError):
+                s0_state = {}
+            if not isinstance(s0_state, dict):
+                s0_state = {}
+            if "foundationsMigration" not in s0_state:
+                s0_state["foundationsMigration"] = receipt
+                s0_state.setdefault("legacyPresentation", {
+                    "guidance": guidance,
+                    "unlockedReferenceIds": unlocked_reference_ids,
+                    "placementHistory": [
+                        {"part": part, "result": "passed_legacy_single_item"}
+                        for part in legacy_placement_parts
+                    ],
+                    "legacyCapstoneScore": legacy_accuracy,
+                })
+                conn.execute(
+                    "UPDATE pathway_progress SET state_json = ?, updated_at = ? "
+                    "WHERE learner_id = ? AND pathway_id = 'production-curriculum' "
+                    "AND module_id = 'foundations' AND scene_id = 'S0'",
+                    (json.dumps(s0_state, sort_keys=True), now, learner_id),
+                )
+
+            migrated_rows = conn.execute(
+                "SELECT * FROM pathway_progress WHERE learner_id = ? "
+                "AND pathway_id = 'production-curriculum' AND module_id = 'foundations' "
+                "AND scene_id GLOB 'S*' ORDER BY scene_id",
+                (learner_id,),
+            ).fetchall()
+            return {
+                "migrationVersion": migration_version,
+                "result": "migrated",
+                "resumeSceneId": (
+                    self._foundations_resume_scene(migrated_rows)
+                    if had_native_work else current_scene
+                ),
+                "items": [self._pathway_progress_dict(row) for row in migrated_rows],
+                "legacyPracticePreserved": True,
+            }
+
+    @staticmethod
     def _guided_resume_destination(
         pathway_id: str, module_id: str, scene_id: str
     ) -> dict[str, Any] | None:
+        # Transitional compatibility for learners who have not opened the
+        # rebuilt module yet. The destination is the fixed Foundations route;
+        # that route performs the owner-bound migration before rendering and
+        # never interprets the legacy aggregate as a native scene.
+        if (
+            pathway_id == "foundations-curriculum"
+            and module_id == "foundations"
+            and scene_id == "foundations-progress"
+        ):
+            return {
+                "kind": "guided",
+                "moduleId": "foundations",
+                "sceneId": None,
+            }
         authored = _GUIDED_RESUME_MODULES.get(module_id)
         if not authored:
             return None
@@ -1823,6 +2114,12 @@ class LearningStore:
             for row in guided_rows:
                 if row["status"] not in {"viewed", "attempted", "needs-review"}:
                     continue
+                try:
+                    row_state = json.loads(row["state_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    row_state = {}
+                if isinstance(row_state, dict) and row_state.get("reviewLater") is True:
+                    continue
                 destination = self._guided_resume_destination(
                     str(row["pathway_id"]),
                     str(row["module_id"]),
@@ -1835,7 +2132,10 @@ class LearningStore:
             if guided_row is not None and guided_destination is not None:
                 module_id = str(guided_row["module_id"])
                 total = _GUIDED_RESUME_MODULES[module_id][2]
-                if module_id == "foundations":
+                if (
+                    module_id == "foundations"
+                    and str(guided_row["pathway_id"]) == "foundations-curriculum"
+                ):
                     try:
                         state = json.loads(guided_row["state_json"] or "{}")
                     except (TypeError, json.JSONDecodeError):
@@ -2008,7 +2308,97 @@ class LearningStore:
                     actions = list(dict.fromkeys(
                         json.loads(existing["completed_action_ids_json"]) + incoming_actions
                     ))
-                    state = {**json.loads(existing["state_json"]), **incoming_state}
+                    existing_state = json.loads(existing["state_json"])
+                    state = {**existing_state, **incoming_state}
+                    # "Review later" is a presentation preference, not a new
+                    # answer revision. A stale browser sends its full runtime
+                    # snapshot with this flag; never let that payload erase or
+                    # rewrite newer evidence/assistance from another tab or
+                    # device. A deliberate retry still clears evidence because
+                    # it sends reviewLater=false.
+                    if incoming_state.get("reviewLater") is True:
+                        existing_evidence = existing_state.get("evidence")
+                        incoming_evidence = incoming_state.get("evidence")
+                        if isinstance(existing_evidence, dict) or isinstance(incoming_evidence, dict):
+                            merged_evidence = dict(
+                                existing_evidence if isinstance(existing_evidence, dict) else {}
+                            )
+                            for evidence_id, incoming_entry in (
+                                incoming_evidence.items()
+                                if isinstance(incoming_evidence, dict)
+                                else ()
+                            ):
+                                existing_entry = merged_evidence.get(evidence_id)
+                                if not isinstance(existing_entry, dict) or not isinstance(incoming_entry, dict):
+                                    if existing_entry is None:
+                                        merged_evidence[evidence_id] = incoming_entry
+                                    continue
+
+                                def evidence_rank(entry: dict[str, Any]) -> tuple[int, int, float]:
+                                    try:
+                                        attempts = int(entry.get("attempts", 0))
+                                    except (TypeError, ValueError):
+                                        attempts = 0
+                                    try:
+                                        score = float(entry.get("score", 0.0))
+                                    except (TypeError, ValueError):
+                                        score = 0.0
+                                    return (1 if entry.get("correct") is True else 0, attempts, score)
+
+                                if evidence_rank(incoming_entry) > evidence_rank(existing_entry):
+                                    merged_evidence[evidence_id] = incoming_entry
+                            state["evidence"] = merged_evidence
+
+                        existing_assisted = existing_state.get("assistedInteractionIds")
+                        incoming_assisted = incoming_state.get("assistedInteractionIds")
+                        if isinstance(existing_assisted, list) or isinstance(incoming_assisted, list):
+                            state["assistedInteractionIds"] = list(dict.fromkeys([
+                                *(existing_assisted if isinstance(existing_assisted, list) else []),
+                                *(incoming_assisted if isinstance(incoming_assisted, list) else []),
+                            ]))
+                        for monotonic_key in (
+                            "activeInteractionIndex",
+                            "equivalentRetryCount",
+                            "revealedMechanismCount",
+                        ):
+                            try:
+                                state[monotonic_key] = max(
+                                    int(existing_state.get(monotonic_key, 0)),
+                                    int(incoming_state.get(monotonic_key, 0)),
+                                )
+                            except (TypeError, ValueError):
+                                if monotonic_key in existing_state:
+                                    state[monotonic_key] = existing_state[monotonic_key]
+                    # Teaching progress is monotonic across every merge, not
+                    # only review-later writes. A stale tab must never relock a
+                    # lesson or forget concepts already explored on another
+                    # device. "Review the model" is a local presentation state;
+                    # it intentionally does not undo completion on the server.
+                    teaching_keys = {
+                        "teachingComplete",
+                        "teachingStep",
+                        "teachingVisitedSteps",
+                    }
+                    if teaching_keys.intersection(existing_state) or teaching_keys.intersection(incoming_state):
+                        state["teachingComplete"] = (
+                            existing_state.get("teachingComplete") is True
+                            or incoming_state.get("teachingComplete") is True
+                        )
+                        try:
+                            state["teachingStep"] = max(
+                                int(existing_state.get("teachingStep", 0)),
+                                int(incoming_state.get("teachingStep", 0)),
+                            )
+                        except (TypeError, ValueError):
+                            if "teachingStep" in existing_state:
+                                state["teachingStep"] = existing_state["teachingStep"]
+                        existing_teaching_steps = existing_state.get("teachingVisitedSteps")
+                        incoming_teaching_steps = incoming_state.get("teachingVisitedSteps")
+                        if isinstance(existing_teaching_steps, list) or isinstance(incoming_teaching_steps, list):
+                            state["teachingVisitedSteps"] = list(dict.fromkeys([
+                                *(existing_teaching_steps if isinstance(existing_teaching_steps, list) else []),
+                                *(incoming_teaching_steps if isinstance(incoming_teaching_steps, list) else []),
+                            ]))
                     active_index = max(int(existing["active_interaction_index"]), incoming_index)
                 else:
                     status = incoming_status
