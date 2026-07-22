@@ -6,10 +6,9 @@
 // without importing every storyboard into the curriculum hub bundle. It
 // intentionally does NOT consume the backend `/curriculum` endpoint.
 //
-// Forward-compatibility: a module's experience can be an embedded iframe (Foundations
-// today) or, later, a native React route. Either way it fills the SAME registry entry
-// and re-emits the same progress contract (see ./progress.ts) — so the hub, nav, and
-// sequencing are unaffected by how an individual module is implemented.
+// Every ready module now uses the native scene runtime and the same per-scene
+// production pathway contract. The earlier Foundations aggregate remains only
+// as an immutable migration source.
 
 export type ModuleStatus = "ready" | "coming-soon";
 
@@ -34,14 +33,14 @@ export const MODULES: LearnModule[] = [
   {
     id: "foundations",
     order: 0,
-    title: "Foundations of the ECG Read",
+    title: "Foundations of ECG Interpretation",
     blurb:
-      "Calibration, the 12-lead layout and territories, rate, and basic rhythm — the scaffolding every interpretation hangs on.",
+      "Learn what the ECG trace represents, check calibration and task-specific quality, measure basic timing features, navigate the 12-lead page, and complete an evidence-linked descriptive sweep.",
     status: "ready",
     href: "/learn/foundations",
     prerequisites: [],
     sceneCount: 13,
-    progressKey: "foundations",
+    progressKey: "production",
   },
   {
     id: "leads-vectors",

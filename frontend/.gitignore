@@ -1,6 +1,6 @@
-# `public/foundations/` is a checked-in deployment snapshot of the canonical
-# repo-root module. `scripts/sync-foundations.mjs` refreshes it whenever the
-# canonical source is available, while Vercel can build from `frontend/` alone.
+# Foundations is implemented by the native application runtime. The retired
+# static prototype must never be copied beneath `public/`; the predev/prebuild
+# boundary check fails closed if that directory reappears.
 
 # Playwright E2E artifacts
 /test-results/

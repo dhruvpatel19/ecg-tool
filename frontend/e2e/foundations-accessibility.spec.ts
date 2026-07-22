@@ -1,179 +1,234 @@
-import { expect, test, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { PathwayProgressItem } from "../src/lib/api";
 import { collectConsoleErrors, registerVerifiedE2ELearner } from "./helpers";
 
 let owner = "";
+let progressItems: PathwayProgressItem[] = [];
 
-async function openStandaloneScene(page: Page, current: number) {
-  // Seed state from a same-origin page that is not running the Foundations
-  // boot sequence; otherwise its pending CASES_READY callback can overwrite the
-  // requested scene with S0 between localStorage.setItem and reload.
-  await page.goto("/");
-  await page.evaluate(
-    ({ key, scene }) => {
-      localStorage.setItem(key, JSON.stringify({ completed: {}, current: scene, nv: {}, skipped: {}, testedOut: {} }));
-    },
-    { key: `foundations_state_v1:${owner}`, scene: current },
-  );
-  await page.goto(`/foundations/index.html?owner=${owner}`);
-  await page.getByRole("button", { name: "Resume" }).press("Enter");
+function completedEvidence(interactionId: string, kind: string) {
+  return {
+    interactionId,
+    kind,
+    correct: true,
+    partial: false,
+    score: 1,
+    attempts: 1,
+    assistance: "independent",
+    hintsUsed: 0,
+    response: [],
+    misconceptions: [],
+    feedbackBranch: "correct",
+  };
 }
 
-test.describe("Foundations accessibility and tutor continuity", () => {
+function attemptedScene(
+  sceneId: string,
+  activeInteractionIndex: number,
+  evidence: Record<string, ReturnType<typeof completedEvidence>>,
+): PathwayProgressItem {
+  return {
+    pathwayId: "production-curriculum",
+    moduleId: "foundations",
+    sceneId,
+    status: "attempted",
+    activeInteractionIndex,
+    completedActionIds: Object.keys(evidence),
+    state: {
+      status: "attempted",
+      activeInteractionIndex,
+      revealedMechanismCount: 1,
+      teachingStep: 2,
+      teachingVisitedSteps: [0, 1, 2],
+      teachingComplete: true,
+      evidence,
+      equivalentRetryCount: 0,
+      assistedInteractionIds: [],
+    },
+  };
+}
+
+async function setRangeWithKeyboard(slider: Locator, edge: "Home" | "End", key: "ArrowRight" | "ArrowLeft", presses: number) {
+  await slider.focus();
+  await slider.press(edge);
+  for (let index = 0; index < presses; index += 1) await slider.press(key);
+}
+
+async function expectNoAxeViolations(page: Page) {
+  const result = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  expect(result.violations.map((violation) => ({
+    id: violation.id,
+    impact: violation.impact,
+    targets: violation.nodes.map((node) => node.target),
+  }))).toEqual([]);
+}
+
+test.describe("native Foundations accessibility and tutor boundaries", () => {
   test.beforeEach(async ({ page }) => {
     const account = await registerVerifiedE2ELearner(page, {
       prefix: "foundations_accessibility",
       displayName: "Foundation Learner",
     });
     owner = account.user.userId;
-    await page.route(`**/api/backend/learners/${owner}/pathway-progress**`, (route) => {
-      const body = route.request().method() === "PUT"
-        ? route.request().postDataJSON() as { items?: unknown[] }
-        : null;
-      return route.fulfill({ json: { learnerId: owner, items: body?.items ?? [] } });
-    });
-    await page.goto("/");
-    await page.evaluate((key) => localStorage.removeItem(key), `foundations_state_v1:${owner}`);
+    progressItems = [];
+    await page.route(`**/api/backend/learners/${owner}/foundations-native-migration`, (route) => route.fulfill({
+      json: {
+        learnerId: owner,
+        migrationVersion: "foundations-native-v2",
+        result: "not_needed",
+        resumeSceneId: "S0",
+        items: [],
+        legacyPracticePreserved: false,
+      },
+    }));
+    await page.route(`**/api/backend/learners/${owner}/pathway-progress**`, (route) => route.fulfill({
+      json: { learnerId: owner, items: progressItems },
+    }));
   });
 
-  test("keyboard-only waveform completion records a guided schematic receipt and preserves tangent state", async ({ page }) => {
+  test("the authored ECG lab has a complete keyboard path and records only guided simulation evidence", async ({ page }) => {
     const errors = collectConsoleErrors(page);
     const guidedBodies: Array<Record<string, unknown>> = [];
-    await page.route("**/api/backend/learning-events/guided", async (route) => {
+    progressItems = [attemptedScene("S1", 1, {
+      "m01-s1-cycle": completedEvidence("m01-s1-cycle", "model_explore"),
+    })];
+    await page.route("**/api/backend/learning-events/guided", (route) => {
       guidedBodies.push(route.request().postDataJSON() as Record<string, unknown>);
-      await route.fulfill({
+      return route.fulfill({
         status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ eventId: 1, requestedEvidenceLevel: "guided", effectiveEvidenceLevel: "guided", receipts: [] }),
+        json: {
+          eventId: 1,
+          requestedEvidenceLevel: "guided",
+          effectiveEvidenceLevel: "guided",
+          receipts: [],
+        },
       });
     });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/learn/foundations?scene=S1");
 
-    await page.goto("/learn/foundations");
-    const lesson = page.frameLocator('iframe[title="Foundations of the ECG Read"]');
+    await expect(page.locator('iframe[title*="Foundations"]')).toHaveCount(0);
+    await expect(page.getByRole("img", { name: /II practice ECG waveform/ })).toBeVisible();
+    await expect(page.getByText(/Practice waveform:.*not a patient ECG/)).toBeVisible();
+    const smallGrid = page.locator('pattern[id="small-grid-m01-s1-landmarks"]');
+    await expect(smallGrid).toHaveAttribute("width", "36");
+    await expect(smallGrid).toHaveAttribute("height", "36");
+    const cursor = page.getByRole("slider", { name: "Keyboard cursor" });
+    const target = page.getByRole("combobox", { name: "Target to mark" });
+    const place = page.getByRole("button", { name: "Place target" });
 
-    await expect(lesson.getByRole("heading", { name: "A gentle start" })).toBeVisible();
-    await expect(lesson.getByText(/Real PTB-XL ECG \d+ · lead II/)).toBeVisible();
-    await lesson.getByRole("button", { name: "Next ›" }).press("Enter");
-    await expect(lesson.getByText("Interactive mechanism schematic — not a patient ECG.", { exact: false })).toBeVisible();
+    await setRangeWithKeyboard(cursor, "Home", "ArrowRight", 24);
+    await expect(target).toHaveValue("p");
+    await place.press("Enter");
+    await expect(target).toHaveValue("qrs");
 
-    const beatPosition = lesson.getByRole("slider", { name: "One-beat animation position" });
-    await beatPosition.focus();
-    await beatPosition.press("End");
-    await lesson.getByRole("button", { name: "Show P / QRS / T ▸" }).press("Enter");
+    await setRangeWithKeyboard(cursor, "Home", "ArrowRight", 43);
+    await place.press("Enter");
+    await expect(target).toHaveValue("t");
 
-    await lesson.getByRole("button", { name: "P", exact: true }).press("Enter");
-    await lesson.getByRole("button", { name: "Place on the small first bump" }).press("Enter");
-    await lesson.getByRole("button", { name: "QRS", exact: true }).press("Enter");
-    await lesson.getByRole("button", { name: "Place on the tall sharp spike" }).press("Enter");
-    await lesson.getByRole("button", { name: "T", exact: true }).press("Enter");
-    await lesson.getByRole("button", { name: "Place on the rounded last bump" }).press("Enter");
+    await setRangeWithKeyboard(cursor, "End", "ArrowLeft", 29);
+    await place.press("Enter");
+    await page.getByRole("button", { name: "Check placement" }).press("Enter");
 
-    await expect(lesson.getByText("That’s the whole vocabulary of a heartbeat", { exact: false })).toBeVisible();
-    await expect(lesson.getByRole("button", { name: "Next ›" })).toBeEnabled();
+    await expect(page.getByText("That’s it", { exact: true })).toBeVisible();
     await expect.poll(() => guidedBodies.length).toBe(1);
     expect(guidedBodies[0]).toMatchObject({
       moduleId: "foundations",
       sceneId: "S1",
-      interactionId: "s1-wave-label-placement",
-      concept: "waveform_components",
+      interactionId: "m01-s1-landmarks",
+      concept: "foundations_waveform_landmarks",
       subskills: ["localize"],
-      correct: true,
       evidenceLevel: "guided",
+      caseId: null,
       caseProvenance: "authored_simulation",
       caseEligible: false,
     });
-
-    const tutorInput = lesson.getByPlaceholder("Ask about any concept…", { exact: false });
-    await tutorInput.focus();
-    await tutorInput.fill("What causes a wide QRS?");
-    await tutorInput.press("Enter");
-    const returnButton = lesson.getByRole("button", { name: "↩ Return to One beat, one wave" });
-    await expect(returnButton).toBeVisible();
-    await returnButton.focus();
-    await returnButton.press("Enter");
-    await expect(lesson.getByText("Your scene and unfinished interaction are unchanged", { exact: false })).toBeVisible();
-    await expect(lesson.getByRole("button", { name: "Next ›" })).toBeEnabled();
-    await expect(lesson.locator("#sceneRoot")).toBeFocused();
+    await expectNoAxeViolations(page);
     expect(errors).toEqual([]);
   });
 
-  test("missing PTB teaching bundle fails closed without mounting a simulated tracing", async ({ page }) => {
-    await page.route("**/foundations/data/cases.json", async (route) => {
-      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
-    });
-
-    await page.goto("/learn/foundations");
-    const lesson = page.frameLocator('iframe[title="Foundations of the ECG Read"]');
-
-    await expect(lesson.getByRole("heading", { name: "Foundations is temporarily unavailable" })).toBeVisible();
-    await expect(lesson.getByText("No simulated ECG will replace missing real data.", { exact: false })).toBeVisible();
-    await expect(lesson.locator(".real-case-label, .model-disclosure, .ecg-svg")).toHaveCount(0);
-    await expect(lesson.getByRole("button", { name: "Next ›" })).toBeDisabled();
-    await expect(lesson.getByRole("button", { name: "‹ Back" })).toBeDisabled();
-  });
-
-  test("remote tutor output is rendered as text and cannot inject lesson DOM", async ({ page }) => {
-    await page.route("**/api/backend/tutor/foundations", async (route) => {
-      await route.fulfill({
+  test("an authored action beside a contrast ECG never inherits that patient's provenance", async ({ page }) => {
+    const guidedBodies: Array<Record<string, unknown>> = [];
+    progressItems = [attemptedScene("S5", 0, {})];
+    await page.route("**/api/backend/learning-events/guided", (route) => {
+      guidedBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+      return route.fulfill({
         status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          tutorMessage:
-            '<img src=x onerror="window.__remoteInjected=1"><form id="remote-form"><input></form><style>body{display:none}</style>Line one\nLine two',
-        }),
+        json: {
+          eventId: 8,
+          requestedEvidenceLevel: "guided",
+          effectiveEvidenceLevel: "guided",
+          receipts: [],
+        },
       });
     });
 
-    await page.goto("/learn/foundations");
-    const lesson = page.frameLocator('iframe[title="Foundations of the ECG Read"]');
-    const input = lesson.getByPlaceholder("Ask about any concept…", { exact: false });
-    await input.fill("What is an interval?");
-    await input.press("Enter");
+    await page.goto("/learn/foundations?scene=S5");
+    const cursor = page.getByRole("slider", { name: "Keyboard cursor" });
+    const place = page.getByRole("button", { name: "Place target" });
+    await setRangeWithKeyboard(cursor, "Home", "ArrowRight", 25);
+    await place.press("Enter");
+    await setRangeWithKeyboard(cursor, "Home", "ArrowRight", 44);
+    await place.press("Enter");
+    await page.getByRole("button", { name: "Check placement" }).press("Enter");
 
-    const body = lesson.locator(".msg.ai .body").last();
-    await expect(body).toContainText("<img src=x");
-    await expect(body).toContainText("Line one");
-    await expect(body).toContainText("Line two");
-    await expect(body.locator("img, form, style, iframe, a")).toHaveCount(0);
-    await expect(lesson.locator("body")).toBeVisible();
-    expect(
-      await lesson.locator("body").evaluate(
-        () => (window as typeof window & { __remoteInjected?: number }).__remoteInjected,
-      ),
-    ).toBeUndefined();
+    await expect.poll(() => guidedBodies.length).toBe(1);
+    expect(guidedBodies[0]).toMatchObject({
+      moduleId: "foundations",
+      sceneId: "S5",
+      interactionId: "m01-s5-p-qrs",
+      caseId: null,
+      guidedContext: null,
+      caseProvenance: "authored_simulation",
+      caseEligible: false,
+      evidenceLevel: "guided",
+    });
   });
 
-  test("every former drag-only engine exposes a visible keyboard or tap path", async ({ page }) => {
+  test("the integrated transfer keeps Luna silent and exposes the claim ceiling before an attempt", async ({ page }) => {
+    await page.goto("/learn/foundations?scene=S12");
+
+    await expect(page.getByRole("heading", { name: "Two complete ECG reads" })).toBeVisible();
+    await expect(page.getByText(/brings every Foundations skill together/)).toBeVisible();
+    await expect(page.getByLabel("Completion and transfer")).toHaveCount(0);
+    await expect(page.getByRole("progressbar", { name: "Lesson 13 of 13" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Ask Luna" }).click();
+    const drawer = page.getByRole("dialog", { name: "Foundations tutor" });
+    await expect(drawer).toBeVisible();
+    const chat = drawer.getByLabel("Conversational tutor chat");
+    await expect(chat.getByText("Conversational tutor is silent.")).toBeVisible();
+    await expect(chat.locator(".tutor-chat-header button")).toHaveAttribute("aria-expanded", "false");
+    await expect(chat.getByRole("textbox")).toHaveCount(0);
+
+    await drawer.getByRole("button", { name: "Close tutor" }).click();
+    await expect(page.getByText(/guided evidence|evidence ceiling|mastery receipt/i)).toHaveCount(0);
+  });
+
+  test("the 13-scene map and tutor drawer trap focus and restore it on a phone", async ({ page }) => {
     const errors = collectConsoleErrors(page);
+    await page.setViewportSize({ width: 320, height: 780 });
+    await page.goto("/learn/foundations?scene=S0");
 
-    await openStandaloneScene(page, 2);
-    await expect(page.getByRole("slider", { name: "Start marker position" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Start right" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    const sceneMapTrigger = page.getByRole("button", { name: "Contents" });
+    await sceneMapTrigger.focus();
+    await sceneMapTrigger.press("Enter");
+    const sceneMap = page.getByRole("dialog", { name: "Foundations of ECG Interpretation" });
+    await expect(sceneMap).toBeVisible();
+    await expect(sceneMap.getByRole("navigation", { name: "Module scenes" }).getByRole("button")).toHaveCount(13);
+    await expect(sceneMap.getByRole("button", { name: "Close" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(sceneMapTrigger).toBeFocused();
 
-    await openStandaloneScene(page, 3);
-    const stripOneReadable = page.getByRole("button", { name: "Strip 1: readable" });
-    await expect(stripOneReadable).toBeVisible();
-    await expect(page.getByRole("button", { name: "Strip 2: too noisy" })).toBeVisible();
-    await stripOneReadable.focus();
-    await expect.poll(() => stripOneReadable.evaluate((node) => getComputedStyle(node).outlineStyle)).not.toBe("none");
-
-    await openStandaloneScene(page, 6);
-    await expect(page.getByRole("slider", { name: "PR start handle" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "End right" })).toBeVisible();
-
-    await openStandaloneScene(page, 7);
-    await page.getByRole("button", { name: "A · flat TP stretch between beats" }).press("Enter");
-    await expect(page.getByRole("slider", { name: "ST level in millivolts" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Set at baseline" })).toBeVisible();
-
-    await openStandaloneScene(page, 8);
-    await expect(page.getByRole("slider", { name: "Precordial lead from V1 through V6" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Next lead" })).toBeVisible();
-
-    await openStandaloneScene(page, 9);
-    await expect(page.getByRole("slider", { name: "QRS axis in degrees" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Go to left axis" })).toBeVisible();
-    await expect(page.getByRole("slider", { name: "QRS axis vector" })).toBeVisible();
-
+    const tutorTrigger = page.getByRole("button", { name: "Ask Luna" });
+    await tutorTrigger.press("Enter");
+    const tutorDrawer = page.getByRole("dialog", { name: "Foundations tutor" });
+    await expect(tutorDrawer.getByRole("button", { name: "Close tutor" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(tutorTrigger).toBeFocused();
     expect(errors).toEqual([]);
   });
 });

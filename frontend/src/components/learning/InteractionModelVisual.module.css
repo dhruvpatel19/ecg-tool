@@ -1,0 +1,223 @@
+.visual,
+.concealed {
+  min-height: 330px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--module-accent, #2458d6) 20%, #cad8d2);
+  border-radius: 18px;
+  background: linear-gradient(145deg, #fbfefd, #edf5f2);
+}
+
+.visual {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.visual header,
+.visual footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.visual header {
+  border-bottom: 1px solid rgba(58, 89, 78, 0.1);
+  color: #315148;
+  font-size: 0.7rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.visual header small,
+.visual footer span {
+  color: #677a73;
+  font-size: 0.66rem;
+  font-weight: 720;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.visual footer {
+  border-top: 1px solid rgba(58, 89, 78, 0.1);
+  color: #273d36;
+  font-size: 0.76rem;
+}
+
+.visual svg {
+  width: 100%;
+  min-height: 248px;
+  color: #627a72;
+}
+
+.visual svg text {
+  fill: currentColor;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.heartOutline,
+.bundleHeart {
+  fill: rgba(255, 255, 255, 0.75);
+  stroke: #79958b;
+  stroke-width: 2.5;
+}
+
+.conductionPath,
+.bundleTree {
+  fill: none;
+  stroke: #678d80;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 4;
+}
+
+.bundleTree circle {
+  fill: #fff;
+  stroke: #678d80;
+  stroke-width: 3;
+}
+
+.structure {
+  fill: rgba(80, 122, 108, 0.08);
+  stroke: rgba(80, 122, 108, 0.36);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 4;
+}
+
+.active {
+  fill: #f4b754;
+  stroke: #b96b25;
+  filter: drop-shadow(0 0 9px rgba(218, 143, 39, 0.55));
+}
+
+.trace,
+.repolarizationTrace {
+  fill: none;
+  stroke: #627a72;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.4;
+}
+
+.traceFocus,
+.segmentQrs,
+.segmentSt,
+.segmentT {
+  fill: none;
+  stroke: var(--module-accent, #2458d6);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 5;
+}
+
+.diagramTitle {
+  fill: #203d34 !important;
+  font-size: 15px !important;
+  font-weight: 900 !important;
+}
+
+.diagramCopy {
+  fill: #667a72 !important;
+  font-size: 11px !important;
+}
+
+.axis {
+  fill: none;
+  stroke: #b6c8c1;
+  stroke-width: 1.5;
+}
+
+.leadAxis,
+.vectorArrow,
+.projectionGuide {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.leadAxis { stroke: #566f66; stroke-width: 2.5; }
+.leadAxis path:nth-child(2),
+.vectorArrow path:nth-child(2) { fill: currentColor; }
+.vectorArrow { color: var(--module-accent, #2458d6); stroke: currentColor; stroke-width: 6; }
+.projectionGuide { stroke: #d07930; stroke-dasharray: 6 5; stroke-width: 2.5; }
+.resultText { fill: var(--module-accent, #2458d6) !important; font-size: 21px !important; font-weight: 900 !important; }
+
+.ladderLanes { fill: none; stroke: #a8bcb5; stroke-width: 2; }
+.impulse { fill: #3d8a73; }
+.conductedPath { fill: none; stroke: #2c765f; stroke-width: 4; stroke-linecap: round; }
+.ventricularEvent { fill: var(--module-accent, #2458d6); }
+.blockedPath { fill: none; stroke: #c57b3d; stroke-width: 4; stroke-dasharray: 5 4; }
+.blockMark { stroke: #a24c24; stroke-width: 5; }
+
+.activeTerritory,
+.lateTerritory,
+.lateForce { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-width: 8; }
+.activeTerritory { stroke: #3c9477; }
+.lateTerritory { stroke: #d4873c; stroke-dasharray: 7 6; }
+.lateForce { stroke: var(--module-accent, #2458d6); stroke-width: 4; }
+
+.reentryCircuit,
+.reentryBridge,
+.returnArrow { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.reentryCircuit { color: #3c826d; stroke: currentColor; stroke-width: 8; }
+.reentryCircuit path:nth-child(2) { fill: currentColor; stroke: none; }
+.reentryBridge { stroke: #aac0b8; stroke-width: 3; stroke-dasharray: 8 7; }
+.reentryPulse { fill: #f1a348; stroke: #fff; stroke-width: 5; filter: drop-shadow(0 0 8px rgba(218, 128, 42, 0.65)); }
+.returnArrow { stroke: var(--module-accent, #2458d6); stroke-width: 3; }
+
+.segmentQrs { stroke: #345f91; }
+.segmentSt { stroke: #bd6b35; }
+.segmentT { stroke: #7b5fa8; }
+.qtMeasure { fill: none; stroke: #2e7461; stroke-width: 2.5; }
+.stateCard rect { fill: color-mix(in srgb, var(--module-accent, #2458d6) 60%, #fff); }
+.stateCard text:first-child { fill: #203d34; font-size: 15px; font-weight: 900; }
+
+.concealed {
+  min-height: 330px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 9px;
+  padding: 30px;
+  background: repeating-linear-gradient(-45deg, #f5faf8, #f5faf8 12px, #eef6f3 12px, #eef6f3 24px);
+  color: #2b4940;
+  text-align: center;
+}
+
+.concealed span {
+  color: var(--module-accent, #2458d6);
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.concealed strong { font-size: clamp(1.05rem, 2vw, 1.35rem); }
+.concealed small { max-width: 340px; color: #63776f; line-height: 1.5; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .active,
+  .reentryPulse { animation: pulse 1.8s ease-in-out infinite; }
+  .vectorArrow,
+  .traceFocus,
+  .segmentQrs,
+  .segmentSt,
+  .segmentT { transition: 240ms ease; }
+}
+
+@keyframes pulse {
+  50% { filter: drop-shadow(0 0 14px rgba(218, 143, 39, 0.8)); }
+}
+
+@media (max-width: 680px) {
+  .visual,
+  .concealed { min-height: 278px; }
+  .visual svg { min-height: 215px; }
+  .visual header,
+  .visual footer { align-items: flex-start; flex-direction: column; gap: 3px; }
+}

@@ -192,8 +192,8 @@
 }
 
 @keyframes dashboard-panel-in {
-  from { opacity: .72; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { transform: translateY(4px); }
+  to { transform: translateY(0); }
 }
 
 .lunaHero {

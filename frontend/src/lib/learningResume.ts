@@ -52,7 +52,10 @@ export function learningResumeHref(session: LearningResumeSession | unknown): st
   const module = MODULES.find((item) => item.id === destination.moduleId && item.status === "ready");
   if (!module) return null;
   if (module.id === "foundations") {
-    return destination.sceneId === null ? "/learn/foundations" : null;
+    const sceneId = destination.sceneId;
+    if (sceneId === null) return "/learn/foundations";
+    if (typeof sceneId !== "string" || !/^S(?:[0-9]|1[0-2])$/.test(sceneId)) return null;
+    return `/learn/foundations?scene=${encodeURIComponent(sceneId)}`;
   }
   if (typeof destination.sceneId !== "string") return null;
   const expectedModuleNumber = module.order + 1;

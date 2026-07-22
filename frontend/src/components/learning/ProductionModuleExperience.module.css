@@ -86,7 +86,15 @@
   min-width: 0;
 }
 
+/* The authored lesson frame establishes the model across the full workspace.
+   The tracing and response rail then resume the familiar ECG-dominant split. */
+.ecgWorkspace > .sceneFrame {
+  grid-column: 1 / -1;
+}
+
 .waveformPane {
+  position: sticky;
+  top: 64px;
   height: auto;
   min-height: 0;
   display: grid;
@@ -111,12 +119,27 @@
 }
 
 .sceneHeader {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(290px, auto);
   gap: 12px;
-  align-items: start;
-  padding: 12px 14px 10px;
+  align-items: center;
+  padding: 14px 16px 13px 18px;
   border-bottom: 1px solid var(--guided-border);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--module-accent) 9%, #fff), transparent 46%),
+    #fff;
+}
+
+.sceneHeader::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 0;
+  width: 4px;
+  border-radius: 0 999px 999px 0;
+  background: var(--module-accent);
 }
 
 .sceneHeader p,
@@ -145,7 +168,79 @@
   line-height: 1.42;
 }
 
+.sceneHeaderAside {
+  min-width: 0;
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+}
+
+.lessonRunway {
+  min-width: min(100%, 360px);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lessonRunway li {
+  position: relative;
+  min-width: 0;
+  min-height: 41px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--guided-border) 88%, transparent);
+  border-radius: 9px;
+  color: #74817c;
+  background: rgba(255, 255, 255, 0.76);
+  font-size: 0.67rem;
+  font-weight: 790;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.lessonRunway li[data-state="complete"] {
+  color: var(--module-accent);
+  border-color: color-mix(in srgb, var(--module-accent) 18%, var(--line));
+  background: color-mix(in srgb, var(--module-accent) 5%, #fff);
+}
+
+.lessonRunway li[data-state="current"] {
+  color: #fff;
+  border-color: var(--module-accent);
+  background: var(--module-accent);
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--module-accent) 20%, transparent);
+}
+
+.lessonRunway svg {
+  flex: 0 0 auto;
+}
+
+.sceneMasthead .sceneHeader {
+  border-bottom: 0;
+}
+
 .skipButton {
+  white-space: nowrap;
+}
+
+.sceneCompleteBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid #b9ddce;
+  border-radius: 999px;
+  color: #17624b;
+  background: #edf9f4;
+  font-size: 0.76rem;
+  font-weight: 800;
   white-space: nowrap;
 }
 
@@ -155,6 +250,28 @@
   gap: 9px 12px;
   align-items: start;
   padding: 10px 14px 12px;
+}
+
+.prerequisiteNote {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 10px;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.prerequisiteNote svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #b45309;
+}
+
+.prerequisiteNote span {
+  display: grid;
+  gap: 2px;
 }
 
 .setupLead {
@@ -312,6 +429,78 @@
   display: grid;
   gap: 10px;
   padding: 10px;
+}
+
+.teachingRailPanel {
+  border-color: color-mix(in srgb, var(--module-accent) 22%, var(--guided-border));
+  background: linear-gradient(165deg, color-mix(in srgb, var(--module-accent) 3%, #fff), #fff 52%);
+}
+
+.responseRail:has(.railTutor[data-drawer-state="open"]) > .responsePanel {
+  display: none;
+}
+
+.tutorDock {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--module-accent) 20%, var(--line));
+  border-radius: 11px;
+  color: #33473f;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--module-accent) 7%, #fff), #fff);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+}
+
+.tutorDock:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--module-accent) 42%, var(--line));
+  box-shadow: 0 9px 22px color-mix(in srgb, var(--module-accent) 10%, transparent);
+}
+
+.tutorDock:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--module-accent) 22%, transparent);
+  outline-offset: 2px;
+}
+
+.tutorDock > span:nth-child(2) {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.tutorDock strong {
+  font-size: 0.78rem;
+}
+
+.tutorDock small {
+  color: var(--muted);
+  font-size: 0.69rem;
+  line-height: 1.35;
+}
+
+.tutorDockIcon {
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #fff;
+  background: var(--module-accent);
+}
+
+.railTutor {
+  width: 100%;
+}
+
+.railTutor :global(.learning-tutor-drawer .tutor-chat),
+.shell .railTutor :global(.learning-tutor-drawer .tutor-chat) {
+  min-height: min(610px, calc(100dvh - 275px));
 }
 
 .checkpoint {
@@ -628,6 +817,115 @@
   z-index: 120;
 }
 
+.referenceLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 125;
+}
+
+.referenceCard {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(620px, calc(100vw - 28px));
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: -22px 0 70px rgba(8, 35, 26, 0.24);
+}
+
+.referenceCard > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 17px 18px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.referenceCard header p,
+.referenceCard header h2 {
+  margin: 0;
+}
+
+.referenceCard header h2 {
+  margin: 3px 0 6px;
+  font-size: 1.22rem;
+}
+
+.referenceCard header div > p:last-child {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.referenceRows {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.referenceRows article {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.referenceRows article > div {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.referenceRows article span {
+  min-width: 30px;
+  padding: 2px 5px;
+  border-radius: 5px;
+  color: var(--module-accent);
+  background: color-mix(in srgb, var(--module-accent) 9%, #fff);
+  font-size: 0.69rem;
+  font-weight: 850;
+  text-align: center;
+}
+
+.referenceRows article strong {
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.referenceRows article p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.referenceLocked {
+  opacity: 0.68;
+  background: #f5f7f6;
+}
+
+.referenceUnlocked {
+  border-color: color-mix(in srgb, var(--module-accent) 24%, var(--line)) !important;
+  background: color-mix(in srgb, var(--module-accent) 3%, #fff);
+}
+
+.referenceCard > footer {
+  padding: 11px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  background: #f7f9f8;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
 .sceneMapBackdrop {
   position: absolute;
   inset: 0;
@@ -792,18 +1090,33 @@
   }
 
   .waveformPane {
+    position: static;
+    top: auto;
     height: auto;
     overflow: visible;
     scrollbar-gutter: auto;
   }
 
   .responseRail {
+    position: static;
+    top: auto;
     height: auto;
+    max-height: none;
     overflow: visible;
+    scrollbar-gutter: auto;
   }
 
   .sceneHeader {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sceneHeaderAside {
+    width: 100%;
+    justify-items: start;
+  }
+
+  .lessonRunway {
+    width: 100%;
   }
 
   .skipButton {
@@ -884,12 +1197,30 @@
     order: 3;
   }
 
+  /* A teaching studio is the conceptual setup for the ECG task, so it stays
+     ahead of the tracing on small screens. Practice-only case scenes retain
+     the ECG-first order above. */
+  .ecgWorkspace .teachingFrame {
+    order: 0;
+  }
+
   .sceneNav {
     position: static;
   }
 
   .disclosure details {
     margin-left: 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .referenceRows article {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .referenceCard > header {
+    padding: 13px 12px 10px;
   }
 }
 
@@ -961,5 +1292,1258 @@
   .shell *::before,
   .shell *::after {
     scroll-behavior: auto !important;
+  }
+}
+
+/* Foundations lesson canvas -------------------------------------------------
+   The module is intentionally quieter than the surrounding application. One
+   visual idea and one active exercise should dominate each viewport. */
+
+.foundationsHost {
+  --foundations-canvas: #f6f4ee;
+  --foundations-paper: #fffefa;
+  --foundations-ink: #17231f;
+  --foundations-muted: #63706b;
+  --foundations-coral: #d5685b;
+  --foundations-line: rgba(32, 56, 48, 0.12);
+  width: 100%;
+  min-height: calc(100dvh - 28px);
+  margin: 0;
+  padding: 10px 14px 28px;
+  color: var(--foundations-ink);
+  background:
+    radial-gradient(circle at 12% 2%, rgba(36, 88, 214, 0.065), transparent 29rem),
+    radial-gradient(circle at 88% 12%, rgba(213, 104, 91, 0.055), transparent 25rem),
+    var(--foundations-canvas);
+}
+
+.foundationsHost .shell {
+  width: min(100%, 1360px);
+  margin-inline: auto;
+  gap: 18px;
+}
+
+.foundationsHost .sessionBar {
+  top: 10px;
+  min-height: 56px;
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid rgba(34, 55, 48, 0.09);
+  border-radius: 16px;
+  background: rgba(255, 254, 250, 0.9);
+  box-shadow: 0 14px 44px rgba(22, 36, 31, 0.075);
+  backdrop-filter: blur(18px) saturate(125%);
+}
+
+.foundationsHost .sessionBar :global(.button) {
+  min-height: 40px;
+  padding-inline: 11px;
+  border-color: transparent;
+  border-radius: 11px;
+  color: #40504a;
+  background: transparent;
+  font-weight: 720;
+}
+
+.foundationsHost .sessionBar :global(.button:hover) {
+  border-color: rgba(36, 88, 214, 0.11);
+  color: #173f8e;
+  background: rgba(36, 88, 214, 0.065);
+}
+
+.foundationsHost .curriculumLink {
+  margin-right: 5px;
+}
+
+.foundationsHost .sessionIdentity {
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 7px;
+  padding-right: 6px;
+}
+
+.foundationsHost .sessionIdentity strong {
+  color: var(--foundations-ink);
+  font-size: 0.86rem;
+  letter-spacing: -0.01em;
+}
+
+.foundationsHost .sessionIdentity small {
+  color: var(--foundations-muted);
+  font-size: 0.75rem;
+}
+
+.foundationsHost .sessionIdentity small::before {
+  content: "·";
+  margin-right: 7px;
+  color: #a3ada9;
+}
+
+.foundationsHost .sessionProgress {
+  flex: 1 1 220px;
+  min-width: 120px;
+  max-width: 360px;
+  margin-right: auto;
+}
+
+.foundationsHost .sessionProgress progress {
+  width: 100%;
+  height: 4px;
+  background: #e7e6df;
+}
+
+.foundationsHost .sessionProgress progress::-webkit-progress-bar {
+  background: #e7e6df;
+}
+
+.foundationsHost .sessionProgress progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2458d6, #4b75de);
+}
+
+.foundationsHost .sessionProgress progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2458d6, #4b75de);
+}
+
+.foundationsHost .workspace {
+  width: min(100%, 1260px);
+  margin-inline: auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+}
+
+.foundationsHost .ecgWorkspace {
+  grid-template-columns: minmax(0, 2.08fr) minmax(340px, 0.92fr);
+  align-items: start;
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(360px, 0.86fr) minmax(520px, 1.14fr);
+  gap: 44px;
+  align-items: start;
+  padding: 28px 16px 10px;
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame .sceneHeader,
+.foundationsHost .ecgWorkspace > .sceneFrame .lessonBrief {
+  width: 100%;
+  max-width: none;
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame .sceneHeader {
+  display: block;
+  margin: 0;
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame .sceneHeader h1 {
+  max-width: 22ch;
+  font-size: clamp(2.5rem, 4.4vw, 3.8rem);
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame .lessonBrief {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin: 0;
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame .setupLead {
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame .mechanism {
+  grid-row: auto;
+  padding: 12px 14px;
+}
+
+.foundationsHost .ecgWorkspace > .sceneFrame .transition {
+  display: none;
+}
+
+.foundationsHost .ecgWorkspace > .waveformPane {
+  grid-column: 1;
+}
+
+.foundationsHost .ecgWorkspace > .responseRail {
+  grid-column: 2;
+}
+
+.foundationsHost .waveformPane {
+  display: grid;
+  gap: 18px;
+}
+
+.foundationsHost .sceneFrame,
+.foundationsHost .mainTask {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.foundationsHost .sceneFrame {
+  overflow: visible;
+  padding: 42px 52px 8px;
+}
+
+.foundationsHost .openingFrame {
+  display: grid;
+  grid-template-columns: minmax(330px, 0.78fr) minmax(580px, 1.22fr);
+  gap: 42px;
+  align-items: center;
+  padding: 38px 52px 18px;
+}
+
+.foundationsHost .sceneHeader {
+  width: min(100%, 980px);
+  margin-inline: auto;
+  padding: 0;
+  border: 0;
+  align-items: center;
+}
+
+.foundationsHost .sceneHeader :global(.eyebrow) {
+  color: #2458d6;
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.13em;
+}
+
+.foundationsHost .sceneHeader h1 {
+  max-width: 19ch;
+  margin-top: 9px;
+  color: var(--foundations-ink);
+  font-size: clamp(2.55rem, 5vw, 4.35rem);
+  font-weight: 760;
+  line-height: 0.99;
+  letter-spacing: -0.057em;
+  text-wrap: balance;
+}
+
+.foundationsHost .sceneHeader div > p:last-child {
+  max-width: 64ch;
+  margin-top: 16px;
+  color: var(--foundations-muted);
+  font-size: clamp(1rem, 1.55vw, 1.16rem);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.foundationsHost .openingFrame .sceneHeader {
+  display: block;
+  width: auto;
+  margin: 0;
+  text-align: left;
+}
+
+.foundationsHost .openingFrame .sceneHeader h1,
+.foundationsHost .openingFrame .sceneHeader div > p:last-child {
+  margin-inline: 0;
+}
+
+.foundationsHost .openingFrame .sceneHeader h1 {
+  max-width: 11ch;
+  font-size: clamp(3rem, 4.35vw, 4.05rem);
+}
+
+.foundationsHost .openingFrame .sceneHeader div > p:last-child {
+  max-width: 42ch;
+}
+
+.foundationsHost .sceneCompleteBadge {
+  align-self: start;
+  margin-top: 4px;
+  border-color: rgba(23, 98, 75, 0.16);
+  color: #17624b;
+  background: rgba(237, 249, 244, 0.8);
+}
+
+.routePreview {
+  width: min(100%, 1120px);
+  display: grid;
+  gap: 13px;
+  margin: 34px auto 0;
+}
+
+.foundationsHost .openingFrame .routePreview {
+  gap: 10px;
+  margin: 0;
+}
+
+.routeSignal {
+  position: relative;
+  height: 184px;
+  overflow: hidden;
+  border: 1px solid rgba(46, 62, 56, 0.09);
+  border-radius: 25px;
+  color: rgba(213, 104, 91, 0.12);
+  background: linear-gradient(135deg, #fffdfa, #fff9f4);
+  box-shadow: 0 24px 65px rgba(49, 42, 34, 0.085);
+}
+
+.routeSignal svg {
+  width: 100%;
+  height: 100%;
+}
+
+.routeGrid {
+  opacity: 0.7;
+}
+
+.routeTrace,
+.routeTraceShadow {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.routeTraceShadow {
+  stroke: rgba(93, 38, 31, 0.08);
+  stroke-width: 9;
+}
+
+.routeTrace {
+  stroke: var(--foundations-coral);
+  stroke-width: 3.7;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: foundations-trace-draw 1.35s cubic-bezier(0.25, 0.72, 0.25, 1) 0.12s forwards;
+}
+
+.routeStatement {
+  position: absolute;
+  left: 22px;
+  bottom: 18px;
+  width: min(430px, calc(100% - 44px));
+  min-height: 68px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 11px 14px;
+  border: 1px solid rgba(33, 48, 42, 0.08);
+  border-radius: 15px;
+  color: var(--foundations-ink);
+  background: rgba(255, 254, 250, 0.88);
+  box-shadow: 0 12px 35px rgba(41, 37, 31, 0.09);
+  backdrop-filter: blur(12px);
+}
+
+.routeStatement > span {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: #fff;
+  background: #2458d6;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.routeStatement p {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  color: #56625e;
+  font-size: 0.82rem;
+  line-height: 1.38;
+}
+
+.routeStatement strong {
+  color: var(--foundations-ink);
+  font-size: 0.94rem;
+}
+
+.routeSteps {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routeSteps::before {
+  content: "";
+  position: absolute;
+  left: 6.5%;
+  right: 6.5%;
+  top: 19px;
+  height: 1px;
+  background: #d8d9d4;
+}
+
+.routeSteps li {
+  position: relative;
+  min-width: 0;
+}
+
+.routeSteps button {
+  position: relative;
+  width: 100%;
+  min-height: 74px;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 7px;
+  padding: 0 4px 8px;
+  border: 0;
+  color: #71807a;
+  background: transparent;
+  cursor: pointer;
+}
+
+.routeSteps button > span {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d3d8d5;
+  border-radius: 999px;
+  color: #65736e;
+  background: var(--foundations-canvas);
+  font-size: 0.76rem;
+  font-weight: 820;
+  transition: transform 150ms ease, color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.routeSteps button > strong {
+  font-size: 0.74rem;
+  font-weight: 760;
+  letter-spacing: -0.01em;
+  text-align: center;
+}
+
+.routeSteps button:hover > span,
+.routeSteps button[aria-pressed="true"] > span {
+  transform: translateY(-2px);
+  border-color: #2458d6;
+  color: #fff;
+  background: #2458d6;
+}
+
+.routeSteps button[aria-pressed="true"] {
+  color: #173f8e;
+}
+
+.routePrompt {
+  margin: -1px 0 0;
+  color: #74807b;
+  font-size: 0.76rem;
+  text-align: center;
+}
+
+.routeActions {
+  min-height: 46px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 1px;
+}
+
+.routeActions p {
+  margin: 0 auto 0 0;
+  color: #6c7873;
+  font-size: 0.78rem;
+}
+
+.routeActions :global(.button) {
+  min-height: 43px;
+  border-radius: 11px;
+}
+
+.routeActions :global(.button.primary) {
+  background: #2458d6;
+  box-shadow: 0 9px 22px rgba(36, 88, 214, 0.17);
+}
+
+.foundationsHost .teachingFrame {
+  width: min(100%, 1220px);
+  display: block;
+  margin-inline: auto;
+  padding-bottom: 12px;
+}
+
+.foundationsHost .teachingFrame .sceneHeader {
+  width: min(100%, 1120px);
+}
+
+.foundationsHost .practiceFrame {
+  padding-top: 24px;
+}
+
+.foundationsHost .practiceFrame .sceneHeader h1 {
+  max-width: 24ch;
+  font-size: clamp(2.2rem, 3.5vw, 3.15rem);
+  line-height: 1.02;
+}
+
+.foundationsHost .practiceFrame .sceneHeader div > p:last-child {
+  max-width: 70ch;
+  margin-top: 10px;
+  font-size: 0.98rem;
+}
+
+.foundationsHost .practiceFrame .sceneCompleteBadge {
+  margin-top: 0;
+}
+
+.foundationsHost .practiceFrame + .mainTask {
+  padding-top: 0;
+}
+
+.foundationsHost .lessonBrief {
+  width: min(100%, 980px);
+  margin: 28px auto 0;
+  grid-template-columns: minmax(0, 1.05fr) minmax(290px, 0.95fr);
+  gap: 18px 40px;
+  padding: 0;
+}
+
+.foundationsHost .practiceBrief {
+  width: min(100%, 1040px);
+  display: grid;
+  grid-template-columns: minmax(280px, 0.78fr) minmax(420px, 1.22fr);
+  gap: 14px 30px;
+  margin: 24px auto 2px;
+  padding: 18px 20px;
+  border: 1px solid rgba(35, 57, 49, 0.1);
+  border-radius: 18px;
+  background: rgba(255, 254, 250, 0.72);
+}
+
+.foundationsHost .practiceBrief > .prerequisiteNote {
+  grid-column: 1 / -1;
+  margin: 0 0 2px;
+}
+
+.foundationsHost .practiceBriefLead {
+  align-self: center;
+}
+
+.foundationsHost .practiceBriefLead :global(.eyebrow) {
+  color: #2458d6;
+}
+
+.foundationsHost .practiceBriefLead h2 {
+  margin: 5px 0 8px;
+  color: var(--foundations-ink);
+  font-size: 1.45rem;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+}
+
+.foundationsHost .practiceBriefLead > p:last-child {
+  margin: 0;
+  color: #60706a;
+  font-size: 0.82rem;
+  line-height: 1.52;
+}
+
+.foundationsHost .practiceBrief ol {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.foundationsHost .practiceBrief li {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  color: #4f5f59;
+  font-size: 0.79rem;
+  line-height: 1.4;
+}
+
+.foundationsHost .practiceBrief li > span {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #2458d6;
+  background: rgba(36, 88, 214, 0.085);
+  font-size: 0.68rem;
+  font-weight: 820;
+}
+
+.foundationsHost .practiceBrief > aside {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding-top: 12px;
+  border-top: 1px solid var(--foundations-line);
+  color: #67736f;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.foundationsHost .practiceBrief > aside svg {
+  flex: 0 0 auto;
+  color: var(--foundations-coral);
+}
+
+.foundationsHost .practiceBrief > aside span {
+  display: grid;
+  gap: 2px;
+}
+
+.foundationsHost .practiceBrief > aside strong {
+  color: #3c4e47;
+}
+
+.foundationsHost .setupLead {
+  color: #44534d;
+  font-size: 1.02rem;
+  line-height: 1.65;
+}
+
+.foundationsHost .mechanism {
+  grid-row: span 2;
+  gap: 9px;
+  padding: 16px 18px;
+  border: 1px solid rgba(36, 88, 214, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 254, 250, 0.65);
+  box-shadow: none;
+}
+
+.foundationsHost .mechanism > :global(.eyebrow) {
+  color: #2458d6;
+}
+
+.foundationsHost .mechanism > div {
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.foundationsHost .mechanism i {
+  width: 27px;
+  height: 27px;
+  border-radius: 9px;
+  color: #2458d6;
+  background: rgba(36, 88, 214, 0.09);
+}
+
+.foundationsHost .contextDetails {
+  align-self: start;
+  color: var(--foundations-muted);
+  font-size: 0.84rem;
+}
+
+.foundationsHost .contextDetails summary {
+  color: #334a42;
+}
+
+.foundationsHost .transition {
+  padding: 12px 0 0;
+  border-top: 1px solid var(--foundations-line);
+  color: #52615b;
+  background: transparent;
+}
+
+.foundationsHost .mainTask {
+  width: min(100%, 1120px);
+  margin-inline: auto;
+  padding: 8px 52px 32px;
+}
+
+.foundationsHost .actionProgress {
+  width: min(100%, 1040px);
+  min-height: 28px;
+  margin: 0 auto 9px;
+  padding-inline: 4px;
+  color: #6d7874;
+  font-size: 0.75rem;
+  font-weight: 760;
+}
+
+.foundationsHost .actionProgress i {
+  width: 30px;
+  height: 3px;
+  border-radius: 999px;
+  background: #d9ddd9;
+}
+
+.foundationsHost .actionProgress i:global(.active) {
+  background: #2458d6;
+}
+
+.foundationsHost .actionProgress i:global(.complete) {
+  background: #4b9b7e;
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction) {
+  overflow: hidden;
+  border: 1px solid rgba(34, 54, 47, 0.105);
+  border-radius: 22px;
+  background: var(--foundations-paper);
+  box-shadow: 0 24px 70px rgba(34, 43, 39, 0.095);
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-head) {
+  gap: 24px;
+  padding: 24px 28px 20px;
+  border-bottom-color: rgba(34, 54, 47, 0.09);
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-head .eyebrow) {
+  color: #2458d6;
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-head h3) {
+  max-width: 30ch;
+  margin-top: 5px;
+  color: var(--foundations-ink);
+  font-size: clamp(1.3rem, 2.2vw, 1.72rem);
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-head p:last-child) {
+  max-width: 70ch;
+  color: #64716c;
+  font-size: 0.88rem;
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-head > span) {
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: #566660;
+  background: #f1f2ee;
+  font-size: 0.72rem;
+  font-weight: 760;
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-body) {
+  gap: 14px;
+  padding: 22px 28px 24px;
+}
+
+.foundationsHost .checkpoint :global(.learning-sequence) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.foundationsHost .checkpoint :global(.learning-sequence li) {
+  min-height: 68px;
+  border-color: rgba(40, 62, 54, 0.11);
+  border-radius: 13px;
+  background: #f8f7f2;
+  transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
+}
+
+.foundationsHost .checkpoint :global(.learning-sequence li:hover) {
+  transform: translateY(-1px);
+  border-color: rgba(36, 88, 214, 0.3);
+  background: #fff;
+}
+
+.foundationsHost .checkpoint :global(.learning-sequence b) {
+  border-radius: 10px;
+  background: #2458d6;
+}
+
+.foundationsHost .checkpoint :global(.learning-sequence button) {
+  border-color: rgba(40, 62, 54, 0.14);
+  border-radius: 10px;
+  background: #fffefa;
+}
+
+.foundationsHost .checkpoint :global(.learning-option-grid) {
+  gap: 10px;
+}
+
+.foundationsHost .checkpoint :global(.learning-option-grid button),
+.foundationsHost .checkpoint :global(.learning-lead-map button) {
+  min-height: 58px;
+  border-color: rgba(40, 62, 54, 0.13);
+  border-radius: 13px;
+  background: #faf9f5;
+}
+
+.foundationsHost .checkpoint :global(.learning-option-grid button.selected),
+.foundationsHost .checkpoint :global(.learning-lead-map button.selected) {
+  border-color: #2458d6;
+  color: #163b87;
+  background: rgba(36, 88, 214, 0.09);
+  box-shadow: inset 0 0 0 1px rgba(36, 88, 214, 0.35);
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-actions) {
+  min-height: 70px;
+  padding: 12px 28px;
+  border-top-color: rgba(34, 54, 47, 0.09);
+  background: #fbfaf6;
+}
+
+.foundationsHost .checkpoint :global(.learning-interaction-actions .button.primary),
+.foundationsHost .continue :global(.button.primary),
+.foundationsHost .sceneNav :global(.button.primary) {
+  min-height: 44px;
+  border-radius: 11px;
+  background: #2458d6;
+  box-shadow: 0 8px 20px rgba(36, 88, 214, 0.17);
+}
+
+.foundationsHost .checkpoint :global(.learning-branch) {
+  border-radius: 13px;
+}
+
+.foundationsHost .continue,
+.foundationsHost .retry {
+  margin-top: 10px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(255, 254, 250, 0.78);
+}
+
+.foundationsHost .sceneNav {
+  position: static;
+  width: 100%;
+  min-height: 64px;
+  margin-top: 22px;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--foundations-line);
+  background: transparent;
+}
+
+.foundationsHost .navStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #28765d;
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.foundationsHost .saveForLater {
+  color: #4f5d57;
+  font-size: 0.78rem;
+}
+
+.foundationsHost .handoff {
+  margin-top: 20px;
+  padding: 22px;
+  border-color: rgba(36, 88, 214, 0.12);
+  border-radius: 18px;
+  background: rgba(255, 254, 250, 0.78);
+}
+
+.foundationsHost .viewerWrap {
+  padding: 12px;
+  border-color: rgba(33, 54, 47, 0.1);
+  border-radius: 20px;
+  background: var(--foundations-paper);
+  box-shadow: 0 20px 58px rgba(31, 44, 38, 0.09);
+}
+
+.foundationsHost .responseRail {
+  position: sticky;
+  top: 84px;
+  width: auto;
+  max-height: calc(100dvh - 104px);
+}
+
+.foundationsHost .responsePanel {
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 22px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.foundationsHost .responseRail .checkpoint :global(.learning-interaction-head) {
+  padding: 19px 20px 16px;
+}
+
+.foundationsHost .responseRail .checkpoint :global(.learning-interaction-body) {
+  padding: 18px 20px;
+}
+
+.foundationsHost .responseRail .checkpoint :global(.learning-interaction-actions) {
+  padding: 12px 20px;
+}
+
+@keyframes foundations-trace-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@media (max-width: 1100px) {
+  .foundationsHost .ecgWorkspace {
+    grid-template-columns: minmax(0, 1fr) 350px;
+  }
+
+  .foundationsHost .ecgWorkspace > .sceneFrame {
+    display: block;
+  }
+
+  .foundationsHost .ecgWorkspace > .sceneFrame .lessonBrief {
+    margin-top: 22px;
+  }
+
+  .foundationsHost .sceneFrame {
+    padding-inline: 30px;
+  }
+
+  .foundationsHost .openingFrame {
+    display: block;
+    padding: 34px 30px 8px;
+  }
+
+  .foundationsHost .openingFrame .sceneHeader {
+    width: min(100%, 900px);
+    margin-inline: auto;
+    text-align: center;
+  }
+
+  .foundationsHost .openingFrame .sceneHeader h1,
+  .foundationsHost .openingFrame .sceneHeader div > p:last-child {
+    margin-inline: auto;
+  }
+
+  .foundationsHost .openingFrame .routePreview {
+    margin-top: 24px;
+  }
+
+  .foundationsHost .mainTask {
+    padding-inline: 30px;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-sequence) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 840px) {
+  .foundationsHost {
+    min-height: 100dvh;
+    padding: 0 0 24px;
+  }
+
+  .foundationsHost .shell {
+    gap: 10px;
+  }
+
+  .foundationsHost .sessionBar {
+    top: 0;
+    min-height: 54px;
+    flex-wrap: nowrap;
+    gap: 2px;
+    padding: 5px 7px 8px;
+    border-width: 0 0 1px;
+    border-radius: 0;
+  }
+
+  .foundationsHost .sessionBar :global(.button) {
+    min-width: 42px;
+    min-height: 42px;
+    padding-inline: 8px;
+  }
+
+  .foundationsHost .sessionIdentity {
+    order: 0;
+    flex: 1 1 auto;
+    padding: 0 4px;
+  }
+
+  .foundationsHost .sessionIdentity strong {
+    font-size: 0.8rem;
+  }
+
+  .foundationsHost .sessionIdentity small {
+    font-size: 0.69rem;
+  }
+
+  .foundationsHost .sessionProgress {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    order: 0;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    margin: 0;
+  }
+
+  .foundationsHost .sessionProgress progress {
+    display: block;
+    height: 3px;
+  }
+
+  .foundationsHost .sessionBar > :global(button.button:not(.learning-tutor-trigger)) {
+    overflow: hidden;
+    gap: 0;
+    font-size: 0;
+  }
+
+  .foundationsHost .sessionBar :global(.learning-tutor-trigger) {
+    overflow: hidden;
+    gap: 0;
+    font-size: 0;
+  }
+
+  .foundationsHost .workspace,
+  .foundationsHost .ecgWorkspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .foundationsHost .ecgWorkspace > .sceneFrame,
+  .foundationsHost .ecgWorkspace > .waveformPane,
+  .foundationsHost .ecgWorkspace > .responseRail {
+    grid-column: 1;
+  }
+
+  .foundationsHost .ecgWorkspace > .sceneFrame {
+    order: 0;
+    padding: 30px 19px 4px;
+  }
+
+  .foundationsHost .ecgWorkspace > .sceneFrame .mechanism,
+  .foundationsHost .ecgWorkspace > .sceneFrame .contextDetails,
+  .foundationsHost .ecgWorkspace > .sceneFrame .transition {
+    display: none;
+  }
+
+  .foundationsHost .sceneFrame,
+  .foundationsHost .openingFrame {
+    padding: 34px 19px 4px;
+  }
+
+  .foundationsHost .practiceFrame {
+    padding-top: 24px;
+  }
+
+  .foundationsHost .practiceFrame .sceneHeader h1 {
+    font-size: clamp(2rem, 10vw, 2.7rem);
+  }
+
+  .foundationsHost .sceneHeader {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .foundationsHost .sceneHeader h1 {
+    max-width: 18ch;
+    font-size: clamp(2.2rem, 11vw, 3.15rem);
+  }
+
+  .foundationsHost .openingFrame .sceneHeader h1 {
+    max-width: 15ch;
+  }
+
+  .foundationsHost .sceneHeader div > p:last-child {
+    margin-top: 12px;
+    font-size: 0.98rem;
+  }
+
+  .routePreview {
+    margin-top: 24px;
+  }
+
+  .routeSignal {
+    height: 170px;
+    border-radius: 19px;
+  }
+
+  .routeStatement {
+    left: 12px;
+    bottom: 11px;
+    width: calc(100% - 24px);
+    min-height: 60px;
+    grid-template-columns: 38px minmax(0, 1fr);
+    padding: 9px 11px;
+  }
+
+  .routeStatement > span {
+    width: 34px;
+    height: 34px;
+  }
+
+  .routeStatement p {
+    font-size: 0.73rem;
+  }
+
+  .routeStatement strong {
+    font-size: 0.84rem;
+  }
+
+  .routeSteps {
+    grid-template-columns: repeat(7, 90px);
+    overflow-x: auto;
+    margin-inline: -19px;
+    padding: 0 19px 5px;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+  }
+
+  .routeSteps::before {
+    left: 64px;
+    right: 64px;
+  }
+
+  .routeSteps li {
+    scroll-snap-align: center;
+  }
+
+  .routeActions {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .routeActions p {
+    margin: 0;
+    text-align: center;
+  }
+
+  .routeActions :global(.button) {
+    width: 100%;
+  }
+
+  .foundationsHost .lessonBrief {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    margin-top: 22px;
+  }
+
+  .foundationsHost .practiceBrief {
+    grid-template-columns: minmax(0, 1fr);
+    margin-top: 18px;
+    padding: 15px;
+  }
+
+  .foundationsHost .practiceBrief > aside {
+    grid-column: 1;
+  }
+
+  .foundationsHost .mechanism {
+    grid-row: auto;
+  }
+
+  .foundationsHost .mainTask {
+    width: 100%;
+    padding: 7px 14px 24px;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction) {
+    border-radius: 18px;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction-head) {
+    display: grid;
+    gap: 8px;
+    padding: 19px 18px 16px;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction-head h3) {
+    font-size: 1.3rem;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction-head > span) {
+    justify-self: start;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction-body) {
+    padding: 16px 18px 18px;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction-actions) {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    min-height: 64px;
+    padding: 10px 18px max(10px, env(safe-area-inset-bottom));
+  }
+
+  .foundationsHost .responseRail {
+    position: static;
+    width: 100%;
+    max-height: none;
+    padding: 0 14px;
+    overflow: visible;
+  }
+
+  .foundationsHost .sceneNav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .foundationsHost .sceneNav > :nth-child(2) {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    justify-self: center;
+  }
+}
+
+@media (max-width: 540px) {
+  .foundationsHost .curriculumLink span {
+    display: none;
+  }
+
+  .foundationsHost .curriculumLink {
+    margin-right: 0;
+  }
+
+  .foundationsHost .sessionIdentity small::before {
+    display: none;
+  }
+
+  .foundationsHost .sessionIdentity {
+    display: grid;
+    gap: 0;
+  }
+
+  .foundationsHost .sessionIdentity small {
+    display: block;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-sequence li) {
+    align-items: flex-start;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction-actions) {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .foundationsHost .checkpoint :global(.learning-interaction-actions .button) {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .routeTrace {
+    stroke-dashoffset: 0;
+    animation: none;
+  }
+
+  .routeSteps button > span,
+  .foundationsHost .checkpoint :global(.learning-sequence li) {
+    transition: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .foundationsHost .sessionBar {
+    top: 102px;
   }
 }

@@ -213,12 +213,12 @@ const s7Feedback = feedback({
 
 const s7Interactions: LearningInteraction[] = [
   compactInteraction({ id: "m09-s7-validity", kind: "compare", prompt: "Validate current/prior comparability before declaring change.", instructions: "Complete identity, lead set/order, gain, speed, signal, and acquisition context.", subskills: ["discriminate", "calibrate_confidence"], feedback: s7Feedback, accessibility: access("Use the matched-lead validity table; overlay is optional.", "Every comparison-validity field and its pass/fail reason are announced."), leftCaseConcept: "current_ecg", rightCaseConcept: "prior_or_serial_ecg", dimensions: [
-    { id: "identity", label: "Identity", leftAnswer: "Current case", rightAnswer: "Must match" },
-    { id: "leads", label: "Lead set/order", leftAnswer: "Current mapping", rightAnswer: "Must match" },
-    { id: "gain", label: "Gain", leftAnswer: "Current gain", rightAnswer: "Must match" },
-    { id: "speed", label: "Speed", leftAnswer: "Current speed", rightAnswer: "Must match" },
-    { id: "signal", label: "Signal quality", leftAnswer: "Interpretable", rightAnswer: "Interpretable" },
-    { id: "context", label: "Acquisition context", leftAnswer: "Known", rightAnswer: "Known/comparable" },
+    { id: "identity", label: "Identity", leftAnswer: "Confirm the current case identifier", rightAnswer: "Confirm the same learner or case identifier" },
+    { id: "leads", label: "Lead set/order", leftAnswer: "Record the current lead set and mapping", rightAnswer: "Match lead names and order before aligning regions" },
+    { id: "gain", label: "Gain", leftAnswer: "Record current millimeters per millivolt", rightAnswer: "Match gain or normalize amplitude before comparison" },
+    { id: "speed", label: "Speed", leftAnswer: "Record current paper speed", rightAnswer: "Match speed before comparing intervals or slopes" },
+    { id: "signal", label: "Signal quality", leftAnswer: "Name readable and artifact-limited current regions", rightAnswer: "Require the same matched regions to be interpretable" },
+    { id: "context", label: "Acquisition context", leftAnswer: "Document current acquisition conditions", rightAnswer: "Confirm comparable timing, placement, and acquisition context" },
   ] }),
   compactInteraction({ id: "m09-s7-change-regions", kind: "region", prompt: "Mark one changed and one unchanged matched region.", instructions: "Use synchronized leads only after the comparison is valid.", subskills: ["localize", "discriminate"], feedback: s7Feedback, accessibility: access("Choose matched lead, current segment, prior segment, and changed/unchanged status from the table.", "The changed region, unchanged anchor, and temporal conclusion are announced."), concept: "serial_change_and_anchor", allowedLeads: ["I", "II", "III", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"], minimumDurationMs: 30 }),
 ];
@@ -233,12 +233,12 @@ const s8Feedback = feedback({
 });
 
 const s8Interactions: LearningInteraction[] = [
-  compactInteraction({ id: "m09-s8-triad", kind: "compare", prompt: "Compare target, close mimic, and normal across one discriminator at a time.", instructions: "Commit ECG-only comparison before prior or context reveal.", subskills: ["discriminate", "calibrate_confidence"], feedback: s8Feedback, accessibility: access("Navigate a row-header comparison table across all three cases.", "Each discriminator is announced across target, mimic, and normal before labels."), leftCaseConcept: "ischemia_compatible_pattern", rightCaseConcept: "ischemia_mimic", dimensions: [
-    { id: "distribution", label: "Distribution", leftAnswer: "Contiguous/territorial when supported", rightAnswer: "Mimic-specific or diffuse" },
-    { id: "reciprocal", label: "Reciprocal relationship", leftAnswer: "Assess", rightAnswer: "Assess" },
-    { id: "qrs", label: "QRS context", leftAnswer: "Primary change", rightAnswer: "May explain secondary change" },
-    { id: "pr", label: "PR/baseline", leftAnswer: "Assess if readable", rightAnswer: "May discriminate" },
-    { id: "prior", label: "Prior/serial", leftAnswer: "May add temporal support", rightAnswer: "May show stability" },
+  compactInteraction({ id: "m09-s8-triad", kind: "compare", prompt: "Compare target, close mimic, and normal across one discriminator at a time.", instructions: "Commit ECG-only comparison before prior or context reveal.", subskills: ["discriminate", "calibrate_confidence"], feedback: s8Feedback, accessibility: access("Navigate a row-header comparison table across all three cases.", "Each discriminator is announced across target, mimic, and normal before labels."), leftCaseConcept: "ischemia_compatible_pattern", rightCaseConcept: "ischemia_mimic", thirdCaseConcept: "reference_pattern", dimensions: [
+    { id: "distribution", label: "Distribution", leftAnswer: "Contiguous or territorial when supported", rightAnswer: "Mimic-specific or diffuse distribution", thirdAnswer: "No pathologic regional pattern" },
+    { id: "reciprocal", label: "Reciprocal relationship", leftAnswer: "An opposing-lead relationship may add support", rightAnswer: "Absent or explained by the mimic context", thirdAnswer: "No reciprocal relationship" },
+    { id: "qrs", label: "QRS context", leftAnswer: "Primary ST-T change not explained by QRS", rightAnswer: "QRS context may explain secondary change", thirdAnswer: "Reference QRS and ST-T relationship" },
+    { id: "pr", label: "PR/baseline", leftAnswer: "Check for a readable competing baseline clue", rightAnswer: "PR or baseline findings may favor the mimic", thirdAnswer: "No discriminating PR or baseline change" },
+    { id: "prior", label: "Prior/serial", leftAnswer: "Dynamic change may add temporal support", rightAnswer: "Stability may support a chronic mimic", thirdAnswer: "Stable reference when comparison is valid" },
   ] }),
   compactInteraction({ id: "m09-s8-discriminator", kind: "region", prompt: "Click the single trace region that changes the comparison.", instructions: "Choose a feature that differs—not one shared by both cases.", subskills: ["localize", "discriminate"], feedback: s8Feedback, accessibility: access("Select case, lead, and named segment from the discriminator list.", "The selected discriminator and why it separates target from mimic are announced."), concept: "ischemia_mimic_discriminator", allowedLeads: ["I", "II", "III", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"], minimumDurationMs: 25 }),
 ];

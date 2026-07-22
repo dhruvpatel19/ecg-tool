@@ -258,6 +258,7 @@ export function compactInteraction(
           kind: "compare";
           leftCaseConcept: string;
           rightCaseConcept: string;
+          thirdCaseConcept?: string;
           dimensions: Extract<LearningInteraction, { kind: "compare" }>["dimensions"];
         }
       | {

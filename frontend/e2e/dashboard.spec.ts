@@ -223,6 +223,7 @@ const activityFixture = {
       evidence: "formative",
       reviewRecommended: false,
       review: null,
+      lesson: { moduleId: "foundations", sceneId: "S9" },
     },
   ],
 };
@@ -355,6 +356,31 @@ async function routeLearningHome(page: Page) {
   await page.route("**/api/backend/adaptive/plan", (route) => route.fulfill({ json: adaptivePlanFixture }));
   await page.route("**/api/backend/learning/resume", (route) => route.fulfill({ json: noResumeFixture }));
   await page.route("**/api/backend/learning/activity?*", (route) => route.fulfill({ json: activityFixture }));
+  await page.route("**/api/backend/learners/u_dashboard/pathway-progress**", (route) => route.fulfill({ json: {
+    learnerId: "u_dashboard",
+    items: [
+      {
+        pathwayId: "production-curriculum",
+        moduleId: "foundations",
+        sceneId: "S0",
+        status: "complete",
+        activeInteractionIndex: 1,
+        completedActionIds: ["s0-scope", "s0-route"],
+        state: {},
+        updatedAt: "2026-07-13T11:00:00Z",
+      },
+      {
+        pathwayId: "production-curriculum",
+        moduleId: "foundations",
+        sceneId: "S1",
+        status: "needs-review",
+        activeInteractionIndex: 1,
+        completedActionIds: ["s1-model"],
+        state: {},
+        updatedAt: "2026-07-14T11:00:00Z",
+      },
+    ],
+  } }));
   await page.route("**/api/backend/learning/sessions?*", (route) => route.fulfill({ json: sessionsFixture }));
   await page.route("**/api/backend/learning/sessions/lsr1_rapid_test", (route) => route.fulfill({ json: sessionReviewFixture }));
   await page.route("**/api/backend/learning/sessions/lsr1_clinical_test", (route) => route.fulfill({ json: clinicalSessionReviewFixture }));
@@ -412,6 +438,12 @@ test.describe("canonical learning dashboard", () => {
     await expect(summary.getByText("Staying strong", { exact: true })).toBeVisible();
     await expect(summary.getByText("Ready to review", { exact: true })).toBeVisible();
     await expect(page.getByText("Independent estimate", { exact: true })).toHaveCount(0);
+    const foundations = page.getByTestId("foundations-status");
+    await expect(foundations).toContainText("1/13");
+    await expect(foundations.getByText("Evidence", { exact: true })).toBeVisible();
+    await expect(foundations.getByText("3", { exact: true })).toBeVisible();
+    await expect(foundations.getByText("Reviews", { exact: true })).toBeVisible();
+    await expect(foundations.getByRole("link", { name: /Continue Foundations: One beat, one electrical story/ })).toHaveAttribute("href", "/learn/foundations?scene=S1");
     const recent = page.getByRole("heading", { name: "Your latest practice" }).locator("xpath=ancestor::section");
     await expect(recent).toBeVisible();
     await expect(recent.getByTestId("session-history").getByText("Rapid practice", { exact: true })).toBeVisible();
@@ -535,6 +567,14 @@ test.describe("canonical learning dashboard", () => {
     await expect(page.getByText("Submitted ECG 2", { exact: true })).toBeVisible();
     await expect(page.getByText("Submitted ECG 3", { exact: true })).toHaveCount(0);
     await expectNoWcagViolations(page);
+  });
+
+  test("labels native Foundations history and reopens its exact scene", async ({ page }) => {
+    await page.goto("/home?panel=activity");
+    const foundationsActivity = page.getByTestId("activity-item").filter({ hasText: "Axis is the coarse QRS direction" });
+    await expect(foundationsActivity.getByText("Foundations lesson", { exact: true })).toBeVisible();
+    await foundationsActivity.locator("summary").click();
+    await expect(foundationsActivity.getByRole("link", { name: "Reopen this scene" })).toHaveAttribute("href", "/learn/foundations?scene=S9");
   });
 
   test("retries competency routes without discarding loaded session evidence", async ({ page }) => {

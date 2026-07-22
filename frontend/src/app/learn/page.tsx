@@ -27,9 +27,8 @@ import {
 import { useAuth } from "@/lib/auth";
 import { learningResumePresentation } from "@/lib/learningResume";
 import { MODULES } from "@/lib/modules";
-import { FOUNDATIONS_PATHWAY_ID, PRODUCTION_PATHWAY_ID } from "@/lib/pathways";
+import { PRODUCTION_PATHWAY_ID } from "@/lib/pathways";
 import {
-  readFoundationsProgress,
   readProductionModuleProgress,
   subscribeProgress,
   type ModuleProgress,
@@ -87,10 +86,9 @@ function lessonHref(moduleId: string, lessonId: string) {
 }
 
 export default function LearnPage() {
-  const { user, identityKey, loading: authLoading } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [modules, setModules] = useState<CurriculumModule[]>([]);
   const [expanded, setExpanded] = useState<string>("");
-  const [foundations, setFoundations] = useState<ModuleProgress | null>(null);
   const [productionProgress, setProductionProgress] = useState<Record<string, ModuleProgress>>({});
   const [resumeScenes, setResumeScenes] = useState<Record<string, string>>({});
   const [guidedResume, setGuidedResume] = useState<LearningResumeSession | null>(null);
@@ -100,12 +98,19 @@ export default function LearnPage() {
     if (authLoading) return;
     let cancelled = false;
     setGuidedResume(null);
+    const nativeFoundationsReady = user
+      ? api.migrateFoundationsNativeProgress(user.userId)
+        .then(() => undefined)
+        .catch(() => {
+          if (!cancelled) setError("Your earlier Foundations history could not be prepared yet. Current native work is unchanged.");
+        })
+      : Promise.resolve();
     api.curriculum().then((data) => {
       if (!cancelled) setModules(data.modules);
     }).catch((err: Error) => {
       if (!cancelled) setError(err.message);
     });
-    api.learningResume().then((snapshot) => {
+    nativeFoundationsReady.then(() => api.learningResume()).then((snapshot) => {
       if (cancelled) return;
       if (snapshot.version !== "learning-resume-v1") {
         setGuidedResume(null);
@@ -117,7 +122,6 @@ export default function LearnPage() {
       if (!cancelled) setGuidedResume(null);
     });
     const refresh = () => {
-      setFoundations(readFoundationsProgress(13, identityKey));
       if (!user) {
         setProductionProgress(Object.fromEntries(
           MODULES
@@ -129,24 +133,10 @@ export default function LearnPage() {
     };
     refresh();
     if (user) {
-      Promise.all([
-        api.pathwayProgress(user.userId, PRODUCTION_PATHWAY_ID),
-        api.pathwayProgress(user.userId, FOUNDATIONS_PATHWAY_ID),
-      ])
-        .then(([response, foundationsResponse]) => {
+      nativeFoundationsReady
+        .then(() => api.pathwayProgress(user.userId, PRODUCTION_PATHWAY_ID))
+        .then((response) => {
           if (cancelled) return;
-          const foundationItem = foundationsResponse.items.find((item) => item.moduleId === "foundations");
-          if (foundationItem) {
-            const completedScenes = Number(foundationItem.state.completedScenes ?? foundationItem.completedActionIds.length);
-            const totalScenes = Number(foundationItem.state.totalScenes ?? 13);
-            setFoundations({
-              completedScenes,
-              totalScenes,
-              done: foundationItem.status === "complete" || completedScenes >= totalScenes,
-              started: foundationItem.status !== "not-started",
-              bestAccuracy: Number(foundationItem.state.bestAccuracy ?? 0),
-            });
-          }
           const byModule = new Map<string, PathwayProgressItem[]>();
           response.items.forEach((item) => byModule.set(item.moduleId, [...(byModule.get(item.moduleId) ?? []), item]));
           setProductionProgress(Object.fromEntries(MODULES
@@ -185,7 +175,7 @@ export default function LearnPage() {
       cancelled = true;
       unsubscribe();
     };
-  }, [authLoading, identityKey, user]);
+  }, [authLoading, user]);
 
   const summary = useMemo(() => {
     const sceneCount = MODULES.reduce((sum, module) => sum + (module.sceneCount ?? 0), 0);
@@ -205,7 +195,7 @@ export default function LearnPage() {
           </p>
           <div className="hero-actions">
             <Link className="button primary" href={guidedResumePresentation?.href ?? "/learn/foundations"}>
-              <Sparkles size={17} aria-hidden="true" /> {guidedResumePresentation ? "Resume Guided learning" : foundations?.started ? "Resume foundations" : "Start foundations"} <ArrowRight size={16} />
+              <Sparkles size={17} aria-hidden="true" /> {guidedResumePresentation ? "Resume Guided learning" : productionProgress.foundations?.started ? "Resume foundations" : "Start foundations"} <ArrowRight size={16} />
             </Link>
             <a className="button" href="#curriculum">Explore curriculum</a>
           </div>
@@ -246,14 +236,14 @@ export default function LearnPage() {
             const open = expanded === module.id;
             const isFoundations = module.id === "foundations";
             const registryModule = MODULES.find((entry) => entry.id === module.id);
-            const progress = isFoundations ? foundations : productionProgress[module.id];
+            const progress = productionProgress[module.id];
             const pathway = progress?.totalScenes ? progress.completedScenes / progress.totalScenes : 0;
             const pathwayDone = Boolean(progress?.done);
             const competency = Math.round((module.mastery || 0) * 100);
             const assessedObjectiveCount = module.assessedObjectiveCount ?? 0;
             const sceneCount = registryModule?.sceneCount ?? progress?.totalScenes ?? 0;
             const startHref = isFoundations
-              ? "/learn/foundations"
+              ? `/learn/foundations${resumeScenes[module.id] ? `?scene=${encodeURIComponent(resumeScenes[module.id])}` : ""}`
               : `/learn/${module.id}${resumeScenes[module.id] ? `?scene=${encodeURIComponent(resumeScenes[module.id])}` : ""}`;
             const summaryId = `curriculum-${module.id}-summary`;
             const detailId = `curriculum-${module.id}-detail`;

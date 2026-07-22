@@ -27,7 +27,7 @@ test("student pages enforce a nonce-based same-origin content policy", async ({ 
   await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
 });
 
-test("the foundations lesson alone may be framed by its same-origin host", async ({ page }) => {
+test("the retired static Foundations bundle stays inaccessible and the native tutor keeps its privacy boundary", async ({ page }) => {
   const anonymousHtml = await page.request.get("/foundations/index.html");
   const anonymousCases = await page.request.get("/foundations/data/cases.json");
   const anonymousScript = await page.request.get("/foundations/scenes.js");
@@ -36,32 +36,24 @@ test("the foundations lesson alone may be framed by its same-origin host", async
   expect(anonymousScript.status()).toBe(401);
 
   await registerVerifiedE2ELearner(page, { prefix: "security_headers" });
-  const response = await page.request.get("/foundations/index.html");
-  expect(response.ok(), await response.text()).toBeTruthy();
-
-  const headers = response.headers();
-  expect(headers["content-security-policy"]).toContain("frame-ancestors 'self'");
-  expect(headers["x-frame-options"]).toBe("SAMEORIGIN");
-  expect(headers["cache-control"]).toBe("private, no-store");
-  expect(headers.vary).toContain("Cookie");
-
-  const cases = await page.request.get("/foundations/data/cases.json");
-  expect(cases.ok(), await cases.text()).toBeTruthy();
-  expect(cases.headers()["cache-control"]).toBe("private, no-store");
-
-  await page.goto("/foundations/index.html");
-  await expect(page.getByRole("heading", { name: "Open Foundations from TRACE" })).toBeVisible();
-  await expect(page.getByText("No guest learning state was opened.", { exact: false })).toBeVisible();
-  expect(await page.evaluate(() => ({
-    state: localStorage.getItem("foundations_state_v1:guest"),
-    best: localStorage.getItem("found_best:guest"),
-  }))).toEqual({ state: null, best: null });
+  for (const path of [
+    "/foundations/index.html",
+    "/foundations/data/cases.json",
+    "/foundations/scenes.js",
+  ]) {
+    const retired = await page.request.get(path);
+    expect(retired.status(), path).toBe(404);
+  }
 
   await page.goto("/learn/foundations");
-  const lesson = page.frameLocator('iframe[title="Foundations of the ECG Read"]');
-  await expect(lesson.locator("#tutorInput")).toBeVisible();
-  await expect(lesson.locator("#tutorInput")).toHaveAttribute("maxlength", "4000");
-  await expect(lesson.locator("#tutorPrivacy")).toContainText("Do not enter patient names");
+  await expect(page.getByRole("heading", { name: "A reliable ECG read, every time" })).toBeVisible();
+  await expect(page.locator('iframe[title*="Foundations"]')).toHaveCount(0);
+  await page.getByRole("button", { name: "Ask Luna" }).click();
+  const tutor = page.getByRole("dialog", { name: "Foundations tutor" });
+  const input = tutor.getByRole("textbox", { name: "Message the tutor" });
+  await expect(input).toBeVisible();
+  await expect(input).toHaveAttribute("maxlength", "4000");
+  await expect(tutor).toContainText("Do not enter patient names");
 });
 
 test("the backend proxy rejects cross-site state changes before forwarding", async ({ request }) => {

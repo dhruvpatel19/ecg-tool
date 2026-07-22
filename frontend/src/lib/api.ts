@@ -155,6 +155,15 @@ export type PathwayProgressItem = {
   updatedAt?: string;
 };
 
+export type FoundationsNativeMigration = {
+  learnerId: string;
+  migrationVersion: "foundations-native-v2";
+  result: "not_needed" | "migrated" | "replay" | "source_conflict";
+  resumeSceneId: string;
+  items: PathwayProgressItem[];
+  legacyPracticePreserved: boolean;
+};
+
 export type LearningResumeDestination =
   | { kind: "guided"; moduleId: string; sceneId: string | null }
   | { kind: "training" }
@@ -200,6 +209,11 @@ export type LearningActivityItem = {
     sessionRef: string;
     attemptIndex: number;
     sessionStatus: "complete" | "abandoned";
+  } | null;
+  /** Safe authored coordinates for reopening a Guided lesson scene. */
+  lesson?: {
+    moduleId: string;
+    sceneId: string;
   } | null;
 };
 
@@ -1027,6 +1041,11 @@ export const api = {
     request<{ learnerId: string; items: PathwayProgressItem[] }>(
       `/learners/${encodeURIComponent(learnerId)}/pathway-progress${pathwayId ? `?pathwayId=${encodeURIComponent(pathwayId)}` : ""}`,
     ),
+  migrateFoundationsNativeProgress: (learnerId = "demo") =>
+    request<FoundationsNativeMigration>(
+      `/learners/${encodeURIComponent(learnerId)}/foundations-native-migration`,
+      { method: "POST" },
+    ),
   savePathwayProgress: (
     learnerId: string,
     items: PathwayProgressItem[],
@@ -1137,6 +1156,7 @@ export const api = {
       requiredMeasurements?: string[];
       requiredRois?: string[];
       requiresPerBeatLandmarks?: boolean;
+      casePoolSlot?: string;
     },
   ) =>
     request<{
@@ -1156,7 +1176,12 @@ export const api = {
         answerFieldsWithheldUntilCommit: true;
         sourceRecordIdentityWithheld: true;
       };
-      selection?: { requestedConceptUnavailable?: boolean; reason?: string; excludedBorderlineCount?: number };
+      selection?: {
+        requestedConceptUnavailable?: boolean;
+        reason?: string;
+        excludedBorderlineCount?: number;
+        preferredCasePoolMatched?: boolean;
+      };
     }>(`/tutorials/${lessonId}${(() => {
       const params = new URLSearchParams();
       if (conceptId) params.set("concept", conceptId);
@@ -1166,6 +1191,7 @@ export const api = {
       if (eligibility?.requiredMeasurements?.length) params.set("requiredMeasurements", eligibility.requiredMeasurements.join(","));
       if (eligibility?.requiredRois?.length) params.set("requiredRois", eligibility.requiredRois.join(","));
       if (eligibility?.requiresPerBeatLandmarks) params.set("requiresPerBeatLandmarks", "true");
+      if (eligibility?.casePoolSlot) params.set("casePoolSlot", eligibility.casePoolSlot);
       const query = params.toString();
       return query ? `?${query}` : "";
     })()}`),
