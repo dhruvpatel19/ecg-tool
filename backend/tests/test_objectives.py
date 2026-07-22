@@ -97,6 +97,13 @@ def test_bundle_branch_objectives_expose_the_reviewed_qrs_measurement_subskill()
     assert "measure" in OBJECTIVES["left_bundle_branch_block"].allowed_subskills
 
 
+def test_qt_interval_objective_maps_to_the_authored_qtc_case_family() -> None:
+    objective = OBJECTIVES["qt_interval"]
+    assert objective.case_concepts == ("qtc_prolongation",)
+    assert objective.domain == "intervals"
+    assert "measure" in objective.allowed_subskills
+
+
 def test_student_facing_objective_labels_preserve_clinical_acronyms() -> None:
     assert OBJECTIVES["normal_ecg"].label == "Normal ECG"
     assert OBJECTIVES["av_block_first_degree"].label == "AV Block First Degree"

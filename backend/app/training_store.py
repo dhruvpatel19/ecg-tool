@@ -982,6 +982,17 @@ class TrainingCampaignStore:
                 "ORDER BY updated_at DESC, created_at DESC, campaign_id DESC LIMIT 1",
                 (learner_id,),
             ).fetchone()
+            # A completed campaign can retain its final feedback ECG so the
+            # learner can open the debrief after a reload. Starting a new set
+            # acknowledges that feedback, but must never rewrite the finished
+            # campaign as abandoned (completed sets back learning history).
+            if current is not None and current["status"] == "complete":
+                conn.execute(
+                    "UPDATE training_campaigns SET feedback_case_id = NULL "
+                    "WHERE campaign_id = ? AND status = 'complete'",
+                    (current["campaign_id"],),
+                )
+                current = None
             if current and not replace_active:
                 return {"status": "existing", "campaign": self._campaign(current)}
             if current:
@@ -1152,9 +1163,11 @@ class TrainingCampaignStore:
     def acknowledge_feedback(self, campaign_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE training_campaigns SET feedback_case_id = NULL, updated_at = ? "
+                # Clearing a presentation pointer is not a new learning event.
+                # Preserve the completion timestamp used by Activity history.
+                "UPDATE training_campaigns SET feedback_case_id = NULL "
                 "WHERE campaign_id = ?",
-                (_now(), campaign_id),
+                (campaign_id,),
             )
         return self.get_campaign(campaign_id)
 
@@ -1393,7 +1406,7 @@ class TrainingCampaignStore:
         tutor: dict[str, Any] | None,
         receipt_event: dict[str, Any],
         summary: dict[str, Any],
-        confidence: int,
+        confidence: int | None,
         hints_used: int,
         adaptation_preference: str = "challenge",
         adaptation_reason: str = "challenge_after_success",
@@ -1477,7 +1490,9 @@ class TrainingCampaignStore:
                 (
                     campaign["learner_id"], case_id,
                     json.dumps(response.get("structuredAnswer") or {}),
-                    str(response.get("freeTextAnswer") or ""), confidence, hints_used,
+                    str(response.get("freeTextAnswer") or ""),
+                    0 if confidence is None else confidence,
+                    hints_used,
                     float(grade.get("score", 0.0)),
                     json.dumps(grade.get("correctObjectives") or []),
                     json.dumps(grade.get("missedObjectives") or []),
@@ -1639,6 +1654,12 @@ class TrainingCampaignStore:
             ).fetchone()
             if campaign is None or str(campaign["learner_id"]) != learner_id:
                 return None
+            # Completion is an immutable learner-history boundary. An old UI,
+            # retry, or concurrent navigation request may still call abandon;
+            # return the finished campaign unchanged instead of erasing it
+            # from completed-session review.
+            if campaign["status"] == "complete":
+                return self._campaign(campaign)
             if campaign["status"] != "abandoned":
                 self._abandon_pending_lease_in_transaction(
                     conn,

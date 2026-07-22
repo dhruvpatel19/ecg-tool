@@ -5,12 +5,9 @@ import {
   ArrowRight,
   Brain,
   CheckCircle2,
-  Eye,
   Lightbulb,
   RefreshCw,
-  Search,
   Send,
-  ShieldCheck,
   Sparkles,
   Target,
   XCircle,
@@ -19,6 +16,22 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ECGViewer } from "@/components/ECGViewer";
 import { TutorChat } from "@/components/TutorChat";
+import { clinicalApi } from "@/lib/clinical";
+import {
+  FocusedPracticeSetup,
+  type FocusedSkillOption,
+  type FocusedTopicOption,
+} from "@/components/training/FocusedPracticeSetup";
+import {
+  DEFAULT_FOCUSED_INTERPRETATION_STEPS,
+  EMPTY_FOCUSED_INTERPRETATION,
+  FocusedInterpretationReview,
+  FocusedInterpretationStepper,
+  type FocusedInterpretationStep,
+  type FocusedInterpretationValue,
+  type FocusedReviewedFrameworkRow,
+} from "@/components/training/FocusedInterpretationStepper";
+import { FocusedSetReview } from "@/components/training/FocusedSetReview";
 import {
   DisclosureArea,
   LearningWorkspaceShell,
@@ -34,16 +47,16 @@ import { conceptLabel, type ECGPoint } from "@/lib/coordinates";
 import { resolveHandoffTarget, type HandoffTargetResolution } from "@/lib/learning/handoffTargets";
 import type { LearningSubskill } from "@/lib/learning/interactionTypes";
 import { learningReturnLabel } from "@/lib/learning/learningReturn";
+import { competencySkillLabel } from "@/lib/learning/skillLabels";
 import {
   campaignMatchesTrainingLaunch,
   parseTrainingLaunchIntent,
   safeTrainingReturn,
-  TRAINING_SESSION_LENGTHS,
   trainingFeedbackHeading,
   trainingMasteryPresentation,
 } from "@/lib/learning/trainingLogic";
 import { useLearningPreferences } from "@/lib/useLearningPreferences";
-import styles from "./train.module.css";
+import "./train.module.css";
 import type {
   CasePacket,
   CaseSummary,
@@ -53,7 +66,6 @@ import type {
   LearnerProfile,
   TrainingCampaignPayload,
   TrainingCampaignSummary,
-  TrainingPhase,
   ViewerAction,
   ViewerTaskEvidence,
   ViewerTaskSpec,
@@ -90,6 +102,9 @@ type TrainingTaskResult = {
   expectedValue?: number | null;
   tolerance?: number | null;
   unit?: "ms" | "bpm";
+  systematicInterpretationComplete?: boolean;
+  systematicInterpretation?: FocusedInterpretationValue;
+  reviewedFramework?: FocusedReviewedFrameworkRow[];
 };
 
 type HintPlan = {
@@ -97,58 +112,77 @@ type HintPlan = {
   actions: ViewerAction[];
 };
 
-type SessionPhase = TrainingPhase;
 type BinaryAnswer = "present" | "absent";
 
-const PHASE_SUMMARY: Array<{ phase: SessionPhase; label: string }> = [
-  { phase: "target", label: "Build target" },
-  { phase: "mimic", label: "Close mimic" },
-  { phase: "negative", label: "Normal / negative" },
-  { phase: "transfer", label: "Transfer" },
-];
-
-const PHASE_META: Record<SessionPhase, { label: string; purpose: string }> = {
-  target: { label: "Build target", purpose: "Study and retrieve the defining evidence" },
-  mimic: { label: "Close mimic", purpose: "Name the discriminator and resist a nearby look-alike" },
-  negative: { label: "Normal / negative", purpose: "Calibrate absence, uncertainty, and overcalling" },
-  transfer: { label: "Unannounced transfer", purpose: "Apply the skill without knowing the case role" },
-};
-
-type TrainingPoolInfo = {
+type TrainingAvailabilityInfo = {
   conceptId: string;
-  subskill: string;
-  eligibleDistinct: number;
-  roleCounts: { target: number; mimic: number; negative: number };
-  allowedLengths: number[];
-  source: "audited_waveform_only";
-  independentReceiptsAvailable: boolean;
+  source: "exact_target_index";
+  subskills: Record<string, {
+    available: boolean;
+    independentReceiptsAvailable: boolean;
+  }>;
 };
 
-const TRAINING_SUBSKILLS: Array<{ id: LearningSubskill; label: string }> = [
-  { id: "recognize", label: "Recognize the pattern" },
-  { id: "localize", label: "Localize the evidence" },
-  { id: "measure", label: "Measure it" },
-  { id: "discriminate", label: "Distinguish a close mimic" },
-  { id: "explain_mechanism", label: "Explain the mechanism" },
-  { id: "synthesize", label: "Synthesize the finding" },
-  { id: "apply_in_context", label: "Identify needed clinical context" },
-  { id: "calibrate_confidence", label: "Calibrate confidence" },
+const TRAINING_SUBSKILLS: FocusedSkillOption[] = [
+  { id: "recognize", label: competencySkillLabel("recognize"), description: "Name the core pattern" },
+  { id: "localize", label: competencySkillLabel("localize"), description: "Mark the relevant lead and segment" },
+  { id: "measure", label: competencySkillLabel("measure"), description: "Use calipers and values" },
+  { id: "discriminate", label: competencySkillLabel("discriminate"), description: "Separate close look-alikes" },
+  { id: "explain_mechanism", label: competencySkillLabel("explain_mechanism"), description: "Connect form to cause" },
+  { id: "synthesize", label: competencySkillLabel("synthesize"), description: "Use the full rate-to-impression sequence" },
+  { id: "apply_in_context", label: competencySkillLabel("apply_in_context"), description: "Choose the context that matters" },
+  { id: "calibrate_confidence", label: competencySkillLabel("calibrate_confidence"), description: "Match certainty to accuracy" },
 ];
+
+const FOCUSED_CATEGORIES = [
+  { id: "all", label: "All topics" },
+  { id: "rhythm", label: "Rhythms" },
+  { id: "conduction", label: "Conduction & axis" },
+  { id: "intervals", label: "Intervals & AV block" },
+  { id: "ischemia", label: "Ischemia & ST–T" },
+  { id: "chamber", label: "Chambers & voltage" },
+  { id: "foundations", label: "Core reading" },
+] as const;
+
+const FOCUSED_VISIBLE_LENGTHS = [5, 10, 20] as const;
+const FOCUSED_INTERPRETATION_KEYS = [
+  "rate", "rhythm", "axis", "intervals", "conduction", "st_t", "hypertrophy", "synthesis",
+] as const;
+
+function focusedInterpretationFrom(value: unknown): FocusedInterpretationValue {
+  if (!value || typeof value !== "object") return { ...EMPTY_FOCUSED_INTERPRETATION };
+  const source = value as Record<string, unknown>;
+  return Object.fromEntries(FOCUSED_INTERPRETATION_KEYS.map((key) => [
+    key,
+    typeof source[key] === "string" ? source[key].slice(0, key === "synthesis" ? 600 : 300) : "",
+  ])) as FocusedInterpretationValue;
+}
+
+function focusedCampaignLength(value: number) {
+  if (value <= 5) return 5;
+  if (value <= 10) return 10;
+  return 20;
+}
+
+function focusedCategory(group: string) {
+  if (group === "rhythm") return "rhythm";
+  if (group === "conduction" || group === "axis") return "conduction";
+  if (group === "intervals") return "intervals";
+  if (group === "st_t_mi") return "ischemia";
+  if (group === "hypertrophy") return "chamber";
+  return "foundations";
+}
+
+function focusedCategoryLabel(category: string) {
+  return FOCUSED_CATEGORIES.find((item) => item.id === category)?.label ?? "ECG foundations";
+}
 
 function isLearningSubskill(value: string): value is LearningSubskill {
   return TRAINING_SUBSKILLS.some((item) => item.id === value);
 }
 
-function sourceLabel(source?: string) {
-  if (source === "fixture") return "Unavailable practice item";
-  if (source === "prepared_bundle") return "Prepared PTB-XL bundle";
-  if (source === "ptbxl") return "PTB-XL + PTB-XL+";
-  if (source === "leipzig-heart-center") return "Leipzig expert rhythm window";
-  return source ? source.replaceAll("_", " ") : "Loading source";
-}
-
 function trainingSkillLabel(value: string) {
-  return TRAINING_SUBSKILLS.find((item) => item.id === value)?.label ?? value.replaceAll("_", " ");
+  return competencySkillLabel(value);
 }
 
 function readableApiError(caught: unknown, fallback: string) {
@@ -157,7 +191,7 @@ function readableApiError(caught: unknown, fallback: string) {
   return detail;
 }
 
-const MEASUREMENT_CLASSIFICATION_TARGETS = new Set(["rate", "qrs_duration", "qt_interval"]);
+const MEASUREMENT_CLASSIFICATION_TARGETS = new Set(["rate", "qrs_duration", "qtc_prolongation", "qt_interval"]);
 
 function classificationContract(concept: string, variant = 0) {
   const promptVariant = Math.max(0, variant) % 3;
@@ -195,7 +229,7 @@ function classificationContract(concept: string, variant = 0) {
       options: options(present, absent),
     };
   }
-  if (concept === "qt_interval") {
+  if (concept === "qtc_prolongation") {
     const present = { id: "present" as const, label: "QTc ≥480 ms" };
     const absent = { id: "absent" as const, label: "QTc <480 ms" };
     return {
@@ -223,12 +257,6 @@ function classificationContract(concept: string, variant = 0) {
   };
 }
 
-function masteryClass(value: number) {
-  if (value < 0.45) return "low";
-  if (value < 0.7) return "medium";
-  return "";
-}
-
 function availableConcepts(groups: ConceptGroup[]): ConceptSubskill[] {
   const unique = new Map<string, ConceptSubskill>();
   for (const group of groups) {
@@ -248,19 +276,19 @@ function chooseDefaultConcept(catalog: CatalogConcept[], groups: ConceptGroup[])
   return [...available].sort((left, right) => right.reliableCaseCount - left.reliableCaseCount)[0]?.id ?? "";
 }
 
-function chooseAdaptiveTarget(
+function rankAdaptiveTargets(
   catalog: CatalogConcept[],
   groups: ConceptGroup[],
   profile: LearnerProfile | null,
   subskill: LearningSubskill,
-): string {
+): string[] {
   const highYield = new Set(catalog.filter((concept) => concept.highYield).map((concept) => concept.id));
   const available = availableConcepts(groups);
   // Generic interval nouns are not valid pathology-presence targets. Keep
   // them available for explicit measurement work, but do not let a fresh
   // recognition learner default into an ambiguous "Rate is present" drill.
   const focusedRows = subskill === "measure"
-    ? available
+    ? available.filter((concept) => concept.id !== "qt_interval")
     : available.filter((concept) => !MEASUREMENT_CLASSIFICATION_TARGETS.has(concept.id));
   const rows = focusedRows.length ? focusedRows : available;
   return [...rows].sort((left, right) => {
@@ -278,17 +306,17 @@ function chooseAdaptiveTarget(
       || (leftReceipt?.independentMastery ?? 1) - (rightReceipt?.independentMastery ?? 1)
       || Number(highYield.has(right.id)) - Number(highYield.has(left.id))
       || right.reliableCaseCount - left.reliableCaseCount;
-  })[0]?.id ?? chooseDefaultConcept(catalog, groups);
+  }).map((concept) => concept.id);
 }
 
-function selectionReasonLabel(reason?: string) {
-  if (reason === "adaptive_recheck" || reason?.includes("recheck") || reason?.includes("miss") || reason?.includes("overcall")) {
-    return "selected after your last response for another evidence check";
-  }
-  if (reason === "adaptive_variation" || reason?.includes("success")) {
-    return "selected to vary the next comparison after your last response";
-  }
-  return "part of the planned mixed sequence";
+function chooseAdaptiveTarget(
+  catalog: CatalogConcept[],
+  groups: ConceptGroup[],
+  profile: LearnerProfile | null,
+  subskill: LearningSubskill,
+): string {
+  return rankAdaptiveTargets(catalog, groups, profile, subskill)[0]
+    ?? chooseDefaultConcept(catalog, groups);
 }
 
 function hintDomain(concept: string): { segment: string; leads: string[]; text: string; multi?: boolean } {
@@ -377,7 +405,7 @@ function taskForTraining(subskill: LearningSubskill, concept: string): ViewerTas
       mode: "point",
       prompt: concept.includes("lead_territor") || concept.includes("frontal_lead_map")
         ? "Mark one QRS in the inferior territory, then name all contiguous inferior leads in the evidence statement."
-        : `Click the decisive ${domain.segment.replaceAll("_", " ")} evidence before you classify.`,
+        : `Mark one relevant ${domain.segment.replaceAll("_", " ")} in the specified lead before you classify.`,
       concept: domain.segment,
       allowedLeads: domain.leads,
     };
@@ -435,19 +463,23 @@ export default function TrainPage() {
   const [profile, setProfile] = useState<LearnerProfile | null>(null);
   const [trainingTarget, setTrainingTarget] = useState("");
   const [conceptQuery, setConceptQuery] = useState("");
+  const [topicCategory, setTopicCategory] = useState("all");
+  const [showAllTopics, setShowAllTopics] = useState(false);
   const [trainingSubskill, setTrainingSubskill] = useState<LearningSubskill>("recognize");
   const [adaptiveMode, setAdaptiveMode] = useState(true);
+  const [resolvedAdaptiveTarget, setResolvedAdaptiveTarget] = useState("");
   const [caseFocus, setCaseFocus] = useState("");
   const [caseSummary, setCaseSummary] = useState<CaseSummary | null>(null);
   const [packet, setPacket] = useState<CasePacket | null>(null);
-  const [selectionReason, setSelectionReason] = useState("");
   const [selectedAnswer, setSelectedAnswer] = useState<BinaryAnswer | "">("");
   const [classificationTruth, setClassificationTruth] = useState<BinaryAnswer | null>(null);
   const [evidenceNote, setEvidenceNote] = useState("");
   const [subskillTaskAnswer, setSubskillTaskAnswer] = useState("");
   const [subskillTaskMatches, setSubskillTaskMatches] = useState<Record<string, string>>({});
   const [subskillTaskValue, setSubskillTaskValue] = useState("");
-  const [confidence, setConfidence] = useState(3);
+  const [structuredInterpretation, setStructuredInterpretation] = useState<FocusedInterpretationValue>(EMPTY_FOCUSED_INTERPRETATION);
+  const [interpretationStepIndex, setInterpretationStepIndex] = useState(0);
+  const [confidence, setConfidence] = useState<number | null>(null);
   const [hintsUsed, setHintsUsed] = useState(0);
   const [hintText, setHintText] = useState("");
   const [selectedPoint, setSelectedPoint] = useState<ECGPoint | null>(null);
@@ -458,6 +490,7 @@ export default function TrainPage() {
   const [emptyReason, setEmptyReason] = useState<string | null>(null);
   const [booting, setBooting] = useState(true);
   const [bootRetryKey, setBootRetryKey] = useState(0);
+  const [poolRetryKey, setPoolRetryKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [returnTo, setReturnTo] = useState("");
@@ -465,16 +498,22 @@ export default function TrainPage() {
   const [handoffResolution, setHandoffResolution] = useState<HandoffTargetResolution | null>(null);
   const [campaignPayload, setCampaignPayload] = useState<TrainingCampaignPayload | null>(null);
   const [campaignLength, setCampaignLength] = useState<number>(10);
-  const [poolInfo, setPoolInfo] = useState<TrainingPoolInfo | null>(null);
+  const [skillAvailability, setSkillAvailability] = useState<TrainingAvailabilityInfo | null>(null);
+  const [availabilityFailed, setAvailabilityFailed] = useState(false);
   const [poolLoading, setPoolLoading] = useState(false);
   const [replaceActiveOnStart, setReplaceActiveOnStart] = useState(false);
   const [sessionComplete, setSessionComplete] = useState(false);
   const [confirmAbandon, setConfirmAbandon] = useState(false);
+  const [completedSessionRef, setCompletedSessionRef] = useState<string | null>(null);
+  const [completedSessionLookupPending, setCompletedSessionLookupPending] = useState(false);
+  const [showSetReview, setShowSetReview] = useState(false);
+  const [clinicalDestinations, setClinicalDestinations] = useState<Map<string, "clinic" | "ward" | "ed">>(new Map());
   const abandonTriggerRef = useRef<HTMLButtonElement | null>(null);
   const abandonDialogRef = useRef<HTMLElement | null>(null);
   const keepTrainingRef = useRef<HTMLButtonElement | null>(null);
   const campaignLengthTouchedRef = useRef(false);
   const explicitCampaignLengthRef = useRef(false);
+  const hydratedDraftKeyRef = useRef("");
 
   const closeAbandonDialog = useCallback(() => {
     setConfirmAbandon(false);
@@ -530,11 +569,13 @@ export default function TrainPage() {
         const intent = parseTrainingLaunchIntent(window.location.search);
         explicitCampaignLengthRef.current = intent.suggestedLength !== null;
         setReturnTo(intent.returnTo);
-        setCampaignLength(intent.suggestedLength ?? 10);
+        setCampaignLength(focusedCampaignLength(intent.suggestedLength ?? 10));
         const initialSubskill = intent.subskill || "recognize";
         setTrainingSubskill(initialSubskill);
 
-        const availableIds = availableConcepts(conceptData.practiceGroups).map((concept) => concept.id);
+        const availableIds = availableConcepts(conceptData.practiceGroups)
+          .map((concept) => concept.id)
+          .filter((conceptId) => conceptId !== "qt_interval");
         const resolution = intent.requestedCaseConcept
           ? resolveHandoffTarget(intent.requestedCaseConcept, availableIds)
           : null;
@@ -544,7 +585,7 @@ export default function TrainPage() {
           setHandoffConcept(intent.isHandoff ? intent.receiptConcept : "");
           setTrainingTarget("");
           setEmptyReason(
-            `No validated real-ECG case family is available for ${intent.requestedCaseConcept.replaceAll("_", " ")}. Return to the prior activity or choose a different competency; no substitute attempt will be recorded.`,
+            `No reviewed real ECGs are available for ${intent.requestedCaseConcept.replaceAll("_", " ")}. Return to the prior activity or choose a different skill; no substitute attempt will be recorded.`,
           );
           return;
         }
@@ -587,7 +628,6 @@ export default function TrainPage() {
           }
           setReturnTo(resumedReturn);
           applyCampaignPayload(activeCampaign, receiptConcept);
-          setSelectionReason("Resumed your saved training set at the same ECG and step.");
           return;
         }
 
@@ -616,6 +656,28 @@ export default function TrainPage() {
   }, [bootRetryKey]);
 
   useEffect(() => {
+    let cancelled = false;
+    clinicalApi.bankCoverage()
+      .then(({ applicationCoverage }) => {
+        if (cancelled) return;
+        const lanes = ["clinic", "ward", "ed"] as const;
+        const destinations = new Map<string, "clinic" | "ward" | "ed">();
+        Object.entries(applicationCoverage ?? {}).forEach(([concept, coverage]) => {
+          const lane = lanes.find((candidate) => {
+            const depth = coverage[candidate];
+            return Boolean(depth && depth.items > 0 && depth.distinctEcgs > 0);
+          });
+          if (lane) destinations.set(concept, lane);
+        });
+        setClinicalDestinations(destinations);
+      })
+      .catch(() => {
+        if (!cancelled) setClinicalDestinations(new Map());
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     if (
       booting
       || preferencesLoading
@@ -624,29 +686,24 @@ export default function TrainPage() {
       || explicitCampaignLengthRef.current
       || campaignLengthTouchedRef.current
     ) return;
-    const preferredLength = learningPreferences.defaultSessionLength === 5
-      ? 10
-      : learningPreferences.defaultSessionLength;
-    setCampaignLength(preferredLength);
+    setCampaignLength(focusedCampaignLength(learningPreferences.defaultSessionLength));
   }, [booting, campaignPayload?.campaign, learningPreferences, preferencesLoading]);
 
   useEffect(() => {
     if (!trainingTarget || campaignPayload?.campaign) return;
     let cancelled = false;
     setPoolLoading(true);
-    setPoolInfo(null);
-    api.trainingPool(trainingTarget, trainingSubskill)
-      .then((pool) => {
-        if (cancelled) return;
-        setPoolInfo(pool);
-        if (pool.eligibleDistinct === 0) {
-          setEmptyReason("No distinct reviewed real ECGs currently support this concept and skill combination.");
-        } else {
-          setEmptyReason("Choose a set length, then start when you are ready.");
-        }
+    setError(null);
+    setSkillAvailability(null);
+    setAvailabilityFailed(false);
+    api.trainingAvailability(trainingTarget)
+      .then((availability) => {
+        if (!cancelled) setSkillAvailability(availability);
       })
       .catch((err) => {
-        if (!cancelled) setError(readableApiError(err, "Available ECGs could not be counted. Try again."));
+        if (cancelled) return;
+        setAvailabilityFailed(true);
+        setError(readableApiError(err, "Available ECGs could not be checked. Try again."));
       })
       .finally(() => {
         if (!cancelled) setPoolLoading(false);
@@ -654,7 +711,16 @@ export default function TrainPage() {
     return () => {
       cancelled = true;
     };
-  }, [campaignPayload?.campaign, trainingSubskill, trainingTarget]);
+  }, [campaignPayload?.campaign, poolRetryKey, trainingTarget]);
+
+  const selectedAvailability = skillAvailability?.subskills[trainingSubskill] ?? null;
+
+  useEffect(() => {
+    if (campaignPayload?.campaign || poolLoading || !trainingTarget) return;
+    setEmptyReason(selectedAvailability?.available
+      ? "Choose a set length, then start when you are ready."
+      : "No distinct reviewed real ECGs currently support this concept and skill combination.");
+  }, [campaignPayload?.campaign, poolLoading, selectedAvailability?.available, trainingTarget]);
 
   const selectorGroups = useMemo(() => {
     const seen = new Set<string>();
@@ -663,7 +729,7 @@ export default function TrainPage() {
       .map((group) => ({
         ...group,
         concepts: group.concepts.filter((concept) => {
-          if (!concept.available || seen.has(concept.id)) return false;
+          if (!concept.available || concept.id === "qt_interval" || seen.has(concept.id)) return false;
           seen.add(concept.id);
           return true;
         }),
@@ -676,28 +742,69 @@ export default function TrainPage() {
       groupLabel: group.label,
     }))
   )), [selectorGroups]);
-  const conceptMatches = useMemo(() => {
-    const query = conceptQuery.trim().toLocaleLowerCase();
-    if (!query) return [];
-    return searchableConcepts
-      .filter((concept) => (
-        concept.label.toLocaleLowerCase().includes(query)
-        || concept.id.replaceAll("_", " ").toLocaleLowerCase().includes(query)
-        || concept.groupLabel.toLocaleLowerCase().includes(query)
-      ))
-      .sort((left, right) => (
-        Number(right.id === trainingTarget) - Number(left.id === trainingTarget)
-        || Number(Boolean(catalog.find((item) => item.id === right.id)?.highYield))
-          - Number(Boolean(catalog.find((item) => item.id === left.id)?.highYield))
-        || right.reliableCaseCount - left.reliableCaseCount
-      ))
-      .slice(0, 8);
-  }, [catalog, conceptQuery, searchableConcepts, trainingTarget]);
-  const targetIsHighYield = catalog.some((concept) => concept.id === trainingTarget && concept.highYield);
+  const suggestedAdaptiveTarget = resolvedAdaptiveTarget
+    || chooseAdaptiveTarget(catalog, groups, profile, trainingSubskill);
+  const focusedSkillOptions = TRAINING_SUBSKILLS.map((skill): FocusedSkillOption => ({
+    ...skill,
+    availability: availabilityFailed
+      ? "error"
+      : poolLoading || !trainingTarget || !skillAvailability
+        ? "loading"
+      : skillAvailability.subskills[skill.id]?.available
+        ? "available"
+        : "unavailable",
+  }));
+  const catalogById = useMemo(() => new Map(catalog.map((concept) => [concept.id, concept])), [catalog]);
+  const allTopicOptions: FocusedTopicOption[] = searchableConcepts.map((concept) => {
+    const category = focusedCategory(catalogById.get(concept.id)?.group ?? "foundations");
+    const presentation = trainingMasteryPresentation(profile, concept.id, trainingSubskill);
+    return {
+      id: concept.id,
+      label: concept.label,
+      category,
+      categoryLabel: focusedCategoryLabel(category),
+      masteryLabel: presentation.label,
+      masteryValue: presentation.value,
+      recommended: concept.id === suggestedAdaptiveTarget,
+    };
+  });
+  const normalizedConceptQuery = conceptQuery.trim().toLocaleLowerCase();
+  const visibleTopicOptions = allTopicOptions
+    .filter((concept) => (
+      (topicCategory === "all" || concept.category === topicCategory)
+      && (
+        !normalizedConceptQuery
+        || concept.label.toLocaleLowerCase().includes(normalizedConceptQuery)
+        || concept.id.replaceAll("_", " ").toLocaleLowerCase().includes(normalizedConceptQuery)
+        || concept.categoryLabel.toLocaleLowerCase().includes(normalizedConceptQuery)
+      )
+    ))
+    .sort((left, right) => (
+      Number(right.id === suggestedAdaptiveTarget) - Number(left.id === suggestedAdaptiveTarget)
+      || Number(right.id === trainingTarget) - Number(left.id === trainingTarget)
+      || (left.masteryValue ?? -1) - (right.masteryValue ?? -1)
+      || left.label.localeCompare(right.label)
+    ));
+  const selectedTopicOption = allTopicOptions.find((topic) => topic.id === trainingTarget) ?? null;
   const evidenceConcept = handoffConcept || trainingTarget;
   const classificationTarget = trainingTarget;
+  const clinicalResolution = evidenceConcept
+    ? resolveHandoffTarget(evidenceConcept, clinicalDestinations.keys())
+    : null;
+  const clinicalLane = clinicalResolution?.exact
+    ? clinicalDestinations.get(clinicalResolution.caseConcept)
+    : undefined;
+  const clinicalHref = clinicalResolution?.exact && clinicalLane
+    ? `/practice?${new URLSearchParams({
+        focus: clinicalResolution.caseConcept,
+        subskill: "apply_in_context",
+        lane: clinicalLane,
+        length: "5",
+      }).toString()}`
+    : undefined;
   const taskVariant = campaignPayload?.current?.slot.position ?? 0;
-  const answerContract = classificationContract(classificationTarget, taskVariant);
+  const answerContract = campaignPayload?.current?.classification
+    ?? classificationContract(classificationTarget, taskVariant);
   const masteryPresentation = trainingMasteryPresentation(profile, evidenceConcept, trainingSubskill);
   const focusConfidence = evidenceConcept ? packet?.concept_confidence?.[evidenceConcept] : undefined;
   const selectedAnswerLabel = selectedAnswer === "present" ? answerContract.presentLabel
@@ -709,30 +816,142 @@ export default function TrainPage() {
   const waveformRois = packet?.ptbxl_plus.fiducials.rois ?? [];
   const viewerTask = taskForTraining(trainingSubskill, evidenceConcept);
   const subskillTask = campaignPayload?.current?.task ?? null;
+  const interpretationSteps: FocusedInterpretationStep[] = subskillTask?.kind === "single_choice"
+    && subskillTask.frameworkSteps?.length
+    ? subskillTask.frameworkSteps.map((step) => {
+        const fallback = DEFAULT_FOCUSED_INTERPRETATION_STEPS.find((candidate) => candidate.key === step.key);
+        return { ...fallback, ...step, choices: step.choices ?? fallback?.choices } as FocusedInterpretationStep;
+      })
+    : DEFAULT_FOCUSED_INTERPRETATION_STEPS;
   const activeSubskillLabel = trainingSkillLabel(trainingSubskill);
+  const primaryWorkspacePrompt = trainingSubskill === "synthesize"
+    ? "Complete the formal rate-to-impression ECG sequence."
+    : answerContract.prompt;
   const campaign = campaignPayload?.campaign ?? null;
   const campaignSummary: TrainingCampaignSummary | null = campaignPayload?.summary ?? null;
   const currentSlot = campaignPayload?.current?.slot ?? null;
-  const activePhase = currentSlot?.phase;
-  const activeRecipe = activePhase ? PHASE_META[activePhase] : {
-    label: "Fresh mixed check",
-    purpose: "Apply the skill without being told the case role",
-  };
+  const pendingDraftKey = profile && campaign && campaignPayload?.current?.kind === "pending" && currentSlot
+    ? `ecg-tool:focused-draft:v1:${profile.learnerId}:${campaign.campaignId}:${currentSlot.position}`
+    : "";
+
+  useEffect(() => {
+    hydratedDraftKeyRef.current = "";
+    if (!pendingDraftKey) return;
+    try {
+      const parsed = JSON.parse(window.sessionStorage.getItem(pendingDraftKey) ?? "null") as unknown;
+      if (parsed && typeof parsed === "object") {
+        const draft = parsed as Record<string, unknown>;
+        if (draft.version === 1 && draft.concept === campaign?.conceptId && draft.subskill === campaign?.subskill) {
+          if (draft.selectedAnswer === "present" || draft.selectedAnswer === "absent") setSelectedAnswer(draft.selectedAnswer);
+          if (typeof draft.evidenceNote === "string") setEvidenceNote(draft.evidenceNote.slice(0, 2000));
+          if (typeof draft.subskillTaskAnswer === "string") setSubskillTaskAnswer(draft.subskillTaskAnswer.slice(0, 240));
+          if (draft.subskillTaskMatches && typeof draft.subskillTaskMatches === "object") {
+            const matches = Object.fromEntries(Object.entries(draft.subskillTaskMatches as Record<string, unknown>)
+              .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+              .slice(0, 20));
+            setSubskillTaskMatches(matches);
+          }
+          if (typeof draft.subskillTaskValue === "string") setSubskillTaskValue(draft.subskillTaskValue.slice(0, 40));
+          setStructuredInterpretation(focusedInterpretationFrom(draft.structuredInterpretation));
+          if (
+            typeof draft.interpretationStepIndex === "number"
+            && Number.isInteger(draft.interpretationStepIndex)
+            && draft.interpretationStepIndex >= 0
+            && draft.interpretationStepIndex < FOCUSED_INTERPRETATION_KEYS.length
+          ) setInterpretationStepIndex(draft.interpretationStepIndex);
+          if (
+            campaign?.subskill === "calibrate_confidence"
+            && typeof draft.confidence === "number"
+            && draft.confidence >= 1
+            && draft.confidence <= 5
+          ) setConfidence(draft.confidence);
+          if (draft.viewerTaskEvidence && typeof draft.viewerTaskEvidence === "object") {
+            setViewerTaskEvidence(draft.viewerTaskEvidence as ViewerTaskEvidence);
+          }
+        }
+      }
+    } catch {
+      // A malformed or unavailable browser draft never blocks the server-owned campaign.
+    }
+    hydratedDraftKeyRef.current = pendingDraftKey;
+  }, [campaign?.conceptId, campaign?.subskill, pendingDraftKey]);
+
+  useEffect(() => {
+    if (!pendingDraftKey || hydratedDraftKeyRef.current !== pendingDraftKey) return;
+    try {
+      window.sessionStorage.setItem(pendingDraftKey, JSON.stringify({
+        version: 1,
+        concept: campaign?.conceptId,
+        subskill: campaign?.subskill,
+        selectedAnswer,
+        evidenceNote,
+        subskillTaskAnswer,
+        subskillTaskMatches,
+        subskillTaskValue,
+        structuredInterpretation,
+        interpretationStepIndex,
+        ...(campaign?.subskill === "calibrate_confidence" ? { confidence } : {}),
+        viewerTaskEvidence,
+      }));
+    } catch {
+      // Private browsing or quota limits must not interrupt a live practice set.
+    }
+  }, [campaign?.conceptId, campaign?.subskill, confidence, evidenceNote, interpretationStepIndex, pendingDraftKey, selectedAnswer, structuredInterpretation, subskillTaskAnswer, subskillTaskMatches, subskillTaskValue, viewerTaskEvidence]);
   const sessionCorrect = campaignSummary?.correct ?? 0;
   const sessionClassificationCorrect = campaignSummary?.classificationCorrect ?? 0;
   const fullTaskCorrect = campaignSummary?.fullTaskCorrect ?? 0;
-  const transferAttemptCount = campaignSummary?.byPhase.transfer.attempted ?? 0;
-  const transferCorrect = campaignSummary?.byPhase.transfer.correct ?? 0;
   const independentReceipts = campaignSummary?.independentReceipts ?? 0;
   const committedCount = campaignSummary?.attempted ?? 0;
   const campaignTotal = campaign?.length ?? 0;
-  const readyForRapid = campaignTotal > 0
-    && trainingSubskill === "recognize"
-    && independentReceipts >= 2
-    && sessionCorrect / campaignTotal >= 0.8
-    && transferAttemptCount > 0
-    && transferCorrect / transferAttemptCount >= 2 / 3;
-  const suggestedAdaptiveTarget = chooseAdaptiveTarget(catalog, groups, profile, trainingSubskill);
+
+  useEffect(() => {
+    if (!sessionComplete || !campaign) {
+      setCompletedSessionRef(null);
+      setCompletedSessionLookupPending(false);
+      return;
+    }
+    let cancelled = false;
+    setCompletedSessionLookupPending(true);
+    api.learningSessions(20)
+      .then((page) => {
+        if (cancelled) return;
+        const exact = page.items.find((item) => (
+          item.mode === "training"
+          && item.startedAt === campaign.createdAt
+          && item.focusCompetencies.some((focus) => (
+            focus.objectiveId === evidenceConcept && focus.subskill === campaign.subskill
+          ))
+        ));
+        setCompletedSessionRef(exact?.sessionRef ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setCompletedSessionRef(null);
+      })
+      .finally(() => {
+        if (!cancelled) setCompletedSessionLookupPending(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaign, evidenceConcept, sessionComplete]);
+
+  const readyForRapid = campaignTotal > 0 && (
+    (trainingSubskill === "recognize" && sessionCorrect / campaignTotal >= 0.8)
+    || (trainingSubskill === "synthesize" && fullTaskCorrect / campaignTotal >= 0.8)
+  );
+  const rapidTransferHref = trainingSubskill === "synthesize"
+    ? `/rapid?${new URLSearchParams({
+        focus: trainingTarget,
+        receiptConcept: evidenceConcept,
+        subskill: "synthesize",
+        pace: "untimed",
+        suggestedLength: "5",
+      }).toString()}`
+    : `/rapid?${new URLSearchParams({
+        focus: evidenceConcept,
+        receiptConcept: evidenceConcept,
+        subskill: "recognize",
+      }).toString()}`;
   const suggestedMastery = trainingMasteryPresentation(profile, suggestedAdaptiveTarget, trainingSubskill);
   const measurementRehearsal = result?.grade.trainingOutcomeKind === "unverified_rehearsal";
   const feedbackHeading = trainingFeedbackHeading({
@@ -750,6 +969,26 @@ export default function TrainPage() {
     ? subskillTask.options.find((option) => option.id === taskResult.submittedAnswer)
     : null;
   const commitGaps = missingCommitRequirements();
+  const evidenceNoteRequired = (trainingSubskill === "measure" && !viewerTask)
+    || (trainingSubskill === "localize" && (
+      evidenceConcept.includes("lead_territor") || evidenceConcept.includes("frontal_lead_map")
+    ));
+  const feedbackEvidenceConcept = trainingSubskill === "measure"
+    ? evidenceConcept
+    : classificationTruth === "absent" && caseFocus
+      ? caseFocus
+      : evidenceConcept;
+  const feedbackEvidenceDomain = hintDomain(feedbackEvidenceConcept);
+  const reviewWaveformRois = waveformRois
+    .filter((roi) => (
+      roi.concept === feedbackEvidenceDomain.segment
+      && feedbackEvidenceDomain.leads.includes(roi.lead)
+    ))
+    .slice(0, 6);
+  const reviewedEvidenceLabels = [...new Set(
+    reviewWaveformRois
+      .map((roi) => `${roi.lead} · ${roi.label.replaceAll("_", " ")}`),
+  )].slice(0, 3);
   const carryForwardCopy = measurementRehearsal
     ? "Repeat this method on an ECG with a verified numeric target before treating the value as accurate."
     : result?.correct && classificationCorrect
@@ -772,7 +1011,9 @@ export default function TrainPage() {
     setSubskillTaskAnswer("");
     setSubskillTaskMatches({});
     setSubskillTaskValue("");
-    setConfidence(3);
+    setStructuredInterpretation({ ...EMPTY_FOCUSED_INTERPRETATION });
+    setInterpretationStepIndex(0);
+    setConfidence(null);
     setHintsUsed(0);
     setHintText("");
     setSelectedPoint(null);
@@ -787,7 +1028,9 @@ export default function TrainPage() {
     setCaseSummary(null);
     setPacket(null);
     setSessionComplete(false);
-    setSelectionReason("");
+    setShowSetReview(false);
+    setCompletedSessionRef(null);
+    setCompletedSessionLookupPending(false);
     setEmptyReason(message);
   }
 
@@ -802,9 +1045,11 @@ export default function TrainPage() {
     if (isLearningSubskill(nextCampaign.subskill)) setTrainingSubskill(nextCampaign.subskill);
     setCampaignLength(nextCampaign.requestedLength);
     setSessionComplete(nextCampaign.status === "complete");
+    if (nextCampaign.status !== "complete") setShowSetReview(false);
 
     const current = next.current;
     if (!current) {
+      if (nextCampaign.status === "complete") setShowSetReview(true);
       setCaseFocus("");
       setCaseSummary(null);
       setPacket(null);
@@ -819,10 +1064,6 @@ export default function TrainPage() {
     setCaseSummary(current.case);
     setPacket(current.packet);
     setEmptyReason(null);
-    setSelectionReason(
-      `ECG ${current.slot.position + 1} of ${nextCampaign.length} · Reviewed real ECG · ${current.slot.phase ? PHASE_META[current.slot.phase].label : "Fresh mixed check"} · ${selectionReasonLabel(current.slot.selectionReason)}.`,
-    );
-
     if (current.kind === "pending") {
       clearResponseState();
       return;
@@ -840,10 +1081,12 @@ export default function TrainPage() {
     setSubskillTaskAnswer(response.subskillTaskAnswer ?? "");
     setSubskillTaskMatches(response.subskillTaskMatches ?? {});
     setSubskillTaskValue(response.subskillTaskValue == null ? "" : String(response.subskillTaskValue));
+    setStructuredInterpretation(focusedInterpretationFrom(response.structuredInterpretation));
+    setInterpretationStepIndex(FOCUSED_INTERPRETATION_KEYS.length - 1);
     setConfidence(response.confidence);
     setHintsUsed(response.hintsUsed);
     setViewerTaskEvidence(response.viewerTaskEvidence ?? null);
-    setHintText(response.hintsUsed ? "A visual hint was used before this response was committed." : "");
+    setHintText(response.hintsUsed ? "A visual hint was used before this answer was checked." : "");
     setSubskillReceipt(answer.receipt.effectiveEvidenceLevel === "independent_transfer"
       ? `Progress updated: ${conceptLabel(receiptConceptOverride || handoffConcept || nextCampaign.conceptId)} · ${trainingSkillLabel(nextCampaign.subskill)} · ${answer.summary.correct ? "met" : "recheck"}.`
       : `Practice saved: ${conceptLabel(receiptConceptOverride || handoffConcept || nextCampaign.conceptId)} · ${trainingSkillLabel(nextCampaign.subskill)}.`);
@@ -854,15 +1097,22 @@ export default function TrainPage() {
       grade: answer.grade,
     });
     const feedbackPlan = buildHintPlan(
-      response.expectedAnswer === "present" ? nextCampaign.conceptId : (current.slot.caseFocus ?? nextCampaign.conceptId),
+      nextCampaign.subskill === "measure"
+        ? (receiptConceptOverride || handoffConcept || nextCampaign.conceptId)
+        : response.expectedAnswer === "present"
+          ? nextCampaign.conceptId
+          : (current.slot.caseFocus ?? nextCampaign.conceptId),
       current.packet.ptbxl_plus.fiducials.rois ?? [],
       current.packet.waveform.leads,
     );
     setViewerActions(feedbackPlan.actions);
   }
 
-  async function startCampaign(replaceActive = replaceActiveOnStart) {
-    if (!trainingTarget || poolInfo?.eligibleDistinct === 0) return;
+  async function startCampaign(
+    replaceActive = replaceActiveOnStart,
+    requestedLength = campaignLength,
+  ) {
+    if (!trainingTarget || !selectedAvailability?.available) return;
     setLoading(true);
     setError(null);
     try {
@@ -874,7 +1124,7 @@ export default function TrainPage() {
       const next = await api.startTrainingCampaign({
         conceptId: trainingTarget,
         subskill: trainingSubskill,
-        length: campaignLength,
+        length: requestedLength,
         contextKey,
         replaceActive,
       });
@@ -888,11 +1138,12 @@ export default function TrainPage() {
   }
 
   async function abandonCurrentCampaign() {
-    if (!campaign) return;
+    if (!campaign || campaign.status !== "active") return;
     setLoading(true);
     setError(null);
     try {
       await api.abandonTrainingCampaign(campaign.campaignId);
+      if (pendingDraftKey) window.sessionStorage.removeItem(pendingDraftKey);
       setConfirmAbandon(false);
       setCampaignPayload(null);
       setReplaceActiveOnStart(false);
@@ -906,17 +1157,24 @@ export default function TrainPage() {
   }
 
   async function prepareNextWeakConcept() {
-    if (!campaign || !suggestedAdaptiveTarget) return;
+    if (!campaign) return;
     setLoading(true);
     setError(null);
     try {
-      await api.abandonTrainingCampaign(campaign.campaignId);
+      const target = await findEligibleAdaptiveTarget(trainingSubskill, trainingTarget);
+      if (!target) throw new Error("No other reviewed topic is ready for this exact skill yet.");
       setCampaignPayload(null);
       setReplaceActiveOnStart(false);
       setHandoffConcept("");
       setHandoffResolution(null);
       setAdaptiveMode(true);
-      setTrainingTarget(suggestedAdaptiveTarget);
+      setResolvedAdaptiveTarget(target);
+      setSkillAvailability(null);
+      setAvailabilityFailed(false);
+      setPoolLoading(true);
+      setTrainingTarget(target);
+      campaignLengthTouchedRef.current = true;
+      setCampaignLength(5);
       clearWorkspace("Finding fresh ECGs for the skill that needs the most practice…");
     } catch (err) {
       setError(readableApiError(err, "The next recommended skill could not be prepared. Try again."));
@@ -929,12 +1187,21 @@ export default function TrainPage() {
     void startCampaign(Boolean(campaign));
   }
 
+  function startShortSet() {
+    campaignLengthTouchedRef.current = true;
+    setCampaignLength(5);
+    void startCampaign(Boolean(campaign), 5);
+  }
+
   function changeTarget(value: string) {
-    if (campaign) return;
+    if (campaign || value === trainingTarget) return;
     clearWorkspace("Finding fresh ECGs for this skill…");
     setHandoffConcept("");
     setHandoffResolution(null);
     setAdaptiveMode(false);
+    setSkillAvailability(null);
+    setAvailabilityFailed(false);
+    setPoolLoading(true);
     setTrainingTarget(value);
   }
 
@@ -942,8 +1209,15 @@ export default function TrainPage() {
     if (!isLearningSubskill(value) || campaign) return;
     clearWorkspace("Rechecking the real-ECG pool for this subskill…");
     setTrainingSubskill(value);
+    setResolvedAdaptiveTarget("");
     const target = adaptiveMode ? chooseAdaptiveTarget(catalog, groups, profile, value) : trainingTarget;
+    if (adaptiveMode && target !== trainingTarget) {
+      setSkillAvailability(null);
+      setAvailabilityFailed(false);
+      setPoolLoading(true);
+    }
     setTrainingTarget(target);
+    if (adaptiveMode) void enableAdaptiveMode(value);
   }
 
   async function loadNextAdaptiveDrill() {
@@ -960,18 +1234,57 @@ export default function TrainPage() {
     }
   }
 
-  function enableAdaptiveMode() {
+  async function findEligibleAdaptiveTarget(subskill: LearningSubskill, exclude = "") {
+    const candidates = rankAdaptiveTargets(catalog, groups, profile, subskill)
+      .filter((candidate) => candidate !== exclude);
+    for (const candidate of candidates) {
+      const cached = candidate === trainingTarget ? skillAvailability : null;
+      try {
+        const availability = cached ?? await api.trainingAvailability(candidate);
+        if (availability.subskills[subskill]?.available) return candidate;
+      } catch {
+        // Try the next ranked topic; a transient pool failure should not turn
+        // an unrelated topic into the recommendation.
+      }
+    }
+    return "";
+  }
+
+  async function enableAdaptiveMode(subskill = trainingSubskill) {
     if (campaign) return;
-    const target = chooseAdaptiveTarget(catalog, groups, profile, trainingSubskill);
-    clearWorkspace("Finding ECGs for the skill that needs the most practice…");
-    setAdaptiveMode(true);
-    setHandoffConcept("");
-    setHandoffResolution(null);
-    setTrainingTarget(target);
+    setLoading(true);
+    setError(null);
+    try {
+      const target = await findEligibleAdaptiveTarget(subskill);
+      if (!target) throw new Error("No reviewed ECG pool is ready for that skill yet.");
+      clearWorkspace("Finding ECGs for the skill that needs the most practice…");
+      setAdaptiveMode(true);
+      setResolvedAdaptiveTarget(target);
+      setHandoffConcept("");
+      setHandoffResolution(null);
+      setConceptQuery("");
+      setTopicCategory("all");
+      setShowAllTopics(false);
+      if (target !== trainingTarget) {
+        setSkillAvailability(null);
+        setAvailabilityFailed(false);
+        setPoolLoading(true);
+      } else if (!skillAvailability) {
+        setAvailabilityFailed(false);
+        setPoolLoading(true);
+        setPoolRetryKey((value) => value + 1);
+      }
+      setTrainingTarget(target);
+    } catch (err) {
+      setError(readableApiError(err, "A runnable recommendation could not be found. Choose a topic manually."));
+    } finally {
+      setLoading(false);
+    }
   }
 
   function subskillEvidenceIsValid(evidence = viewerTaskEvidence) {
-    if (trainingSubskill === "recognize" || trainingSubskill === "calibrate_confidence") return true;
+    if (trainingSubskill === "recognize") return true;
+    if (trainingSubskill === "calibrate_confidence") return confidence !== null;
     if (trainingSubskill === "localize") {
       const pointValid = evidence?.mode === "point" && Boolean(evidence.point);
       if (!pointValid) return false;
@@ -995,7 +1308,13 @@ export default function TrainPage() {
         && value >= subskillTask.minValue
         && value <= subskillTask.maxValue;
     }
-    if (["discriminate", "explain_mechanism", "synthesize", "apply_in_context"].includes(trainingSubskill)) {
+    if (trainingSubskill === "synthesize") {
+      return FOCUSED_INTERPRETATION_KEYS.every((key) => structuredInterpretation[key].trim().length > 0)
+        && structuredInterpretation.synthesis.trim().length >= 12
+        && subskillTask?.kind === "single_choice"
+        && Boolean(subskillTaskAnswer);
+    }
+    if (["discriminate", "explain_mechanism", "apply_in_context"].includes(trainingSubskill)) {
       if (subskillTask?.kind === "single_choice") return Boolean(subskillTaskAnswer);
       if (subskillTask?.kind === "matching") {
         const selected = subskillTask.rows.map((row) => subskillTaskMatches[row.id]);
@@ -1011,6 +1330,10 @@ export default function TrainPage() {
   function missingCommitRequirements(): string[] {
     const gaps: string[] = [];
     if (!selectedAnswer) gaps.push("Choose the target-pattern decision.");
+
+    if (trainingSubskill === "calibrate_confidence" && confidence === null) {
+      gaps.push("Choose how certain you are before checking this calibration task.");
+    }
 
     if (trainingSubskill === "localize") {
       if (viewerTaskEvidence?.mode !== "point" || !viewerTaskEvidence.point) {
@@ -1044,7 +1367,16 @@ export default function TrainPage() {
       } else if (evidenceNote.trim().length < 15 || !/\d/.test(evidenceNote)) {
         gaps.push("Record a numeric estimate and measurement method in the evidence note.");
       }
-    } else if (["discriminate", "explain_mechanism", "synthesize", "apply_in_context"].includes(trainingSubskill)) {
+    } else if (trainingSubskill === "synthesize") {
+      const missingSteps = interpretationSteps.filter((step) => !structuredInterpretation[step.key].trim());
+      if (missingSteps.length) gaps.push(`Complete ${missingSteps.length} remaining systematic interpretation step${missingSteps.length === 1 ? "" : "s"}.`);
+      if (structuredInterpretation.synthesis.trim() && structuredInterpretation.synthesis.trim().length < 12) {
+        gaps.push("Write a concise final impression of at least 12 characters.");
+      }
+      if (subskillTask?.kind === "single_choice" && !subskillTaskAnswer) {
+        gaps.push("Choose the reviewed evidence-bounded synthesis in the final step.");
+      }
+    } else if (["discriminate", "explain_mechanism", "apply_in_context"].includes(trainingSubskill)) {
       if (subskillTask?.kind === "single_choice" && !subskillTaskAnswer) {
         gaps.push("Answer the selected-skill question.");
       } else if (subskillTask?.kind === "matching") {
@@ -1075,15 +1407,17 @@ export default function TrainPage() {
       const next = await api.submitTrainingCampaignCase(campaign.campaignId, {
         caseId: caseSummary.caseId,
         selectedAnswer,
-        confidence,
+        confidence: trainingSubskill === "calibrate_confidence" ? confidence : null,
         hintsUsed,
         evidenceNote,
         viewerTaskEvidence,
         subskillTaskAnswer,
         subskillTaskMatches,
         subskillTaskValue: subskillTaskValue.trim() === "" ? null : Number(subskillTaskValue),
+        structuredInterpretation: trainingSubskill === "synthesize" ? structuredInterpretation : null,
         receiptConcept: evidenceConcept,
       });
+      if (pendingDraftKey) window.sessionStorage.removeItem(pendingDraftKey);
       applyCampaignPayload(next, evidenceConcept);
       try {
         setProfile(await api.profile());
@@ -1107,192 +1441,124 @@ export default function TrainPage() {
 
   if (!campaign) {
     return (
-      <div className={`page train-page train-page-setup ${styles.setupPage}`}>
-        <section className="panel pad train-campaign-setup train-setup-single" aria-label="Configure training set">
-          <header className="train-setup-header">
-            <div>
-              <p className="eyebrow">Competency training</p>
-              <h1>Train one visual skill until it sticks</h1>
-              <p className="muted">
-                Choose one skill and a number of unique real ECGs. Every tracing in the set is different, and your progress is saved.
+      <FocusedPracticeSetup
+        returnTo={returnTo}
+        returnLabel={returnTo ? learningReturnLabel(returnTo) : undefined}
+        notices={(
+          <>
+            {returnTo ? (
+              <p className="selection-note train-setup-handoff">
+                This practice was chosen from your last activity for <strong>{conceptLabel(evidenceConcept)} · {trainingSkillLabel(trainingSubskill)}</strong>. Your place there is saved.
+                {handoffResolution && !handoffResolution.exact ? <> The closest available ECG topic is <strong>{conceptLabel(handoffResolution.caseConcept)}</strong>.</> : null}
               </p>
-            </div>
-            {returnTo ? <Link className="button subtle" href={returnTo}><ArrowLeft size={16} aria-hidden="true" /> {learningReturnLabel(returnTo)}</Link> : null}
-          </header>
-
-          {returnTo ? (
-            <p className="selection-note train-setup-handoff">
-              This set was launched for <strong>{conceptLabel(evidenceConcept)} · {trainingSkillLabel(trainingSubskill)}</strong>. Your place in the prior activity is preserved.
-              {handoffResolution && !handoffResolution.exact ? <> It uses the closest reviewed <strong>{conceptLabel(handoffResolution.caseConcept)}</strong> ECG family because {handoffResolution.rationale}; you still need to complete the selected skill.</> : null}
-            </p>
-          ) : null}
-          {replaceActiveOnStart ? (
-            <p className="uncertainty train-setup-handoff" role="status">
-              This handoff targets a different competency than your saved set. Starting it will close the saved set; completed ECGs remain in your learning history.
-            </p>
-          ) : null}
-          {error ? (
-            <div className="warning train-error mode-recovery-notice" role="alert">
-              <span>{error}</span>
-              <button className="button subtle small" type="button" onClick={() => setBootRetryKey((value) => value + 1)}>
-                <RefreshCw size={15} aria-hidden="true" /> Retry loading
-              </button>
-            </div>
-          ) : null}
-
-          <div className="train-setup-grid">
-            <section className="train-setup-competency" aria-label="Choose a competency">
-              <h2><Target size={18} aria-hidden="true" /> Choose a competency</h2>
-              <div className="train-concept-search">
-                <label htmlFor="train-concept-search">Find a concept</label>
-                <div className="train-concept-search-input">
-                  <Search size={16} aria-hidden="true" />
-                  <input
-                    id="train-concept-search"
-                    type="search"
-                    value={conceptQuery}
-                    onChange={(event) => setConceptQuery(event.target.value)}
-                    placeholder="Search concepts"
-                    autoComplete="off"
-                    disabled={loading || Boolean(handoffConcept)}
-                    aria-describedby="train-concept-search-status"
-                  />
-                </div>
-                <div id="train-concept-search-status" className="sr-only" aria-live="polite">
-                  {conceptQuery.trim()
-                    ? `${conceptMatches.length} matching concept${conceptMatches.length === 1 ? "" : "s"} shown.`
-                    : "Type to find a concept by name or category."}
-                </div>
-                {conceptQuery.trim() ? (
-                  <div className="train-concept-results" aria-label="Matching concepts">
-                    {conceptMatches.length ? (
-                      <ul>
-                        {conceptMatches.map((concept) => (
-                          <li key={concept.id}>
-                            <button
-                              className={concept.id === trainingTarget ? "active" : ""}
-                              type="button"
-                              onClick={() => {
-                                changeTarget(concept.id);
-                                setConceptQuery("");
-                              }}
-                            >
-                              <span><strong>{concept.label}</strong><small>{concept.groupLabel}</small></span>
-                              <small>{concept.reliableCaseCount.toLocaleString()} ECGs</small>
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : <p className="muted">No available concept matches “{conceptQuery.trim()}”.</p>}
-                  </div>
-                ) : null}
-              </div>
-              <div className="train-setup-fields">
-                <div className="field train-target-field">
-                  <label htmlFor="train-target">Target concept</label>
-                  <select
-                    id="train-target"
-                    value={trainingTarget}
-                    onChange={(event) => changeTarget(event.target.value)}
-                    disabled={loading || Boolean(handoffConcept)}
-                  >
-                    {selectorGroups.map((group) => (
-                      <optgroup label={group.label} key={group.id}>
-                        {group.concepts.filter((concept) => concept.available).map((concept) => (
-                          <option value={concept.id} key={concept.id}>
-                            {concept.label} · {concept.reliableCaseCount.toLocaleString()} cases
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                </div>
-                <div className="field train-target-field">
-                  <label htmlFor="train-subskill">Skill to practice</label>
-                  <select id="train-subskill" value={trainingSubskill} onChange={(event) => changeSubskill(event.target.value)} disabled={loading || Boolean(handoffConcept)}>
-                    {TRAINING_SUBSKILLS.map((subskill) => <option key={subskill.id} value={subskill.id}>{subskill.label}</option>)}
-                  </select>
-                </div>
-              </div>
-              <button className={`button small train-adaptive-button ${adaptiveMode ? "primary" : "subtle"}`} type="button" aria-pressed={adaptiveMode} onClick={enableAdaptiveMode} disabled={loading}>
-                <Sparkles size={15} aria-hidden="true" /> {adaptiveMode ? `Recommended · ${suggestedMastery.recommendationLabel === "unassessed skill" ? "not checked yet" : suggestedMastery.recommendationLabel}` : "Use recommended skill"}
-              </button>
-              {handoffConcept ? (
-                <p className="selection-note train-setup-note">
-                  This target stays fixed so your result remains connected to the activity that sent you here. Choose <strong>Use recommended skill</strong> to start a separate adaptive set.
-                </p>
-              ) : null}
-              <div className="objective-meta train-mastery-meta">
-                <strong>{conceptLabel(evidenceConcept)}</strong>
-                <span className="muted">{masteryPresentation.label}</span>
-              </div>
-              {targetIsHighYield ? <span className="pill train-high-yield">High-yield target</span> : null}
-              {masteryPresentation.value === null ? (
-                <p className="muted train-setup-note">{masteryPresentation.detail}</p>
-              ) : (
-                <progress className={`train-mastery-progress ${masteryClass(masteryPresentation.value)}`} value={masteryPresentation.value} max={1} aria-label={`${Math.round(masteryPresentation.value * 100)} percent mastery`} />
-              )}
-              <p className="muted train-setup-note">
-                Practice focus: <strong>{conceptLabel(evidenceConcept)} · {activeSubskillLabel}</strong>.
+            ) : null}
+            {replaceActiveOnStart ? (
+              <p className="uncertainty train-setup-handoff" role="status">
+                Starting this plan will close your saved set. Completed ECGs will remain in your learning history.
               </p>
-              <p className="selection-note train-setup-note">
-                {poolInfo?.independentReceiptsAvailable
-                  ? "Some fresh mixed ECGs can update your mastery estimate; practice with hints still shapes what comes next."
-                  : trainingSubskill === "measure"
-                    ? "This ECG family has no reviewed numeric reference. Your written value is saved as rehearsal only; it will not be marked correct or update measurement mastery."
-                  : trainingSubskill === "apply_in_context"
-                    ? "This ECG-only lab has no patient vignette. It rehearses which clinical facts are still needed; it does not assess management or application mastery."
-                    : "This lab builds the skill; a later mixed challenge checks whether it transfers."}
-              </p>
-              {handoffResolution && !handoffResolution.exact ? (
-                <p className="selection-note train-setup-note">
-                  Practice tracing: this decision asks about <strong>{conceptLabel(classificationTarget)}</strong>. Mastery is checked on a directly matched ECG.
-                </p>
-              ) : null}
-            </section>
-
-            <section className="train-campaign-controls" aria-label="Training set size and available ECGs">
-              <div className="field">
-                <label htmlFor="train-campaign-length">Requested unique ECGs</label>
-                <select
-                  id="train-campaign-length"
-                  value={campaignLength}
-                  onChange={(event) => {
-                    campaignLengthTouchedRef.current = true;
-                    setCampaignLength(Number(event.target.value));
-                  }}
-                  disabled={loading}
-                >
-                  {TRAINING_SESSION_LENGTHS.map((length) => <option value={length} key={length}>{length.toLocaleString()}</option>)}
-                </select>
-              </div>
-              <div className="train-pool-readout" aria-live="polite">
-                <strong>{poolLoading ? "Counting…" : `${(poolInfo?.eligibleDistinct ?? 0).toLocaleString()} unique ECGs available`}</strong>
-                <span className="muted">Reviewed real ECG waveforms only</span>
-                {!poolLoading && poolInfo ? <span className="muted">
-                  {poolInfo.roleCounts.target.toLocaleString()} pattern present · {poolInfo.roleCounts.mimic.toLocaleString()} close comparisons · {poolInfo.roleCounts.negative.toLocaleString()} other contrasts
-                </span> : null}
-                {!poolLoading && poolInfo && campaignLength > poolInfo.eligibleDistinct ? (
-                  <span className="uncertainty">Your {campaignLength.toLocaleString()} request will be capped at {poolInfo.eligibleDistinct.toLocaleString()}; only unique real ECGs are used—no synthetic or repeated case will fill the gap.</span>
-                ) : null}
-              </div>
-              {!poolLoading && poolInfo?.eligibleDistinct === 0 ? (
-                <p className="warning train-empty-reason" role="status">
-                  {emptyReason ?? "This exact finding and skill do not currently have a suitable real-ECG set."} Choose another skill or finding to continue.
-                </p>
-              ) : null}
-              <button
-                className="button primary train-start-button"
-                type="button"
-                onClick={() => void startCampaign()}
-                disabled={loading || poolLoading || !trainingTarget || !poolInfo?.eligibleDistinct}
-              >
-                <ShieldCheck size={16} aria-hidden="true" /> {replaceActiveOnStart ? "Replace saved set and start" : "Start training"}
-              </button>
-            </section>
+            ) : null}
+          </>
+        )}
+        errorNotice={error ? (
+          <div className="warning train-error mode-recovery-notice" role="alert">
+            <span>{error}</span>
+            <button className="button subtle small" type="button" onClick={() => {
+              setBootRetryKey((value) => value + 1);
+              setPoolRetryKey((value) => value + 1);
+            }}>
+              <RefreshCw size={15} aria-hidden="true" /> Retry loading
+            </button>
           </div>
-        </section>
-      </div>
+        ) : null}
+        query={conceptQuery}
+        onQueryChange={(value) => {
+          setConceptQuery(value);
+          setShowAllTopics(false);
+        }}
+        category={topicCategory}
+        categories={[...FOCUSED_CATEGORIES]}
+        onCategoryChange={(value) => {
+          setTopicCategory(value);
+          setShowAllTopics(false);
+        }}
+        topics={visibleTopicOptions}
+        selectedTopic={selectedTopicOption}
+        selectedTopicId={trainingTarget}
+        onTopicSelect={(value) => {
+          changeTarget(value);
+          setConceptQuery("");
+        }}
+        showAllTopics={showAllTopics || Boolean(normalizedConceptQuery)}
+        onToggleAllTopics={() => setShowAllTopics((value) => !value)}
+        skills={focusedSkillOptions}
+        selectedSkill={trainingSubskill}
+        onSkillSelect={changeSubskill}
+        adaptiveMode={adaptiveMode}
+        recommendationText={adaptiveMode
+          ? `${suggestedMastery.label}. This plan starts with ${trainingSkillLabel(trainingSubskill).toLowerCase()}.`
+          : `${masteryPresentation.label}. You can switch the skill without changing the topic.`}
+        onUseRecommendation={enableAdaptiveMode}
+        campaignLength={campaignLength}
+        visibleLengths={FOCUSED_VISIBLE_LENGTHS}
+        extendedLengths={[]}
+        onLengthChange={(value) => {
+          campaignLengthTouchedRef.current = true;
+          setCampaignLength(value);
+        }}
+        poolLoading={poolLoading}
+        poolAvailable={Boolean(selectedAvailability?.available)}
+        poolMessage={emptyReason}
+        loading={loading}
+        replaceActive={replaceActiveOnStart}
+        onStart={() => void startCampaign()}
+      />
+    );
+  }
+
+  if (sessionComplete && showSetReview) {
+    const lunaSetScope = `training-set:${campaign.campaignId}:${campaign.length}`;
+    return (
+      <FocusedSetReview
+        conceptId={evidenceConcept}
+        conceptLabel={conceptLabel(evidenceConcept)}
+        skillLabel={trainingSkillLabel(trainingSubskill)}
+        total={campaign.length}
+        summary={campaignSummary}
+        masteryLabel={masteryPresentation.label}
+        readyForRapid={readyForRapid}
+        rapidHref={rapidTransferHref}
+        rapidTitle={trainingSubskill === "synthesize" ? "Try an unannounced full read" : undefined}
+        rapidDetail={trainingSubskill === "synthesize" ? "Transfer the same sequence into Rapid Practice" : undefined}
+        sessionRef={completedSessionRef}
+        sessionLookupPending={completedSessionLookupPending}
+        loading={loading}
+        error={error}
+        tutor={(
+          <TutorChat
+            mode="practice"
+            roleLabel="Luna · set review"
+            lessonId={lunaSetScope}
+            threadScope={lunaSetScope}
+            viewerState={{ activity: "training_set_debrief" }}
+            trainingSetContext={{
+              campaignId: campaign.campaignId,
+              answerCount: campaign.length,
+              version: "training-set-debrief-v1",
+            }}
+            openingPrompt="Ask Luna to explain a recurring miss, connect this set to your recent progress, or create a short follow-up check. Luna uses the saved results from this set."
+            resetKey={lunaSetScope}
+            collapsedByDefault
+          />
+        )}
+        onRepeat={resetCurrentSet}
+        onRepeatShort={startShortSet}
+        onPracticeRecommendation={suggestedAdaptiveTarget && suggestedAdaptiveTarget !== trainingTarget
+          ? () => void prepareNextWeakConcept()
+          : undefined}
+        clinicalHref={clinicalHref}
+        returnTo={returnTo}
+        returnLabel={returnTo ? learningReturnLabel(returnTo) : undefined}
+      />
     );
   }
 
@@ -1300,25 +1566,16 @@ export default function TrainPage() {
   const debriefPanel = sessionComplete ? (
     <section className="panel pad train-debrief-panel" aria-live="polite">
       <p className="eyebrow">Training set complete</p>
-      <h2>{sessionCorrect.toLocaleString()}/{campaign.length.toLocaleString()} {trainingSkillLabel(trainingSubskill).toLowerCase()} tasks met</h2>
+      <h2>{sessionCorrect.toLocaleString()}/{campaign.length.toLocaleString()} {trainingSkillLabel(trainingSubskill).toLowerCase()} skill checks met</h2>
       <p className="muted">
-        Pattern decision: {sessionClassificationCorrect.toLocaleString()}/{campaign.length.toLocaleString()} correct · both decision and selected skill: {fullTaskCorrect.toLocaleString()}/{campaign.length.toLocaleString()}. {independentReceipts} fresh mixed ECG check{independentReceipts === 1 ? "" : "s"} contributed to your mastery estimate.
+        Topic decision: {sessionClassificationCorrect.toLocaleString()}/{campaign.length.toLocaleString()} correct · both the decision and selected skill: {fullTaskCorrect.toLocaleString()}/{campaign.length.toLocaleString()}. {independentReceipts} fresh mixed ECG check{independentReceipts === 1 ? "" : "s"} contributed to your mastery estimate.
       </p>
-      <div className="train-debrief-grid">
-        {PHASE_SUMMARY.map((item) => {
-          const phase = campaignSummary?.byPhase[item.phase] ?? { attempted: 0, correct: 0 };
-          return (
-            <div key={item.phase}>
-              <span>{item.label}</span>
-              <strong>{phase.correct.toLocaleString()}/{phase.attempted.toLocaleString()}</strong>
-            </div>
-          );
-        })}
-      </div>
       <div className="selection-note train-next-recommendation">
         <strong><Sparkles size={15} aria-hidden="true" /> Recommended next</strong>
         {readyForRapid ? (
-          <p>You earned at least two independent recognition receipts, read {transferCorrect}/{transferAttemptCount} fresh mixed ECGs correctly, and reached at least 80% overall. Move to Rapid practice, where the target is no longer named in advance.</p>
+          <p>{trainingSubskill === "synthesize"
+            ? "You completed at least 80% of both the formal interpretation task and the target-pattern check. Try the same sequence in Rapid Practice, where the target is no longer announced."
+            : "You met at least 80% of the focused recognition checks. Move to Rapid Practice for an independent mixed read where the target is no longer named in advance."}</p>
         ) : (
           <p>Try another focused set. It will mix the target with close comparisons and fresh ECGs.</p>
         )}
@@ -1328,13 +1585,13 @@ export default function TrainPage() {
           <RefreshCw size={16} aria-hidden="true" /> Start another set
         </button>
         {readyForRapid ? (
-          <Link className="button" href={`/rapid?focus=${encodeURIComponent(evidenceConcept)}&receiptConcept=${encodeURIComponent(evidenceConcept)}&subskill=recognize`}>
-            Start mixed Rapid <ArrowRight size={16} aria-hidden="true" />
+          <Link className="button" href={rapidTransferHref}>
+            {trainingSubskill === "synthesize" ? "Start an unannounced full read" : "Start mixed Rapid"} <ArrowRight size={16} aria-hidden="true" />
           </Link>
         ) : null}
         {!handoffConcept && suggestedAdaptiveTarget && suggestedAdaptiveTarget !== trainingTarget ? (
           <button className="button subtle" type="button" onClick={() => void prepareNextWeakConcept()} disabled={loading}>
-            Practice another recommended skill
+            Practice a recommended topic
           </button>
         ) : null}
         {returnTo ? <Link className="button subtle" href={returnTo}><ArrowLeft size={16} aria-hidden="true" /> {learningReturnLabel(returnTo)}</Link> : null}
@@ -1345,11 +1602,11 @@ export default function TrainPage() {
   return (
     <div className="page train-page train-page-active">
       <LearningWorkspaceShell className="train-runner" phase={workspacePhase} tutorResetKey={caseSummary?.caseId}>
-        <SessionBar className="train-session-bar" tutorAvailable={Boolean(result && caseSummary)} tutorLabel="Open tutor">
+        <SessionBar className="train-session-bar" tutorAvailable={Boolean(result && caseSummary)} tutorLabel="Ask Luna">
           <section className="train-session-summary" aria-label="Focused training set">
             <div className="train-session-identity">
-              <span className="eyebrow">{currentSlot ? `Case ${currentSlot.position + 1}` : `${committedCount} cases`} of {campaign.length.toLocaleString()}</span>
-              <strong>{activeRecipe.label}</strong>
+              <span className="eyebrow">Focused practice · ECG {currentSlot ? currentSlot.position + 1 : committedCount} of {campaign.length.toLocaleString()}</span>
+              <strong>{conceptLabel(evidenceConcept)} · {activeSubskillLabel}</strong>
             </div>
             <progress
               className="train-session-progress-native"
@@ -1357,12 +1614,14 @@ export default function TrainPage() {
               max={Math.max(1, campaign.length)}
               aria-label={`${committedCount} of ${campaign.length} cases completed`}
             />
-            <span className="train-session-count">{committedCount.toLocaleString()}/{campaign.length.toLocaleString()} completed</span>
+            <span className="train-session-count">{committedCount.toLocaleString()} complete</span>
           </section>
           {returnTo ? <Link className="button subtle small train-return-link" href={returnTo}><ArrowLeft size={15} aria-hidden="true" /> {learningReturnLabel(returnTo)}</Link> : null}
-          <button ref={abandonTriggerRef} className="button warn small train-abandon-button" type="button" onClick={() => setConfirmAbandon(true)} disabled={loading || confirmAbandon}>
-            <XCircle size={15} aria-hidden="true" /> Leave training set
-          </button>
+          {!sessionComplete ? (
+            <button ref={abandonTriggerRef} className="button warn small train-abandon-button" type="button" onClick={() => setConfirmAbandon(true)} disabled={loading || confirmAbandon}>
+              <XCircle size={15} aria-hidden="true" /> Exit set
+            </button>
+          ) : null}
         </SessionBar>
 
         <WorkspaceNotices>
@@ -1404,36 +1663,51 @@ export default function TrainPage() {
         {packet && !result && !sessionComplete ? (
           <section className="train-mobile-task-dock" aria-label="Current training task">
             <div>
-              <span>{activeRecipe.label} · {activeSubskillLabel}</span>
-              <strong>{answerContract.prompt}</strong>
+              <span>{conceptLabel(classificationTarget)} · {activeSubskillLabel}</span>
+              <strong>{primaryWorkspacePrompt}</strong>
               {viewerTask ? <small>On trace: {viewerTask.prompt}</small> : null}
             </div>
             <a className="button subtle small" href="#train-response-task">Go to response</a>
           </section>
         ) : null}
 
-        <WorkspaceBody className="train-active-workspace">
+        <WorkspaceBody className={`train-active-workspace${trainingSubskill === "synthesize" && !result ? " train-systematic-workspace" : ""}`}>
           <WaveformPane className="train-viewer-pane" label="Training ECG waveform">
+            {packet ? (
+              <header className="train-waveform-taskbar">
+                <div>
+                  <span>{result ? "Review the tracing" : `ECG ${currentSlot ? currentSlot.position + 1 : committedCount + 1} · ${activeSubskillLabel}`}</span>
+                  <strong>{result
+                    ? `Compare your response with the reviewed evidence for ${conceptLabel(classificationTarget)}.`
+                    : primaryWorkspacePrompt}</strong>
+                </div>
+                {viewerTask && !result ? <small>{viewerTask.prompt}</small> : <small>{conceptLabel(evidenceConcept)}</small>}
+              </header>
+            ) : null}
             {caseSummary ? (
               <ECGViewer
                 ecgRef={caseSummary.caseId}
                 waveformScope={{ kind: "training", campaignId: campaign.campaignId }}
                 actions={viewerActions}
-                groundedRois={result ? waveformRois : []}
-                gradingRois={result ? waveformRois : []}
+                groundedRois={result ? reviewWaveformRois : []}
+                gradingRois={result ? reviewWaveformRois : []}
                 onCoordinate={setSelectedPoint}
                 medianBeats={packet?.ptbxl_plus.median_beats ?? null}
                 task={!result ? viewerTask : undefined}
                 onTaskEvidence={setViewerTaskEvidence}
+                taskEvidence={!result ? viewerTaskEvidence : null}
                 onTaskReset={() => setViewerTaskEvidence(null)}
                 gradingMode="deferred"
+                toolbar="practice"
+                reviewMode={Boolean(result)}
+                reviewEvidence={result ? viewerTaskEvidence : null}
               />
             ) : (
-              <div className="panel pad train-empty" role="status" aria-live="polite">{emptyReason ?? "Loading a confidence-gated ECG..."}</div>
+              <div className="panel pad train-empty" role="status" aria-live="polite">{emptyReason ?? "Preparing the ECG…"}</div>
             )}
           </WaveformPane>
 
-          <ResponseRail className="train-response-rail" label={result ? "Training feedback" : sessionComplete ? "Set review" : "Training response"} phase={workspacePhase}>
+          <ResponseRail className={`train-response-rail${trainingSubskill === "synthesize" && !result ? " train-response-rail-systematic" : ""}`} label={result ? "Training feedback" : sessionComplete ? "Set review" : "Training response"} phase={workspacePhase}>
             {result && packet ? (
               <>
                 <section className="panel pad train-feedback-panel" aria-live="polite">
@@ -1453,18 +1727,51 @@ export default function TrainPage() {
                       <small>{measurementRehearsal ? "No verified numeric key" : "Scored separately from the pattern decision"}</small>
                     </div>
                   </div>
-                  <p>
-                    You chose <strong>{selectedAnswerLabel}</strong>; the reviewed pattern decision is <strong>{groundedAnswerLabel}</strong>. {measurementRehearsal
-                      ? "The written number is saved as rehearsal because this case has no validated numeric answer."
-                      : classificationCorrect === result.correct
-                        ? classificationCorrect ? "Both scoring axes were met." : "Both scoring axes need another look."
-                        : "The pattern decision and selected-skill task had different outcomes, shown separately above."}
-                  </p>
+                  <div className="train-review-story">
+                    <section>
+                      <span>What you chose</span>
+                      <strong>{selectedAnswerLabel}</strong>
+                      <p>{taskResult?.kind === "single_choice"
+                        ? submittedTaskOption?.label ?? "No skill response"
+                        : taskResult?.kind === "numeric_fill_in"
+                          ? `${taskResult.submittedValue ?? "No value"} ${taskResult.unit}`
+                          : taskResult?.kind === "matching"
+                            ? `${taskResult.rows?.filter((row) => row.correct).length ?? 0} of ${taskResult.rows?.length ?? 0} pairs supported`
+                            : evidenceNote.trim() || "Pattern decision only"}</p>
+                    </section>
+                    <section>
+                      <span>What the ECG supports</span>
+                      <strong>{groundedAnswerLabel}</strong>
+                      <p>{classificationTruth === "absent" && caseFocus
+                        ? `The closest supported contrast is ${conceptLabel(caseFocus)}. ${reviewedEvidenceLabels.length ? `${reviewedEvidenceLabels.join(" · ")}. ` : ""}${feedbackEvidenceDomain.text}`
+                        : reviewedEvidenceLabels.length
+                          ? `${reviewedEvidenceLabels.join(" · ")}. ${feedbackEvidenceDomain.text}`
+                          : feedbackEvidenceDomain.text}</p>
+                    </section>
+                    <section>
+                      <span>Why it matters</span>
+                      <strong>{classificationCorrect === result.correct
+                        ? classificationCorrect ? "The decision and reasoning agree" : "Both layers need review"
+                        : "The two skills separated"}</strong>
+                      <p>{measurementRehearsal
+                        ? "This value is rehearsal because the ECG has no verified numeric key."
+                        : classificationCorrect === result.correct
+                          ? classificationCorrect
+                            ? "You linked the target decision to the selected skill."
+                            : "Recheck the waveform discriminator before repeating the task."
+                          : "A correct label does not automatically prove the evidence skill—and the reverse is also true."}</p>
+                    </section>
+                    <section>
+                      <span>Try next</span>
+                      <strong>Carry one discriminator forward</strong>
+                      <p>{carryForwardCopy}</p>
+                    </section>
+                  </div>
                   {taskResult?.kind === "numeric_fill_in" ? (
                     <section className="train-task-feedback" aria-label="Measurement answer review">
                       <strong>{taskResult.correct ? "Measurement within range" : "Measurement needs review"}</strong>
                       <p>
-                        You entered {taskResult.submittedValue ?? "no value"} {taskResult.unit}. The exact packet measurement is {taskResult.expectedValue} {taskResult.unit}
+                        You entered {taskResult.submittedValue ?? "no value"} {taskResult.unit}. The reviewed ECG measurement is {taskResult.expectedValue} {taskResult.unit}
                         {taskResult.tolerance != null ? ` (accepted within ±${taskResult.tolerance} ${taskResult.unit})` : ""}.
                       </p>
                     </section>
@@ -1495,6 +1802,13 @@ export default function TrainPage() {
                       </ul>
                     </section>
                   ) : null}
+                  {trainingSubskill === "synthesize" ? (
+                    <FocusedInterpretationReview
+                      submitted={taskResult?.systematicInterpretation ?? structuredInterpretation}
+                      reviewed={taskResult?.reviewedFramework ?? []}
+                      steps={interpretationSteps}
+                    />
+                  ) : null}
                   {!result.focusGrounded ? (
                     <p className="warning train-grounding-mismatch">
                       This ECG could not verify the selected training target, so it will not affect your mastery estimate.
@@ -1506,80 +1820,61 @@ export default function TrainPage() {
                     <span className={`pill ${classificationCorrect ? "" : "disabled"}`}>Pattern decision · {classificationCorrect ? "met" : "review"}</span>
                     {classificationTruth === "absent" ? <span className="pill">Contrast finding: {conceptLabel(caseFocus)}</span> : null}
                   </div>
-                  <div className="train-carry-forward">
-                    <strong>Carry forward</strong>
-                    <p>{carryForwardCopy}</p>
-                  </div>
+                  {focusConfidence?.warnings.length ? (
+                    <p className="uncertainty train-confidence-warning">Localized noise limits fine-detail claims; use the clearest displayed leads.</p>
+                  ) : null}
                   {!sessionComplete ? (
                     <button className="button primary train-next-button" type="button" onClick={loadNextAdaptiveDrill} disabled={loading}>
-                      Next case in set <ArrowRight size={16} aria-hidden="true" />
+                      Next ECG <ArrowRight size={16} aria-hidden="true" />
                     </button>
-                  ) : null}
+                  ) : (
+                    <button className="button primary train-next-button" type="button" onClick={() => setShowSetReview(true)} disabled={loading}>
+                      Review this set <ArrowRight size={16} aria-hidden="true" />
+                    </button>
+                  )}
                 </section>
 
-                <section className="panel pad train-evidence" aria-label="Answer evidence">
-                  <h2><Eye size={18} aria-hidden="true" /> Why this answer</h2>
-                  <div className="evidence-grid train-evidence-grid">
-                    <div className="evidence-card train-confidence-card">
-                      <h3>{conceptLabel(evidenceConcept)} · {groundedAnswerLabel}</h3>
-                      {focusConfidence ? (
-                        <>
-                          <p className="muted">{focusConfidence.tier === "A" ? "Strong" : "Reviewed"} source and waveform support.</p>
-                        </>
-                      ) : (
-                        <p className="muted">
-                          {classificationTruth === "absent"
-                            ? `The reviewed labels do not support ${conceptLabel(classificationTarget)}. The contrast case is ${conceptLabel(caseFocus)}.`
-                            : "This case was scored from its reviewed source labels and waveform evidence."}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  {focusConfidence?.warnings.length ? (
-                    <p className="uncertainty train-confidence-warning">Data quality note: localized noise limits fine-detail claims, so rely on the clearest leads.</p>
-                  ) : null}
-                  {measurementRehearsal ? (
-                    <p className="uncertainty train-confidence-warning">
-                      Measurement boundary: the note records your method and estimate only. No numeric accuracy or measurement-mastery claim was created.
-                    </p>
-                  ) : null}
-                </section>
-                {debriefPanel}
               </>
             ) : sessionComplete ? debriefPanel : packet ? (
               <>
                 <section className="panel pad train-drill-panel" id="train-response-task">
-                  <div className="train-current-target">
-                    <div>
-                      <p className="eyebrow">{activeRecipe.label}</p>
-                      <h2>{activeSubskillLabel}</h2>
-                      <strong className="train-current-concept">{conceptLabel(classificationTarget)}</strong>
-                    </div>
-                    <span className="muted">{masteryPresentation.label}</span>
-                  </div>
-                  {masteryPresentation.value === null ? (
-                    <p className="muted train-task-prompt">{masteryPresentation.detail}</p>
+                  {trainingSubskill === "synthesize" && subskillTask?.kind === "single_choice" ? (
+                    <FocusedInterpretationStepper
+                      value={structuredInterpretation}
+                      onChange={setStructuredInterpretation}
+                      activeIndex={interpretationStepIndex}
+                      onActiveIndexChange={setInterpretationStepIndex}
+                      steps={interpretationSteps}
+                      classificationPrompt={answerContract.prompt}
+                      classificationOptions={answerContract.options}
+                      selectedClassification={selectedAnswer}
+                      onClassificationChange={setSelectedAnswer}
+                      synthesisPrompt={subskillTask.prompt}
+                      synthesisOptions={subskillTask.options}
+                      selectedSynthesis={subskillTaskAnswer}
+                      onSynthesisChange={setSubskillTaskAnswer}
+                      disabled={loading}
+                    />
                   ) : (
-                    <progress className={`train-mastery-progress ${masteryClass(masteryPresentation.value)}`} value={masteryPresentation.value} max={1} aria-label={`${Math.round(masteryPresentation.value * 100)} percent mastery`} />
-                  )}
+                    <>
+                    <div className="train-current-target">
+                    <div>
+                      <p className="eyebrow">Quick read</p>
+                      <h2>{answerContract.prompt}</h2>
+                      <strong className="train-current-concept">{conceptLabel(classificationTarget)} · first decision</strong>
+                    </div>
+                    <span className="pill">1</span>
+                  </div>
                   <p className="muted train-task-prompt">
-                    {answerContract.prompt} Choose the best answer after reading the trace.
-                  </p>
-                  <p className="selection-note train-receipt-boundary">
-                    {poolInfo?.independentReceiptsAvailable
-                      ? "Fresh mixed ECGs can update your mastery estimate; the other cases build and calibrate the skill."
-                      : trainingSubskill === "measure"
-                        ? "No validated measurement target exists for this ECG family. Your written value is rehearsal only and cannot verify accuracy or update measurement mastery."
-                      : trainingSubskill === "apply_in_context"
-                        ? "No patient vignette is present. This rehearses which context is missing; it does not assess a management decision or application mastery."
-                        : "This focused task builds the skill; a later mixed challenge checks transfer."}
+                    {trainingSubskill === "recognize"
+                      ? "Focus on the crux of the tracing and make one concise pattern decision."
+                      : <>Make a concise target decision first. The next prompt tests <strong>{activeSubskillLabel.toLowerCase()}</strong> without requiring a full interpretation sweep.</>}
                   </p>
                   {handoffResolution && !handoffResolution.exact ? (
-                    <p className="selection-note train-receipt-boundary">
-                      Practice tracing: this decision asks about <strong>{conceptLabel(classificationTarget)}</strong>. Mastery is checked on a directly matched ECG.
+                    <p className="selection-note train-task-note">
+                      This activity uses the closest available ECG pattern while preserving your original learning target.
                     </p>
                   ) : null}
-                  {viewerTask ? <p className="selection-note train-viewer-task"><strong>Trace task:</strong> {viewerTask.prompt} Complete it directly on the waveform; it is checked separately from your classification.</p> : null}
                   <div className="grid train-options" role="group" aria-label="Target decision">
                     {answerContract.options.map((option) => {
                       const selected = option.id === selectedAnswer;
@@ -1600,9 +1895,14 @@ export default function TrainPage() {
                   </div>
 
                   {subskillTask && caseSummary ? (
-                    <div className="panel pad train-subskill-task">
-                      <p className="eyebrow">Practice {subskillTask.subskill.replaceAll("_", " ")}</p>
-                      <h3>{subskillTask.prompt}</h3>
+                    <div className="panel pad train-subskill-task" data-kind={subskillTask.kind}>
+                      <div className="train-subskill-heading">
+                        <div>
+                          <p className="eyebrow">Skill challenge · {subskillTask.kind === "single_choice" ? "choose one" : subskillTask.kind === "matching" ? "match evidence" : subskillTask.kind === "numeric_fill_in" ? "numeric fill-in" : "certainty check"}</p>
+                          <h3>{subskillTask.prompt}</h3>
+                        </div>
+                        <span className="pill">2</span>
+                      </div>
                       {subskillTask.kind === "single_choice" ? (
                         <div className="grid train-subskill-options" role="radiogroup" aria-label={subskillTask.prompt}>
                           {subskillTask.options.map((option) => {
@@ -1625,13 +1925,12 @@ export default function TrainPage() {
                         </div>
                       ) : subskillTask.kind === "matching" ? (
                         <fieldset className="train-subskill-matching" aria-describedby={`training-match-help-${campaign.position}`}>
-                          <legend>Match each statement to one evidence source</legend>
+                          <legend>Pair each statement with its best evidence source</legend>
                           <p id={`training-match-help-${campaign.position}`} className="muted">
-                            Use each source once. These native menus work with keyboard, touch, or pointer input.
+                            Use each source once.
                           </p>
                           <div className="train-subskill-matching-rows">
                             {subskillTask.rows.map((row, index) => {
-                              const selectId = `training-match-${campaign.position}-${row.id}`;
                               const selectedElsewhere = new Set(
                                 Object.entries(subskillTaskMatches)
                                   .filter(([rowId]) => rowId !== row.id)
@@ -1639,35 +1938,33 @@ export default function TrainPage() {
                               );
                               return (
                                 <div className="train-subskill-matching-row" key={row.id}>
-                                  <label htmlFor={selectId}>
+                                  <div>
                                     <span>Statement {index + 1}</span>
                                     <strong>{row.clause}</strong>
-                                  </label>
-                                  <select
-                                    id={selectId}
-                                    value={subskillTaskMatches[row.id] ?? ""}
-                                    onChange={(event) => {
-                                      const choiceId = event.target.value;
-                                      setSubskillTaskMatches((current) => {
-                                        const matches = { ...current };
-                                        if (choiceId) matches[row.id] = choiceId;
-                                        else delete matches[row.id];
-                                        return matches;
-                                      });
-                                    }}
-                                    disabled={loading}
-                                  >
-                                    <option value="">Choose an evidence source…</option>
-                                    {subskillTask.choices.map((choice) => (
-                                      <option
-                                        key={choice.id}
-                                        value={choice.id}
-                                        disabled={selectedElsewhere.has(choice.id)}
-                                      >
-                                        {choice.label}
-                                      </option>
-                                    ))}
-                                  </select>
+                                  </div>
+                                  <div className="train-match-choices" role="group" aria-label={`Evidence source for statement ${index + 1}`}>
+                                    {subskillTask.choices.map((choice) => {
+                                      const selected = subskillTaskMatches[row.id] === choice.id;
+                                      const used = !selected && selectedElsewhere.has(choice.id);
+                                      return (
+                                        <button
+                                          key={choice.id}
+                                          type="button"
+                                          aria-pressed={selected}
+                                          disabled={loading || used}
+                                          onClick={() => setSubskillTaskMatches((current) => {
+                                            const matches = { ...current };
+                                            if (selected) delete matches[row.id];
+                                            else matches[row.id] = choice.id;
+                                            return matches;
+                                          })}
+                                        >
+                                          {selected ? <CheckCircle2 size={13} aria-hidden="true" /> : null}
+                                          {choice.label}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               );
                             })}
@@ -1692,65 +1989,91 @@ export default function TrainPage() {
                             disabled={loading}
                           />
                           <span id={`training-value-help-${campaign.position}`} className="muted">
-                            Enter one trace-based estimate. The packet value and tolerance stay hidden until commitment.
+                            Enter one trace-based estimate. The reviewed value and tolerance stay hidden until you check your answer.
                           </span>
                         </div>
                       ) : (
-                        <p className="selection-note"><strong>Confidence check:</strong> your confidence is compared with whether your committed answer was correct. A reliable pattern takes several ECGs.</p>
+                        <p className="selection-note"><strong>Confidence check:</strong> your confidence is compared with whether your submitted answer was correct. A reliable pattern takes several ECGs.</p>
                       )}
                       <p className="muted train-subskill-boundary">
                         {subskillTask.kind === "matching"
-                          ? "Complete all evidence-source matches. Correct mappings are revealed only after the whole response is committed."
+                          ? "Complete every pair. The evidence map appears after you check the answer."
                           : subskillTask.kind === "numeric_fill_in"
-                            ? "Enter the measured value and complete the trace calipers; both are checked against this ECG’s reviewed measurements."
+                            ? "Enter the value and place the calipers on the tracing; both parts belong to this measurement."
                         : trainingSubskill === "synthesize"
-                          ? "Complete the structured interpretation choice; free-text length alone does not count."
+                          ? "Choose the interpretation that preserves the most important supported evidence."
                           : trainingSubskill === "apply_in_context"
-                            ? "Complete the context-boundary choice. There is no patient vignette here, so this cannot verify management or application competence."
+                            ? "Choose the clinical information needed to use this ECG safely. Management decisions are practiced in Clinical Cases."
                             : trainingSubskill === "explain_mechanism"
-                              ? "Choose the causal chain that best connects the ECG pattern to its mechanism. This checks ECG mechanism only; it does not infer symptoms, acuity, cause, or treatment."
-                              : "Complete the structured choice above so this skill is graded directly."}
+                              ? "Choose the causal chain that best connects the morphology to its electrophysiology."
+                              : "Complete this skill challenge before checking the answer."}
                       </p>
                     </div>
                   ) : null}
 
+                  {viewerTask && !subskillTask ? (
+                    <section className="train-trace-challenge" aria-label="ECG annotation challenge">
+                      <div>
+                        <p className="eyebrow">Skill challenge · ECG annotation</p>
+                        <h3>{viewerTask.prompt}</h3>
+                        <span>{trainingSubskill === "localize"
+                          ? "This scores the relevant lead and waveform segment—not the full morphology by itself. Your mark remains visible during review."
+                          : "Use the active waveform tool. Your mark will remain visible beside the reviewed evidence after submission."}</span>
+                      </div>
+                      <span className={viewerTaskEvidence ? "complete" : ""}>{viewerTaskEvidence ? <CheckCircle2 size={15} aria-hidden="true" /> : "2"}</span>
+                    </section>
+                  ) : null}
+
                   {trainingSubskill === "measure" && !viewerTask ? (
                     <p className="uncertainty train-viewer-task">
-                      <strong>Measurement rehearsal only:</strong> this ECG family has no reviewed numeric reference for this measurement. Record your method and value below, but it will not be marked correct or change your mastery estimate.
+                      <strong>Measurement rehearsal only:</strong> this ECG has no reviewed numeric reference for this measurement. Record your method and value below, but it will not be marked correct or change your mastery estimate.
                     </p>
                   ) : null}
 
-                  <div className="field train-evidence-field">
-                    <label htmlFor="train-evidence-note">Evidence note <span className="muted">{(trainingSubskill === "measure" && !viewerTask) || (trainingSubskill === "localize" && (evidenceConcept.includes("lead_territor") || evidenceConcept.includes("frontal_lead_map"))) ? "(required)" : "(optional)"}</span></label>
+                    </>
+                  )}
+
+                  {trainingSubskill !== "synthesize" ? <div className="field train-evidence-field">
+                    <label htmlFor="train-evidence-note">{evidenceNoteRequired ? "Evidence response" : "What evidence drove your answer?"} <span className="muted">{evidenceNoteRequired ? "(required)" : "(optional short answer)"}</span></label>
                     <textarea
                       id="train-evidence-note"
                       value={evidenceNote}
                       onChange={(event) => setEvidenceNote(event.target.value)}
-                      placeholder="Name the lead, waveform, or interval that drove your choice."
+                      placeholder="Name the lead, waveform, interval, or discriminator."
                       disabled={loading}
                     />
-                  </div>
+                  </div> : null}
 
-                  <div className="field train-confidence-field">
-                    <label htmlFor="train-confidence">Confidence</label>
-                    <select
-                      id="train-confidence"
-                      value={confidence}
-                      onChange={(event) => setConfidence(Number(event.target.value))}
-                      disabled={loading}
-                    >
-                      <option value={1}>1 · Guessing</option>
-                      <option value={2}>2 · Unsure</option>
-                      <option value={3}>3 · Moderate</option>
-                      <option value={4}>4 · Confident</option>
-                      <option value={5}>5 · Very confident</option>
-                    </select>
-                  </div>
+                  {trainingSubskill === "calibrate_confidence" ? (
+                    <fieldset className="train-confidence-field">
+                      <legend>How certain are you?</legend>
+                      <div className="train-confidence-scale">
+                        {([
+                          [1, "Guessing"],
+                          [2, "Unsure"],
+                          [3, "Moderate"],
+                          [4, "Confident"],
+                          [5, "Very certain"],
+                        ] as const).map(([value, label]) => (
+                          <button
+                            key={value}
+                            type="button"
+                            aria-pressed={confidence === value}
+                            className={confidence === value ? "active" : ""}
+                            onClick={() => setConfidence(Number(value))}
+                            disabled={loading}
+                          >
+                            <strong>{value}</strong><span>{label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </fieldset>
+                  ) : null}
 
                   <div className="actions train-drill-actions">
                     <button className="button warn train-hint-button" type="button" onClick={requestHint} disabled={hintsUsed > 0 || loading}>
                       <Lightbulb size={16} aria-hidden="true" />
-                      {hintsUsed ? "Coached hint used" : "Show hint · coached"}
+                      {hintsUsed ? "Hint used" : "Show one hint"}
                     </button>
                     <button
                       className="button primary train-commit-button"
@@ -1760,24 +2083,21 @@ export default function TrainPage() {
                       aria-describedby={commitGaps.length ? "training-commit-requirements" : undefined}
                     >
                       <Send size={16} aria-hidden="true" />
-                      Commit answer
+                      Check answer
                     </button>
                   </div>
                   <p className="muted train-hint-boundary">
-                    A visual hint changes this ECG to coached practice; it cannot earn an independent mastery receipt.
+                    A hint helps you find the evidence; this ECG remains saved as guided practice.
                   </p>
                   {commitGaps.length ? (
                     <div id="training-commit-requirements" className="train-commit-requirements" role="status" aria-live="polite">
-                      <strong>Before you commit</strong>
+                      <strong>Ready when you complete:</strong>
                       <ul>{commitGaps.map((gap) => <li key={gap}>{gap}</li>)}</ul>
                     </div>
                   ) : null}
                   {hintText ? <p className="uncertainty train-hint-text">{hintText}</p> : null}
                 </section>
-                <section className="panel pad train-tutor-lock train-tutor-lock-inline">
-                  <h2><Brain size={18} aria-hidden="true" /> Tutor after commitment</h2>
-                  <p className="muted">Commit first to keep the answer hidden. Ask for help after grading.</p>
-                </section>
+                <p className="train-tutor-lock-inline"><Brain size={15} aria-hidden="true" /> Luna unlocks after you check the answer, so your first read stays independent.</p>
               </>
             ) : (
               <div className="panel pad train-empty" role="status" aria-live="polite">{emptyReason ?? "Loading the next ECG…"}</div>
@@ -1786,48 +2106,25 @@ export default function TrainPage() {
         </WorkspaceBody>
 
         <DisclosureArea className="train-disclosure">
-          {packet ? (
-            <section className="train-provenance-inline" aria-label="ECG source">
-              <ShieldCheck size={15} aria-hidden="true" />
-              <strong>{result ? sourceLabel(packet.source) : "Reviewed real ECG"}</strong>
-              {packet.source === "fixture" ? (
-                <span className="warning train-fixture-warning">This practice item is not available.</span>
-              ) : (
-                <span className="train-real-data-note"><ShieldCheck size={14} aria-hidden="true" /> Real waveform · {result ? "answer revealed" : "answer hidden"}</span>
-              )}
-              {selectedPoint ? <span className="train-coordinate">Cursor {selectedPoint.lead} · {selectedPoint.timeSec.toFixed(3)} s · {selectedPoint.amplitudeMv.toFixed(3)} mV</span> : null}
-            </section>
-          ) : null}
+          <span className="train-disclosure-summary"><Target size={14} aria-hidden="true" /> {conceptLabel(evidenceConcept)} · {activeSubskillLabel}</span>
           <details className="train-phase-disclosure">
-            <summary>How this set is mixed</summary>
-            <ol className="train-session-recipe">
-              {PHASE_SUMMARY.map((item) => {
-                const planned = campaign.phaseCounts[item.phase] ?? 0;
-                const completed = campaignSummary?.byPhase[item.phase].attempted ?? 0;
-                const complete = planned > 0 && completed >= planned;
-                const active = !complete && activePhase === item.phase;
-                return (
-                  <li className={complete ? "complete" : active ? "active" : ""} key={item.phase}>
-                    <span>{complete ? <CheckCircle2 size={16} aria-hidden="true" /> : completed + 1}</span>
-                    <div><strong>{item.label}</strong><small>{completed.toLocaleString()} / {planned.toLocaleString()} cases</small></div>
-                  </li>
-                );
-              })}
-            </ol>
-            {selectionReason ? <p className="train-selection-reason">{selectionReason}</p> : null}
+            <summary>How this focused set works</summary>
+            <p>Examples, close look-alikes, and normal contrasts are mixed across the set. Your current answer stays hidden until you check it.</p>
           </details>
         </DisclosureArea>
 
-        <TutorDrawer title="ECG tutor">
+        <TutorDrawer title="Ask Luna about this ECG">
           {result && caseSummary ? (
             <TutorChat
               mode="practice"
-              roleLabel="Tutor · after your answer"
+              roleLabel="Luna · ECG review"
               ecgRef={caseSummary.caseId}
               threadScope={`training:${campaign.campaignId}`}
               viewerState={viewerState}
               onViewerActions={setViewerActions}
-              openingPrompt={`Ask why ${conceptLabel(classificationTarget)} was ${classificationTruth === "present" ? "present" : "absent"}, how ${conceptLabel(caseFocus)} changes the contrast, or ask me to highlight the decisive feature.`}
+              openingPrompt={trainingSubskill === "synthesize"
+                ? "Ask Luna to audit one step of your rate-to-impression sequence, explain a grounded review finding, or create a short follow-up check from this ECG."
+                : `Ask why ${conceptLabel(classificationTarget)} was ${classificationTruth === "present" ? "supported" : "not supported"}, how the closest alternative differs, or ask Luna to highlight the decisive feature.`}
               resetKey={caseSummary.caseId}
             />
           ) : null}

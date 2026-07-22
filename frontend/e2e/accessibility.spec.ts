@@ -67,7 +67,7 @@ test.describe("WCAG authenticated student shell", () => {
 
   test("active Focused Practice workspace has no detectable A/AA violations", async ({ page }) => {
     await page.goto("/train?concept=right_bundle_branch_block");
-    await page.getByRole("button", { name: "Start training" }).click();
+    await page.getByRole("button", { name: "Start focused practice" }).click();
     await expect(page.getByRole("region", { name: "Focused training set" })).toBeVisible({ timeout: 30_000 });
     await expectNoWcagViolations(page);
   });

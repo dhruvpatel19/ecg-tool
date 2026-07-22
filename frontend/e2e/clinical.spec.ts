@@ -1083,10 +1083,10 @@ test.describe("Mode 4 · Clinical Decisions", () => {
     await page.getByText("Keyboard / precise-entry alternative").click();
     await page.getByLabel("Keyboard task lead").selectOption("V1");
     await page.getByLabel("Time cursor (seconds)").fill(qrs.timeSec.toFixed(3));
-    await page.getByRole("button", { name: "Grade selected point" }).click();
+    await page.getByRole("button", { name: "Use selected point" }).click();
 
     await expect(page.getByText(/Selected V1 at/)).toBeVisible();
-    await expect(page.getByText(/Point recorded.*Correctness will be revealed after you commit/i)).toBeVisible();
+    await expect(page.getByText(/Point recorded.*Correctness will be revealed after you check your answer/i)).toBeVisible();
     expect(liveGradeRequests).toEqual([]);
     const answerRequest = page.waitForRequest((request) => {
       const path = new URL(request.url()).pathname;

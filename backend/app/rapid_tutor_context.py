@@ -106,7 +106,7 @@ def _deterministic_debrief(
     )
     if priority:
         behavior = (
-            f"The ledger records {priority['label']} as the most frequent missed target "
+            f"In this set, {priority['label']} was the most frequent missed target "
             f"({priority['count']} occurrence(s))."
         )
         impact = (
@@ -115,7 +115,7 @@ def _deterministic_debrief(
         )
     elif strongest:
         behavior = (
-            f"The ledger records {strongest['label']} as the most consistently recognized "
+            f"In this set, {strongest['label']} was the most consistently recognized "
             f"target ({strongest['count']} occurrence(s))."
         )
         impact = (
@@ -123,7 +123,7 @@ def _deterministic_debrief(
             "testing it on a new, unrevealed tracing."
         )
     else:
-        behavior = "The ledger does not yet contain a recurring concept-specific correct or missed target."
+        behavior = "This set does not yet show a recurring concept-specific correct or missed target."
         impact = "A further independent sample is needed before making a concept-specific learning claim."
     next_step = "Use one new eligible ECG and state the discriminator before naming the finding."
     return {
@@ -370,8 +370,7 @@ def deterministic_rapid_tutor_response(context: dict[str, Any]) -> dict[str, Any
             f"{pattern} {bridge.get('prompt')}" if bridge else pattern
         ),
         "feedback": (
-            "SBI+Next feedback was reconstructed from the owner-bound completed Rapid ledger; "
-            "browser summaries were ignored."
+            "This reflection is grounded in your completed Rapid Practice results."
         ),
         "viewerActions": [],
         "objectiveUpdates": [],
@@ -392,7 +391,7 @@ def deterministic_rapid_tutor_response(context: dict[str, Any]) -> dict[str, Any
             for value in (
                 pattern,
                 bridge.get("prompt") if bridge else None,
-                "Owner-bound completed Rapid answer and receipt ledger",
+                "Completed Rapid Practice results",
             )
             if value
         ][:3],

@@ -102,30 +102,29 @@ test.describe.serial("novice Mode 2 audit", () => {
     console.log("AUDIT initial learner A RBBB skills", initialA);
     await captureAuditScreenshot(page, testInfo, "first-dashboard.png");
 
-    const poolResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return url.pathname.endsWith("/api/backend/training/campaigns/pool")
-        && url.searchParams.get("conceptId") === "right_bundle_branch_block";
-    });
+    const poolResponse = await page.request.get(
+      "/api/backend/training/campaigns/pool?conceptId=right_bundle_branch_block&subskill=recognize",
+    );
+    expect(poolResponse.ok()).toBe(true);
     await page.goto("/train?concept=right_bundle_branch_block");
-    await expect(page.getByRole("heading", { name: "Train one visual skill until it sticks" })).toBeVisible({ timeout: 30_000 });
-    const pool = await (await poolResponse).json() as { eligibleDistinct: number; roleCounts: { target: number; mimic: number; negative: number } };
-    await expect(page.getByLabel("Target concept")).toHaveValue("right_bundle_branch_block");
-    const subskills = await page.getByLabel("Skill to practice").locator("option").allTextContents();
+    await expect(page.getByRole("heading", { name: "What do you want to strengthen?" })).toBeVisible({ timeout: 30_000 });
+    const pool = await poolResponse.json() as { eligibleDistinct: number; roleCounts: { target: number; mimic: number; negative: number } };
+    await expect(page.locator('[aria-label="Available focused practice topics"]').getByRole("button", { name: /^Right bundle branch block/ })).toHaveAttribute("aria-pressed", "true");
+    const skillChoices = page.getByRole("group", { name: "Which skill do you want to practice?" });
+    const subskills = await skillChoices.getByRole("button").allTextContents();
     console.log("AUDIT immutable pool", pool);
     console.log("AUDIT subskills", subskills);
     expect(pool.eligibleDistinct).toBeGreaterThanOrEqual(10);
     expect(pool.roleCounts.target).toBeGreaterThan(0);
-    await expect(page.getByText(`${pool.eligibleDistinct.toLocaleString()} unique ECGs available`)).toBeVisible();
     await expect(page.getByRole("group", { name: "Target decision" })).toHaveCount(0);
-    await expect(page.getByText("Reviewed real ECG waveforms only")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Start focused practice" })).toBeEnabled({ timeout: 30_000 });
     await captureAuditScreenshot(page, testInfo, "train-desktop-before.png");
 
     const startResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return url.pathname.endsWith("/api/backend/training/campaigns") && response.request().method() === "POST";
     });
-    await page.getByRole("button", { name: "Start training" }).click();
+    await page.getByRole("button", { name: "Start focused practice" }).click();
     const started = await (await startResponse).json() as CampaignPayload;
     expect(started.campaign?.requestedLength).toBe(10);
     expect(started.campaign?.length).toBeLessThanOrEqual(pool.eligibleDistinct);
@@ -136,23 +135,21 @@ test.describe.serial("novice Mode 2 audit", () => {
     expect(started.campaign?.status).toBe("active");
     expect(started.campaign?.pendingCaseId).toBe(firstCaseId);
     expect(started.campaign?.poolCount).toBe(pool.eligibleDistinct);
-    await expect(page.getByRole("region", { name: "Configure training set" })).toHaveCount(0);
-    await expect(page.getByLabel("Target concept")).toHaveCount(0);
-    await expect(page.getByLabel("Skill to practice")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Configure focused practice" })).toHaveCount(0);
+    await expect(page.getByRole("group", { name: "Which skill do you want to practice?" })).toHaveCount(0);
     const activeSet = page.getByRole("region", { name: "Focused training set" });
-    await expect(activeSet).toContainText("Case 1");
+    await expect(activeSet).toContainText("ECG 1");
     await expect(activeSet).toContainText(`of ${started.campaign?.length.toLocaleString()}`);
 
     await page.getByRole("group", { name: "Target decision" }).getByRole("button").first().click();
     const submitResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/submit"));
-    await page.getByRole("button", { name: "Commit answer" }).click();
+    await page.getByRole("button", { name: "Check answer" }).click();
     await submitResponse;
     await expect(page.getByRole("heading", { name: /Pattern recognized|Contrast distinguished|Decision supported|Re-check the discriminator/ })).toBeVisible({ timeout: 60_000 });
-    const answerEvidence = page.getByRole("region", { name: "Answer evidence" });
-    await expect(answerEvidence.getByRole("heading", { name: "Why this answer" })).toBeVisible();
+    await expect(page.getByText("What the ECG supports", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Message the tutor")).toBeHidden();
-    await page.getByRole("button", { name: "Open tutor" }).click();
-    const tutorDialog = page.getByRole("dialog", { name: "ECG tutor" });
+    await page.getByRole("button", { name: "Ask Luna" }).click();
+    const tutorDialog = page.getByRole("dialog", { name: "Ask Luna about this ECG" });
     await expect(tutorDialog).toBeVisible();
     await expect(tutorDialog.getByLabel("Message the tutor")).toBeVisible();
     await captureAuditScreenshot(page, testInfo, "feedback-tutor.png");
@@ -161,12 +158,12 @@ test.describe.serial("novice Mode 2 audit", () => {
     const tutorRepliesBefore = await tutorDialog.locator(".chat-bubble.tutor").count();
     await tutorDialog.getByRole("button", { name: "Send", exact: true }).click();
     await expect(tutorDialog.locator(".chat-bubble.tutor")).toHaveCount(tutorRepliesBefore + 1, { timeout: 60_000 });
-    await expect(tutorDialog.locator(".chat-bubble.tutor").last()).toContainText(/V1|LBBB|Left bundle branch block/i, { timeout: 60_000 });
+    await expect(tutorDialog.locator(".chat-bubble.tutor").last()).toContainText(/saved Focused Practice response/i, { timeout: 60_000 });
     await captureAuditScreenshot(page, testInfo, "tutor-answer.png");
     await tutorDialog.getByRole("button", { name: "Close tutor" }).click();
 
     const adaptiveResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/next") && response.ok());
-    await page.getByRole("button", { name: /Next case in set/ }).click();
+    await page.getByRole("button", { name: "Next ECG" }).click();
     const advanced = await (await adaptiveResponse).json() as CampaignPayload;
     const secondCaseId = advanced.current?.case.caseId;
     console.log("AUDIT adaptive case transition", { changed: firstCaseId !== secondCaseId });
@@ -177,25 +174,22 @@ test.describe.serial("novice Mode 2 audit", () => {
     expect(advanced.campaign?.requestedLength).toBe(started.campaign?.requestedLength);
     expect(advanced.campaign?.length).toBe(started.campaign?.length);
     expect(advanced.campaign?.pendingCaseId).toBe(secondCaseId);
-    await expect(page.getByRole("region", { name: "Focused training set" })).toContainText("Case 2");
+    await expect(page.getByRole("region", { name: "Focused training set" })).toContainText("ECG 2");
     // The frozen campaign roster owns the active workspace. Configuration is
     // intentionally absent until the learner deliberately abandons the set.
-    await expect(page.getByRole("region", { name: "Configure training set" })).toHaveCount(0);
-    await expect(page.getByLabel("Skill to practice")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Configure focused practice" })).toHaveCount(0);
+    await expect(page.getByRole("group", { name: "Which skill do you want to practice?" })).toHaveCount(0);
     await expect(page.getByText(/This lesson target is locked/)).toHaveCount(0);
 
     const abandonResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/abandon"));
-    await page.getByRole("button", { name: "Leave training set" }).click();
+    await page.getByRole("button", { name: "Exit set" }).click();
     await page.getByRole("button", { name: "Leave set and change setup" }).click();
     await abandonResponse;
-    await expect(page.getByLabel("Skill to practice")).toBeEnabled();
-    const localizePoolResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return url.pathname.endsWith("/api/backend/training/campaigns/pool") && url.searchParams.get("subskill") === "localize";
-    });
-    await page.getByLabel("Skill to practice").selectOption("localize");
-    await localizePoolResponse;
-    await expect(page.getByRole("button", { name: "Start training" })).toBeEnabled({ timeout: 30_000 });
+    const localizeSkill = page.getByRole("group", { name: "Which skill do you want to practice?" }).getByRole("button", { name: /^Locate the evidence/ });
+    await expect(localizeSkill).toBeEnabled();
+    await localizeSkill.click();
+    await expect(localizeSkill).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: "Start focused practice" })).toBeEnabled({ timeout: 30_000 });
     await expect(page.getByRole("group", { name: "Target decision" })).toHaveCount(0);
     await captureAuditScreenshot(page, testInfo, "localize-desktop.png");
 
@@ -232,19 +226,20 @@ test.describe.serial("novice Mode 2 audit", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await signIn(page, learnerA);
     await page.goto("/train?concept=right_bundle_branch_block&subskill=measure");
-    await expect(page.getByRole("heading", { name: "Train one visual skill until it sticks" })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByLabel("Skill to practice")).toHaveValue("measure");
-    await expect(page.getByLabel("Skill to practice")).toBeEnabled({ timeout: 30_000 });
+    await expect(page.getByRole("heading", { name: "What do you want to strengthen?" })).toBeVisible({ timeout: 30_000 });
+    const measureSkill = page.getByRole("group", { name: "Which skill do you want to practice?" }).getByRole("button", { name: /^Measure accurately/ });
+    await expect(measureSkill).toHaveAttribute("aria-pressed", "true");
+    await expect(measureSkill).toBeEnabled({ timeout: 30_000 });
     const startResponse = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return url.pathname.endsWith("/api/backend/training/campaigns") && response.request().method() === "POST";
     });
-    await page.getByRole("button", { name: "Start training" }).click();
+    await page.getByRole("button", { name: "Start focused practice" }).click();
     const started = await (await startResponse).json() as CampaignPayload;
     expect(started.current?.packet.blinded).toBe(true);
-    await expect(page.getByRole("heading", { name: "Measure it" })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole("region", { name: "Configure training set" })).toHaveCount(0);
-    await expect(page.getByLabel("Skill to practice")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Current training task" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("region", { name: "Configure focused practice" })).toHaveCount(0);
+    await expect(page.getByRole("group", { name: "Which skill do you want to practice?" })).toHaveCount(0);
     const geometry = await page.evaluate(() => ({
       innerWidth: window.innerWidth,
       scrollWidth: document.documentElement.scrollWidth,
@@ -279,13 +274,13 @@ test.describe.serial("novice Mode 2 audit", () => {
     // keyboard reachable.
     expect(focusTrail.some((item) => item.includes("Target present"))).toBeTruthy();
     expect(focusTrail.some((item) => item.includes("Keyboard / precise-entry alternative"))).toBeTruthy();
-    expect(focusTrail.some((item) => item.includes("Confidence"))).toBeTruthy();
-    expect(focusTrail.some((item) => item.includes("Leave training set"))).toBeTruthy();
+    expect(focusTrail.some((item) => item.includes("QRS duration"))).toBeTruthy();
+    expect(focusTrail.some((item) => item.includes("Exit set"))).toBeTruthy();
     expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.innerWidth + 2);
     expect(geometry.overflowElements).toEqual([]);
 
     const abandonResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/abandon"));
-    await page.getByRole("button", { name: "Leave training set" }).click();
+    await page.getByRole("button", { name: "Exit set" }).click();
     await page.getByRole("button", { name: "Leave set and change setup" }).click();
     await abandonResponse;
   });

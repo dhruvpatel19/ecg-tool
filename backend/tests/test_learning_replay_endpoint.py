@@ -7,8 +7,14 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from app.learning_replay import (
+    _safe_task,
+    _safe_task_result,
+    _safe_viewer_task_evidence,
+)
 from app.learning_sessions import issue_learning_session_ref
 from app.main import app, clinical_item_store, repo, settings, store
+from app.training_routes import build_training_classification_contract
 
 
 PASSWORD = "Sup3r-Secret-Pw!"
@@ -30,6 +36,30 @@ REPLAY_KEYS = {
     "feedback",
     "answerGuide",
     "provenance",
+}
+FROZEN_TRAINING_CLASSIFICATION = {
+    "version": "focused-classification-v1",
+    "kind": "single_choice",
+    "prompt": "Frozen authored sinus-rhythm question?",
+    "presentLabel": "Frozen target supported",
+    "absentLabel": "Frozen target not supported",
+    "options": [
+        {"id": "absent", "label": "Frozen target not supported"},
+        {"id": "present", "label": "Frozen target supported"},
+    ],
+    "required": True,
+}
+FROZEN_TRAINING_TASK = {
+    "kind": "single_choice",
+    "subskill": "recognize",
+    "variant": 0,
+    "prompt": "Frozen secondary recognition check.",
+    "options": [
+        {"id": "choice_1", "label": "Frozen evidence option one"},
+        {"id": "choice_2", "label": "Frozen evidence option two"},
+    ],
+    "required": True,
+    "gradingBoundary": "Frozen answer-free review boundary.",
 }
 
 
@@ -90,7 +120,12 @@ def _session_ref(owner_id: str, mode: str, session_id: str) -> str:
     )
 
 
-def _seed_replays(owner_id: str, suffix: str) -> tuple[dict[str, str], str, str]:
+def _seed_replays(
+    owner_id: str,
+    suffix: str,
+    *,
+    include_training_snapshot: bool = True,
+) -> tuple[dict[str, str], str, str]:
     item = next(
         candidate
         for candidate in clinical_item_store.list_for_serving(status="harness_pass")
@@ -114,9 +149,11 @@ def _seed_replays(owner_id: str, suffix: str) -> tuple[dict[str, str], str, str]
             INSERT INTO training_campaigns (
                 campaign_id, learner_id, concept_id, subskill,
                 requested_length, length, pool_count, phases_json,
-                phase_counts_json, position, status, created_at, updated_at
+                phase_counts_json, position, status, context_key,
+                created_at, updated_at
             ) VALUES (?, ?, 'sinus_rhythm', 'recognize', 1, 1, 1,
-                '["transfer"]', '{"transfer":1}', 1, 'complete', ?, ?)
+                '["transfer"]', '{"transfer":1}', 1, 'complete',
+                'receiptConcept=rhythm_basics', ?, ?)
             """,
             (training_id, owner_id, created_at, created_at),
         )
@@ -156,7 +193,26 @@ def _seed_replays(owner_id: str, suffix: str) -> tuple[dict[str, str], str, str]
                         "confidence": 4,
                         "hintsUsed": 0,
                         "evidenceNote": "Regular P waves precede each QRS.",
+                        "viewerTaskEvidence": {
+                            "mode": "point",
+                            "point": {
+                                "lead": "II",
+                                "timeSec": 0.5,
+                                "amplitudeMv": 0.8,
+                            },
+                        },
                         "subskillTaskAnswer": "",
+                        **(
+                            {
+                                "questionSnapshot": {
+                                    "version": "focused-question-v1",
+                                    "classification": FROZEN_TRAINING_CLASSIFICATION,
+                                    "task": FROZEN_TRAINING_TASK,
+                                }
+                            }
+                            if include_training_snapshot
+                            else {}
+                        ),
                         "privateAnswerKey": secret,
                     }
                 ),
@@ -431,6 +487,134 @@ def _seed_replays(owner_id: str, suffix: str) -> tuple[dict[str, str], str, str]
     )
 
 
+def _seed_missed_trace_replay(
+    owner_id: str, suffix: str, *, subskill: str
+) -> str:
+    assert subskill in {"localize", "measure"}
+    case_id = "948"
+    assert repo.get_case(case_id) is not None
+    campaign_id = f"replay-training-{subskill}-{suffix}"
+    created_at = "2026-07-17T12:00:00+00:00"
+    concept = "sinus_rhythm" if subskill == "localize" else "qtc_prolongation"
+    expected_answer = "present" if subskill == "localize" else "absent"
+    learner_evidence = (
+        {
+            "mode": "point",
+            "point": {"lead": "II", "timeSec": 0.5, "amplitudeMv": 0.8},
+        }
+        if subskill == "localize"
+        else {
+            "mode": "caliper",
+            "lead": "II",
+            "timeStartSec": 1.0,
+            "timeEndSec": 1.1,
+            "valueMs": 100.0,
+        }
+    )
+    task_result = (
+        None
+        if subskill == "localize"
+        else {
+            "kind": "numeric_fill_in",
+            "complete": True,
+            "correct": False,
+            "score": 0.0,
+            "submittedValue": 600.0,
+            "expectedValue": 464.0,
+            "tolerance": 35.0,
+            "unit": "ms",
+        }
+    )
+
+    with store.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO training_campaigns (
+                campaign_id, learner_id, concept_id, subskill,
+                requested_length, length, pool_count, phases_json,
+                phase_counts_json, position, status, context_key,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 1, 1, 1, '["transfer"]',
+                '{"transfer":1}', 1, 'complete', ?, ?, ?)
+            """,
+            (
+                campaign_id,
+                owner_id,
+                concept,
+                subskill,
+                f"receiptConcept={concept}",
+                created_at,
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO training_campaign_slots (
+                campaign_id, ordinal, phase, case_id, case_focus,
+                target_present, status, served_at, answered_at
+            ) VALUES (?, 0, 'transfer', ?, ?, ?, 'answered', ?, ?)
+            """,
+            (
+                campaign_id,
+                case_id,
+                concept,
+                int(expected_answer == "present"),
+                created_at,
+                created_at,
+            ),
+        )
+        attempt_id = _insert_attempt(
+            conn,
+            learner_id=owner_id,
+            case_id=case_id,
+            mode="concept_practice",
+            score=0.0,
+            created_at=created_at,
+        )
+        conn.execute(
+            """
+            INSERT INTO training_campaign_answers (
+                campaign_id, ordinal, case_id, response_json, grade_json,
+                tutor_json, receipt_json, summary_json, integrity_status,
+                attempt_id, created_at
+            ) VALUES (?, 0, ?, ?, ?, '{}', '{}', ?, 'atomic_v2', ?, ?)
+            """,
+            (
+                campaign_id,
+                case_id,
+                json.dumps(
+                    {
+                        "selectedAnswer": expected_answer,
+                        "expectedAnswer": expected_answer,
+                        "hintsUsed": 0,
+                        "evidenceNote": "Saved learner trace evidence.",
+                        "viewerTaskEvidence": learner_evidence,
+                        "subskillTaskAnswer": "",
+                        "subskillTaskValue": 600.0 if subskill == "measure" else None,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "feedback": "The selected trace evidence needs review.",
+                        "trainingClassificationCorrect": True,
+                        "trainingSubskillEvidenceCorrect": False,
+                        "trainingSubskillTaskResult": task_result,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "correct": False,
+                        "classificationCorrect": True,
+                        "misconceptions": [f"subskill_task_error:{subskill}"],
+                    }
+                ),
+                attempt_id,
+                created_at,
+            ),
+        )
+    return _session_ref(owner_id, "training", campaign_id)
+
+
 def _assessment_counts() -> dict[str, int]:
     tables = (
         "attempts",
@@ -455,6 +639,190 @@ def _assert_private_headers(response) -> None:
     assert response.headers["vary"] == "Authorization, Cookie"
 
 
+def test_review_evidence_projection_keeps_only_safe_learner_geometry() -> None:
+    assert _safe_viewer_task_evidence(
+        {
+            "mode": "region",
+            "roi": {
+                "lead": "V2",
+                "timeStartSec": 1.1,
+                "timeEndSec": 1.3,
+                "ampMinMv": -0.2,
+                "ampMaxMv": 0.9,
+                "label": "private answer label",
+                "concept": "private_answer_concept",
+            },
+            "feedback": "private grading feedback",
+        }
+    ) == {
+        "mode": "region",
+        "roi": {
+            "lead": "V2",
+            "timeStartSec": 1.1,
+            "timeEndSec": 1.3,
+            "ampMinMv": -0.2,
+            "ampMaxMv": 0.9,
+            "label": "Your selected region",
+            "concept": "learner_evidence",
+            "source": "user",
+            "confidence": "recorded",
+        },
+    }
+    assert _safe_viewer_task_evidence(
+        {
+            "mode": "caliper",
+            "lead": "II",
+            "timeStartSec": 0.5,
+            "timeEndSec": 0.7,
+            "valueMs": 200,
+            "correct": True,
+        }
+    ) == {
+        "mode": "caliper",
+        "lead": "II",
+        "timeStartSec": 0.5,
+        "timeEndSec": 0.7,
+        "valueMs": 200.0,
+    }
+    assert _safe_viewer_task_evidence(
+        {"mode": "point", "point": {"lead": "II", "timeSec": 0.5}}
+    ) is None
+
+
+def test_training_replay_projects_systematic_framework_without_raw_internals() -> None:
+    keys = [
+        "rate",
+        "rhythm",
+        "axis",
+        "intervals",
+        "conduction",
+        "st_t",
+        "hypertrophy",
+        "synthesis",
+    ]
+    framework_steps = [
+        {
+            "key": key,
+            "label": key.replace("_", " ").title(),
+            "prompt": f"Review {key}.",
+            "placeholder": f"Enter {key}.",
+            "privateAnswer": "never expose",
+        }
+        for key in keys
+    ]
+    task = _safe_task(
+        {
+            "kind": "single_choice",
+            "subskill": "synthesize",
+            "variant": 0,
+            "prompt": "Choose the reviewed synthesis.",
+            "options": [{"id": "choice_1", "label": "Bounded synthesis"}],
+            "required": True,
+            "frameworkVersion": "focused-systematic-interpretation-v1",
+            "frameworkSteps": framework_steps,
+            "correctAnswer": "private-choice",
+        }
+    )
+    assert task["frameworkVersion"] == "focused-systematic-interpretation-v1"
+    assert [row["key"] for row in task["frameworkSteps"]] == keys
+    assert all(
+        set(row) == {"key", "label", "prompt", "placeholder"}
+        for row in task["frameworkSteps"]
+    )
+    assert "private" not in json.dumps(task)
+
+    interpretation = {key: f"Saved {key} response" for key in keys}
+    reviewed = [
+        {
+            "key": key,
+            "label": key.replace("_", " ").title(),
+            "review": (
+                f"Packet-grounded review for {key}."
+                if index % 2 == 0
+                else "Not verified by this packet."
+            ),
+            "grounded": index % 2 == 0,
+            "privateEvidence": "never expose",
+        }
+        for index, key in enumerate(keys)
+    ]
+    result = _safe_task_result(
+        {
+            "kind": "single_choice",
+            "complete": True,
+            "correct": True,
+            "score": 1.0,
+            "systematicInterpretationComplete": True,
+            "systematicInterpretation": interpretation,
+            "reviewedFramework": reviewed,
+            "privatePacket": "never expose",
+        }
+    )
+    assert result["systematicInterpretationComplete"] is True
+    assert result["systematicInterpretation"] == interpretation
+    assert result["reviewedFramework"] == [
+        {key: row[key] for key in ("key", "label", "review", "grounded")}
+        for row in reviewed
+    ]
+    assert "private" not in json.dumps(result)
+
+
+def test_missed_focused_trace_tasks_replay_learner_evidence_with_reviewed_geometry() -> None:
+    with TestClient(app) as client:
+        owner = _register(client, "replay_trace_review")
+        for subskill in ("localize", "measure"):
+            session_ref = _seed_missed_trace_replay(
+                owner["userId"], uuid.uuid4().hex, subskill=subskill
+            )
+            response = client.get(
+                f"/learning/sessions/{session_ref}/attempts/1/replay"
+            )
+            assert response.status_code == 200, response.text
+            _assert_private_headers(response)
+            payload = response.json()
+            learner_evidence = payload["submission"]["viewerTaskEvidence"]
+            assert learner_evidence["mode"] == (
+                "point" if subskill == "localize" else "caliper"
+            )
+
+            actions = payload["reviewActions"]
+            assert len(actions) == 1
+            action = actions[0]
+            assert action["lead"] == "II"
+            assert action["timeEnd"] > action["timeStart"]
+            assert action["label"] == (
+                "Reviewed localization"
+                if subskill == "localize"
+                else "Reviewed interval"
+            )
+            assert set(action) == (
+                {
+                    "type",
+                    "lead",
+                    "timeStart",
+                    "timeEnd",
+                    "ampMin",
+                    "ampMax",
+                    "label",
+                }
+                if subskill == "localize"
+                else {"type", "lead", "timeStart", "timeEnd", "label"}
+            )
+            assert action["type"] == (
+                "highlightROI" if subskill == "localize" else "drawCaliper"
+            )
+            assert not {
+                "concept",
+                "source",
+                "confidence",
+                "correct",
+                "score",
+                "grade",
+                "expectedValue",
+                "tolerance",
+            }.intersection(action)
+
+
 def test_completed_replays_are_strict_owner_bound_and_read_only() -> None:
     with TestClient(app) as owner, TestClient(app) as other:
         owner_user = _register(owner, "replay_owner")
@@ -471,7 +839,6 @@ def test_completed_replays_are_strict_owner_bound_and_read_only() -> None:
                 "kind",
                 "prompt",
                 "target",
-                "phase",
                 "classificationOptions",
                 "subskillTask",
             },
@@ -548,6 +915,31 @@ def test_completed_replays_are_strict_owner_bound_and_read_only() -> None:
                             "correctChoiceId": "option_2",
                         }
                     ]
+                else:
+                    assert payload["question"]["prompt"] == (
+                        FROZEN_TRAINING_CLASSIFICATION["prompt"]
+                    )
+                    assert payload["question"]["classificationOptions"] == (
+                        FROZEN_TRAINING_CLASSIFICATION["options"]
+                    )
+                    assert payload["question"]["subskillTask"] == FROZEN_TRAINING_TASK
+                    assert payload["question"]["target"] == {
+                        "objectiveId": "rhythm_basics",
+                        "objectiveLabel": "Rhythm Basics",
+                        "caseConceptId": "sinus_rhythm",
+                        "caseConceptLabel": "Sinus rhythm",
+                        "subskill": "recognize",
+                    }
+                    assert "phase" not in payload["question"]
+                    assert "confidence" not in payload["submission"]
+                    assert payload["submission"]["viewerTaskEvidence"] == {
+                        "mode": "point",
+                        "point": {
+                            "lead": "II",
+                            "timeSec": 0.5,
+                            "amplitudeMv": 0.8,
+                        },
+                    }
             else:
                 assert payload["question"]["kind"] == "clinical"
                 assert "itemId" not in payload["question"]
@@ -683,6 +1075,27 @@ def test_completed_replays_are_strict_owner_bound_and_read_only() -> None:
         _assert_private_headers(other_comparison)
 
         assert _assessment_counts() == before
+
+
+def test_legacy_training_replay_uses_deterministic_question_fallback() -> None:
+    with TestClient(app) as client:
+        user = _register(client, "legacy_replay")
+        refs, _, _ = _seed_replays(
+            user["userId"],
+            uuid.uuid4().hex,
+            include_training_snapshot=False,
+        )
+        response = client.get(
+            f"/learning/sessions/{refs['training']}/attempts/1/replay"
+        )
+        assert response.status_code == 200, response.text
+        _assert_private_headers(response)
+        question = response.json()["question"]
+        expected = build_training_classification_contract("sinus_rhythm", 0)
+        assert question["prompt"] == expected["prompt"]
+        assert question["classificationOptions"] == expected["options"]
+        assert question["subskillTask"] is None
+        assert question["prompt"] != FROZEN_TRAINING_CLASSIFICATION["prompt"]
 
 
 def test_abandoned_rapid_round_replays_only_its_committed_attempts() -> None:

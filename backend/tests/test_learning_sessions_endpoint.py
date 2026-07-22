@@ -712,6 +712,119 @@ def test_abandoned_rapid_round_with_committed_answers_is_reviewable_as_partial()
         assert after == before
 
 
+def test_abandoned_focused_set_with_committed_answers_is_reviewable_as_partial() -> None:
+    with TestClient(app) as owner, TestClient(app) as other:
+        owner_user = _register(owner, "partial_focused_owner")
+        _register(other, "partial_focused_other")
+        suffix = uuid.uuid4().hex
+        partial_id = f"partial-focused-private-{suffix}"
+        empty_id = f"empty-focused-private-{suffix}"
+        committed_case_id = f"focused-committed-private-{suffix}"
+        pending_case_id = f"focused-pending-private-{suffix}"
+        occurred_at = "2026-07-16T11:01:00+00:00"
+        abandoned_at = "2026-07-16T11:03:00+00:00"
+        with store.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO training_campaigns (
+                    campaign_id, learner_id, concept_id, subskill,
+                    requested_length, length, pool_count, phases_json,
+                    phase_counts_json, pending_case_id, position, status,
+                    context_key, created_at, updated_at, abandoned_at
+                ) VALUES (?, ?, 'right_bundle_branch_block', 'recognize',
+                    5, 5, 20, '[]', '{}', ?, 1, 'abandoned',
+                    'receiptConcept=qrs_width_morphology',
+                    '2026-07-16T11:00:00+00:00',
+                    '2026-07-16T11:02:00+00:00', ?)
+                """,
+                (partial_id, owner_user["userId"], pending_case_id, abandoned_at),
+            )
+            attempt_id = _insert_attempt(
+                conn,
+                learner_id=owner_user["userId"],
+                case_id=committed_case_id,
+                mode="concept_practice",
+                confidence=4,
+                hints_used=1,
+                score=0.9,
+                created_at=occurred_at,
+            )
+            conn.execute(
+                """
+                INSERT INTO training_campaign_answers (
+                    campaign_id, ordinal, case_id, response_json, grade_json,
+                    tutor_json, receipt_json, summary_json, integrity_status,
+                    attempt_id, created_at
+                ) VALUES (?, 0, ?, '{"learner":"private"}',
+                    '{"answerKey":"private"}', '{}', '{}',
+                    '{"correct":false,"classificationCorrect":true}',
+                    'atomic_v2', ?, ?)
+                """,
+                (partial_id, committed_case_id, attempt_id, occurred_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO training_campaigns (
+                    campaign_id, learner_id, concept_id, subskill,
+                    requested_length, length, pool_count, phases_json,
+                    phase_counts_json, position, status, created_at, updated_at,
+                    abandoned_at
+                ) VALUES (?, ?, 'right_bundle_branch_block', 'recognize',
+                    5, 5, 20, '[]', '{}', 0, 'abandoned',
+                    '2026-07-16T10:00:00+00:00',
+                    '2026-07-16T10:01:00+00:00',
+                    '2026-07-16T10:01:00+00:00')
+                """,
+                (empty_id, owner_user["userId"]),
+            )
+
+        sessions_response = owner.get("/learning/sessions?limit=50")
+        assert sessions_response.status_code == 200, sessions_response.text
+        partials = [
+            item
+            for item in sessions_response.json()["items"]
+            if item["mode"] == "training" and item["status"] == "abandoned"
+        ]
+        assert len(partials) == 1
+        partial = partials[0]
+        assert partial["attempted"] == 1
+        assert partial["total"] == 5
+        assert partial["score"] is None
+        assert partial["correctCount"] == 0
+        assert partial["completedAt"] == abandoned_at
+        assert partial["reviewAvailable"] is True
+        assert partial["focusCompetencies"] == [{
+            "objectiveId": "qrs_width_morphology",
+            "subskill": "recognize",
+            "mappingSource": "session_focus",
+        }]
+
+        review_response = owner.get(
+            f"/learning/sessions/{partial['sessionRef']}"
+        )
+        assert review_response.status_code == 200, review_response.text
+        review = review_response.json()
+        assert review["session"] == partial
+        assert [attempt["index"] for attempt in review["attempts"]] == [1]
+        # The selected-skill campaign outcome is authoritative; the legacy
+        # generic attempt score (0.9 here) must not replace it.
+        assert review["attempts"][0]["score"] == 0.0
+        assert other.get(
+            f"/learning/sessions/{partial['sessionRef']}"
+        ).status_code == 404
+
+        serialized = sessions_response.text + review_response.text
+        for forbidden in (
+            partial_id,
+            empty_id,
+            committed_case_id,
+            pending_case_id,
+            suffix,
+            "answerKey",
+        ):
+            assert forbidden not in serialized
+
+
 def test_learning_sessions_saved_filter_and_pagination_are_owner_bound() -> None:
     with TestClient(app) as owner, TestClient(app) as other:
         owner_user = _register(owner, "session_page_owner")
@@ -1098,9 +1211,12 @@ def test_corrupt_attempt_and_competency_scores_project_as_unavailable() -> None:
             training_review = owner.get(
                 f"/learning/sessions/{items['training']['sessionRef']}"
             ).json()
+            # Focused Practice review uses the immutable selected-skill
+            # outcome, so corrupt legacy generic attempt scores cannot erase
+            # or replace the saved result.
             assert [attempt["score"] for attempt in training_review["attempts"]] == [
-                None,
-                None,
+                1.0,
+                0.0,
             ]
 
             clinical_review = owner.get(

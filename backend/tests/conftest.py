@@ -14,6 +14,8 @@ import shutil
 import tarfile
 import tempfile
 
+import pytest
+
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -57,3 +59,24 @@ os.environ.setdefault("ECG_CORPUS_ROOT", str(_checked_test_corpus()))
 os.environ.setdefault("ECG_REQUIRE_REAL_DATA", "0")
 os.environ.setdefault("LLM_PROVIDER", "mock")
 os.environ.setdefault("APP_ENV", "test")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_app_auth_throttles():
+    """Keep suite-order registrations from consuming another test's budget.
+
+    Production throttle persistence is covered inside each dedicated auth
+    test. Integration tests share one in-memory application database, so its
+    aggregate buckets must be reset at the test boundary just like other
+    process-wide fixtures. Avoid importing the application solely for this
+    fixture; reset only when a collected test already loaded it.
+    """
+
+    import sys
+
+    main_module = sys.modules.get("app.main")
+    shared_store = getattr(main_module, "store", None)
+    if shared_store is not None:
+        with shared_store.connect() as conn:
+            conn.execute("DELETE FROM auth_registration_throttle")
+            conn.execute("DELETE FROM auth_login_throttle")

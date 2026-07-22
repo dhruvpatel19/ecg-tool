@@ -2116,17 +2116,33 @@ class LearningStore:
             # whose evidence source is appropriate for that subskill.
             training_subskills = list(event["subskills"])
             allowed_training_sources = {
-                "localize": "trace_native",
-                "measure": "trace_native",
-                "discriminate": "labeled_contrast_task",
-                "explain_mechanism": "curated_mechanism_task",
-                "calibrate_confidence": "confidence_commit",
+                "localize": ("trace_native",),
+                # Measurement evidence combines the trace-native caliper check
+                # with the exact reviewed packet measurement used by the
+                # numeric task. Keep the feature suffix so the audit record is
+                # specific, while accepting only the server-authored prefix.
+                "measure": ("trace_native", "trace_native+packet_measurement:"),
+                "discriminate": ("labeled_contrast_task",),
+                "explain_mechanism": ("curated_mechanism_task",),
+                "calibrate_confidence": ("confidence_commit",),
             }
+            training_source = str(event.get("evidenceSource") or "")
+            allowed_sources = allowed_training_sources.get(
+                training_subskills[0] if len(training_subskills) == 1 else "",
+                (),
+            )
             exact_server_task_transfer = (
                 event.get("trainingPhase") == "transfer"
                 and len(training_subskills) == 1
-                and event.get("evidenceSource")
-                == allowed_training_sources.get(training_subskills[0])
+                and any(
+                    training_source == allowed
+                    if not allowed.endswith(":")
+                    else (
+                        training_source.startswith(allowed)
+                        and len(training_source) > len(allowed)
+                    )
+                    for allowed in allowed_sources
+                )
             )
             if not exact_server_task_transfer:
                 effective_level = "guided"

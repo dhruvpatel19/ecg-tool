@@ -16,6 +16,9 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qs
+
+from .objectives import objective_definition
 
 
 SESSION_REF_VERSION = "learning-session-ref-v1"
@@ -32,9 +35,14 @@ WITH completed_sessions AS (
         campaigns.campaign_id AS session_id,
         campaigns.concept_id AS focus_objective,
         campaigns.subskill AS focus_subskill,
+        campaigns.context_key AS focus_context,
         campaigns.length AS total,
         campaigns.created_at AS started_at,
-        campaigns.updated_at AS completed_at,
+        CASE
+            WHEN campaigns.status = 'abandoned'
+            THEN COALESCE(campaigns.abandoned_at, campaigns.updated_at)
+            ELSE campaigns.updated_at
+        END AS completed_at,
         (
             SELECT COUNT(*)
             FROM training_campaign_answers AS answers
@@ -85,7 +93,14 @@ WITH completed_sessions AS (
               )
         ) AS flagged_count
     FROM training_campaigns AS campaigns
-    WHERE campaigns.learner_id = ? AND campaigns.status = 'complete'
+    WHERE campaigns.learner_id = ?
+      AND campaigns.status IN ('complete', 'abandoned')
+      AND EXISTS (
+          SELECT 1
+          FROM training_campaign_answers AS reviewable_answer
+          WHERE reviewable_answer.campaign_id = campaigns.campaign_id
+            AND reviewable_answer.integrity_status IN ('atomic_v1', 'atomic_v2')
+      )
 
     UNION ALL
 
@@ -96,6 +111,7 @@ WITH completed_sessions AS (
         rounds.round_id AS session_id,
         rounds.focus_concept AS focus_objective,
         rounds.focus_subskill AS focus_subskill,
+        NULL AS focus_context,
         rounds.length AS total,
         rounds.created_at AS started_at,
         rounds.updated_at AS completed_at,
@@ -163,6 +179,7 @@ WITH completed_sessions AS (
         sessions.session_id AS session_id,
         sessions.focus_objective AS focus_objective,
         sessions.focus_subskill AS focus_subskill,
+        NULL AS focus_context,
         sessions.length AS total,
         sessions.created_at AS started_at,
         sessions.updated_at AS completed_at,
@@ -250,6 +267,24 @@ def _focus_competencies(
     ]
 
 
+def _session_focus_competencies(row: sqlite3.Row) -> list[dict[str, str]]:
+    """Return the requested objective, not only its grounded ECG case family."""
+
+    objective = row["focus_objective"]
+    subskill = row["focus_subskill"]
+    if str(row["mode"]) == "training" and isinstance(objective, str) and isinstance(subskill, str):
+        values = parse_qs(str(row["focus_context"] or ""), keep_blank_values=False)
+        requested = str((values.get("receiptConcept") or [objective])[0]).strip()
+        definition = objective_definition(requested)
+        if (
+            definition is not None
+            and subskill in definition.allowed_subskills
+            and objective in definition.case_concepts
+        ):
+            objective = requested
+    return _focus_competencies(objective, subskill)
+
+
 def _bounded_score(value: object) -> float | None:
     if value is None:
         return None
@@ -320,7 +355,7 @@ def _summary_item(
     raw_status = str(row["session_status"])
     session_status = (
         "abandoned"
-        if mode == "rapid" and raw_status == "abandoned"
+        if mode in {"rapid", "training"} and raw_status == "abandoned"
         else "complete"
     )
     attempted = max(0, int(row["attempted"] or 0))
@@ -343,9 +378,7 @@ def _summary_item(
         "score": _bounded_score(row["score"]),
         "correctCount": correct_count,
         "flaggedCount": max(0, int(row["flagged_count"] or 0)),
-        "focusCompetencies": _focus_competencies(
-            row["focus_objective"], row["focus_subskill"]
-        ),
+        "focusCompetencies": _session_focus_competencies(row),
         "startedAt": str(row["started_at"]),
         "completedAt": str(row["completed_at"]),
         "reviewAvailable": attempted > 0,
@@ -545,7 +578,7 @@ def _training_attempts(
         """,
         (learner_id, session_id),
     ).fetchall()
-    fallback = _focus_competencies(row["focus_objective"], row["focus_subskill"])
+    fallback = _session_focus_competencies(row)
     stable_answer_ids, legacy_attempt_indices = _flagged_attempt_keys(
         conn,
         learner_id=learner_id,
@@ -554,10 +587,13 @@ def _training_attempts(
     )
     attempts: list[dict[str, Any]] = []
     for index, answer in enumerate(rows, start=1):
+        # Focused Practice stores the selected-skill result in the authoritative
+        # campaign summary. The generic attempt score is a legacy pattern
+        # classification grade and can legitimately disagree with that skill.
         score = (
-            answer["attempt_score"]
-            if answer["attempt_score"] is not None
-            else answer["summary_score"]
+            answer["summary_score"]
+            if answer["summary_score"] is not None
+            else answer["attempt_score"]
         )
         attempts.append(
             _review_attempt(

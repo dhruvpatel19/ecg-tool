@@ -256,7 +256,7 @@ export type TrainingCampaign = {
   requestedLength: number;
   length: number;
   poolCount: number;
-  phaseCounts: Record<TrainingPhase, number>;
+  phaseCounts?: Record<TrainingPhase, number>;
   position: number;
   pendingCaseId: EcgCapability | null;
   feedbackCaseId: EcgCapability | null;
@@ -273,7 +273,7 @@ export type TrainingCampaignSlot = {
   caseId: EcgCapability;
   caseFocus?: string;
   targetPresent?: boolean;
-  selectionReason: string;
+  selectionReason?: string;
   status: "queued" | "pending" | "answered";
   servedAt: string | null;
   answeredAt: string | null;
@@ -286,13 +286,24 @@ export type TrainingCampaignAnswer = {
   caseId: EcgCapability;
   response: {
     selectedAnswer: "present" | "absent";
-    confidence: number;
+    confidence: number | null;
     hintsUsed: number;
     evidenceNote: string;
     viewerTaskEvidence?: ViewerTaskEvidence | null;
     subskillTaskAnswer?: string;
     subskillTaskMatches?: Record<string, string>;
     subskillTaskValue?: number | null;
+    structuredInterpretation?: {
+      rate: string;
+      rhythm: string;
+      axis: string;
+      intervals: string;
+      conduction: string;
+      st_t: string;
+      hypertrophy: string;
+      synthesis: string;
+    } | null;
+    questionSnapshot?: Record<string, unknown>;
     expectedAnswer: "present" | "absent" | null;
   };
   grade: Record<string, unknown>;
@@ -312,7 +323,7 @@ export type TrainingCampaignAnswer = {
     classificationCorrect: boolean;
     focusGrounded: boolean;
     selectedResponse: "present" | "absent";
-    confidence: number;
+    confidence: number | null;
     hintsUsed: number;
     evidenceLevel: string;
     misconceptions: string[];
@@ -338,12 +349,30 @@ export type TrainingCampaignPayload = {
     slot: TrainingCampaignSlot;
     case: CaseSummary;
     packet: CasePacket;
+    classification?: {
+      version: string;
+      kind: "single_choice";
+      prompt: string;
+      presentLabel: string;
+      absentLabel: string;
+      options: Array<{ id: "present" | "absent"; label: string }>;
+      required: true;
+    };
+    questionSnapshot?: Record<string, unknown>;
     task?: null | ({
       kind: "single_choice";
       subskill: string;
       variant?: number;
       prompt: string;
       options: Array<{ id: string; label: string }>;
+      frameworkVersion?: string;
+      frameworkSteps?: Array<{
+        key: "rate" | "rhythm" | "axis" | "intervals" | "conduction" | "st_t" | "hypertrophy" | "synthesis";
+        label: string;
+        prompt: string;
+        placeholder: string;
+        choices?: string[];
+      }>;
       required: boolean;
       gradingBoundary: string;
     } | {

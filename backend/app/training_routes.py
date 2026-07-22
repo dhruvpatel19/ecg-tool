@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import OrderedDict, deque
+import math
+import secrets
 from threading import RLock
 from typing import Any, Callable, Literal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl, urlencode
 
 from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -24,7 +26,8 @@ from .data_sources import case_summary
 from .ecg_capability import issue_ecg_capability, matches_ecg_capability
 from .grading import grade_attempt, grade_click_answer
 from .objectives import objective_definition
-from .ontology import PRACTICE_GROUPS
+from .ontology import PRACTICE_GROUPS, concept_label
+from .retention import DURABLE_DISTINCT_SUCCESSFUL_ECGS
 from .schemas import AttemptRequest, StructuredInterpretation
 from .source_policy import (
     LEGACY_AUDITED_SOURCES,
@@ -33,6 +36,7 @@ from .source_policy import (
     retention_morphology_key,
 )
 from .subskill_tasks import (
+    SYSTEMATIC_INTERPRETATION_KEYS,
     STRUCTURED_CHOICE_SUBSKILLS,
     build_subskill_task,
     calibration_grade,
@@ -47,39 +51,107 @@ from .training_store import TrainingExposureConflictError
 LearnerResolver = Callable[[str | None, str, str | None], str]
 PacketTransformer = Callable[[dict[str, Any]], dict[str, Any]]
 
-CAMPAIGN_LENGTHS = (10, 25, 50, 100, 500, 1000, 5000)
+CAMPAIGN_LENGTHS = (5, 10, 20, 25, 50, 100, 500, 1000, 5000)
 TRAINING_POOL_CACHE_MAX_ENTRIES = 4
-TRAINING_PHASE_CYCLE = (
-    "target", "target", "target", "mimic", "mimic",
-    "negative", "negative", "transfer", "transfer", "transfer",
-)
-ALLOWED_SUBSKILLS = {
+TRAINING_BALANCED_ROLES = ("target", "mimic", "negative")
+TRAINING_SUBSKILL_ORDER = (
     "recognize", "localize", "measure", "discriminate", "explain_mechanism",
     "synthesize", "apply_in_context", "calibrate_confidence",
+)
+ALLOWED_SUBSKILLS = set(TRAINING_SUBSKILL_ORDER)
+TRAINING_CLASSIFICATION_CONTRACT_VERSION = "focused-classification-v1"
+TRAINING_QUESTION_SNAPSHOT_VERSION = "focused-question-v1"
+MEASUREMENT_TARGETS = {
+    "rate", "qrs_duration", "qtc_prolongation",
 }
-MEASUREMENT_TARGETS = {"rate", "qrs_duration", "qt_interval"}
 
 
 class TrainingCampaignStartBody(BaseModel):
     learnerId: str = "demo"
     conceptId: str = Field(min_length=1, max_length=160)
     subskill: str = Field(default="recognize", max_length=80)
-    length: Literal[10, 25, 50, 100, 500, 1000, 5000] = 10
+    length: Literal[5, 10, 20, 25, 50, 100, 500, 1000, 5000] = 10
     contextKey: str = Field(default="", max_length=1000)
     replaceActive: bool = False
+
+
+class TrainingStructuredInterpretation(BaseModel):
+    rate: str = Field(default="", max_length=500)
+    rhythm: str = Field(default="", max_length=500)
+    axis: str = Field(default="", max_length=500)
+    intervals: str = Field(default="", max_length=750)
+    conduction: str = Field(default="", max_length=750)
+    st_t: str = Field(default="", max_length=750)
+    hypertrophy: str = Field(default="", max_length=750)
+    synthesis: str = Field(default="", max_length=2_000)
 
 
 class TrainingCampaignSubmitBody(BaseModel):
     caseId: str = Field(min_length=1, max_length=160)
     selectedAnswer: Literal["present", "absent"]
-    confidence: int = Field(default=3, ge=1, le=5)
+    # Confidence is authored only in the explicit calibration task. Other
+    # Focused Practice skills must not manufacture a hidden 3/5 response.
+    confidence: int | None = Field(default=None, ge=1, le=5)
     hintsUsed: int = Field(default=0, ge=0, le=10)
     evidenceNote: str = Field(default="", max_length=10_000)
     viewerTaskEvidence: dict[str, Any] | None = None
     subskillTaskAnswer: str = Field(default="", max_length=160)
     subskillTaskMatches: dict[str, str] = Field(default_factory=dict, max_length=3)
     subskillTaskValue: float | None = Field(default=None, ge=0, le=5000)
+    structuredInterpretation: TrainingStructuredInterpretation | None = None
     receiptConcept: str | None = Field(default=None, max_length=160)
+
+
+def build_training_classification_contract(
+    concept: str, variant: int = 0
+) -> dict[str, Any]:
+    """Return the versioned, answer-free binary prompt frozen per ordinal."""
+
+    prompt_variant = max(0, int(variant)) % 3
+    if concept == "rate":
+        prompts = (
+            "Classify the ventricular rate band from the tracing.",
+            "Estimate the ventricular rate, then place it relative to the adult 60–100 bpm band.",
+            "Which rate category is supported by the R–R spacing?",
+        )
+        present_label = "Within 60–100 bpm"
+        absent_label = "Outside 60–100 bpm"
+    elif concept == "qrs_duration":
+        prompts = (
+            "Is the measured QRS wide at the adult 120 ms threshold?",
+            "Measure ventricular depolarization, then classify it against 120 ms.",
+            "Does QRS onset-to-offset cross the adult wide-complex threshold?",
+        )
+        present_label = "Wide (≥120 ms)"
+        absent_label = "Not wide (<120 ms)"
+    elif concept == "qtc_prolongation":
+        prompts = (
+            "Is the calculated QTc at least 480 ms?",
+            "Measure QT, apply the provided correction method, then compare QTc with 480 ms.",
+            "Which side of the 480 ms practice threshold does the calculated QTc fall on?",
+        )
+        present_label = "QTc ≥480 ms"
+        absent_label = "QTc <480 ms"
+    else:
+        label = concept_label(concept)
+        prompts = (
+            f"Does this tracing support {label}?",
+            f"Decide whether the waveform evidence meets the reviewed pattern for {label}.",
+            f"After checking the defining leads, is {label} supported or not supported?",
+        )
+        present_label = "Target present"
+        absent_label = "Target absent"
+    present = {"id": "present", "label": present_label}
+    absent = {"id": "absent", "label": absent_label}
+    return {
+        "version": TRAINING_CLASSIFICATION_CONTRACT_VERSION,
+        "kind": "single_choice",
+        "prompt": prompts[prompt_variant],
+        "presentLabel": present_label,
+        "absentLabel": absent_label,
+        "options": [present, absent] if int(variant) % 2 == 0 else [absent, present],
+        "required": True,
+    }
 
 
 def _features(case: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +161,133 @@ def _features(case: dict[str, Any]) -> dict[str, Any]:
 
 def _rois(case: dict[str, Any]) -> list[dict[str, Any]]:
     return ((case.get("ptbxl_plus") or {}).get("fiducials") or {}).get("rois") or []
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    converted = float(value)
+    return converted if math.isfinite(converted) else None
+
+
+def _waveform_duration_seconds(case: dict[str, Any], lead: str) -> float | None:
+    waveform = case.get("waveform") or {}
+    duration = _finite_float(
+        waveform.get("duration_sec", waveform.get("durationSec"))
+    )
+    if duration is not None and duration > 0:
+        return duration
+    sampling_frequency = _finite_float(
+        waveform.get("sampling_frequency", waveform.get("samplingFrequency"))
+    )
+    samples = (case.get("waveform_data") or {}).get(lead)
+    if (
+        sampling_frequency is not None
+        and sampling_frequency > 0
+        and isinstance(samples, list)
+        and samples
+    ):
+        return len(samples) / sampling_frequency
+    return None
+
+
+def _reviewed_segment_overlap(
+    case: dict[str, Any], *, lead: str, segment: str, start: float, end: float
+) -> bool:
+    selected_span = end - start
+    for roi in _rois(case):
+        if roi.get("concept") != segment or roi.get("lead") != lead:
+            continue
+        roi_start = _finite_float(roi.get("timeStartSec"))
+        roi_end = _finite_float(roi.get("timeEndSec"))
+        if roi_start is None or roi_end is None or roi_end <= roi_start:
+            continue
+        overlap = min(end, roi_end) - max(start, roi_start)
+        meaningful = max(0.020, 0.5 * min(selected_span, roi_end - roi_start))
+        if overlap >= meaningful:
+            return True
+    return False
+
+
+def _rate_boundaries_are_anchored(
+    case: dict[str, Any], *, lead: str, start: float, end: float
+) -> bool:
+    """Use reviewed QRS regions when at least two anchors are available."""
+
+    anchors: list[tuple[float, float]] = []
+    for roi in _rois(case):
+        if roi.get("concept") != "qrs_complex" or roi.get("lead") != lead:
+            continue
+        roi_start = _finite_float(roi.get("timeStartSec"))
+        roi_end = _finite_float(roi.get("timeEndSec"))
+        if roi_start is not None and roi_end is not None and roi_end > roi_start:
+            anchors.append((roi_start, roi_end))
+    if len(anchors) < 2:
+        # Some audited packets have a verified rate but only one/no beat ROI.
+        # In that case duration bounds plus agreement with the server rate are
+        # the strongest available geometry contract.
+        return True
+
+    def near(point: float, anchor: tuple[float, float]) -> bool:
+        left, right = anchor
+        return left - 0.120 <= point <= right + 0.120
+
+    return any(
+        first != second and near(start, first) and near(end, second)
+        for first in anchors
+        for second in anchors
+    )
+
+
+def _measurement_evidence_valid(
+    case: dict[str, Any],
+    concept: str,
+    evidence: dict[str, Any],
+) -> bool:
+    key, leads, segment = _measurement_contract(concept)
+    lead = str(evidence.get("lead") or "")
+    if not key or evidence.get("mode") != "caliper" or lead not in leads:
+        return False
+
+    start = _finite_float(evidence.get("timeStartSec"))
+    end = _finite_float(evidence.get("timeEndSec"))
+    claimed_ms = _finite_float(evidence.get("valueMs"))
+    duration = _waveform_duration_seconds(case, lead)
+    if (
+        start is None
+        or end is None
+        or claimed_ms is None
+        or duration is None
+        or start < 0
+        or end <= start
+        or end > duration + 1e-6
+    ):
+        return False
+
+    measured_ms = (end - start) * 1000.0
+    # Browser calipers display an integer number of milliseconds. The raw
+    # boundaries are authoritative; allow only their one-millisecond rounding.
+    if abs(claimed_ms - measured_ms) > 1.0:
+        return False
+
+    expected_value = _finite_float(_features(case).get(key))
+    if expected_value is None or expected_value <= 0:
+        return False
+    expected_ms = (
+        60_000.0 / expected_value if concept == "rate" else expected_value
+    )
+    tolerance = 90.0 if concept == "rate" else 35.0
+    if abs(measured_ms - expected_ms) > tolerance:
+        return False
+    if segment is not None and not _reviewed_segment_overlap(
+        case, lead=lead, segment=segment, start=start, end=end
+    ):
+        return False
+    if concept == "rate" and not _rate_boundaries_are_anchored(
+        case, lead=lead, start=start, end=end
+    ):
+        return False
+    return True
 
 
 def _is_training_case(case: dict[str, Any] | None, concept: str, subskill: str) -> bool:
@@ -164,6 +363,8 @@ def _expected_answer(case: dict[str, Any], concept: str, subskill: str = "") -> 
         qrs = values.get("qrs_ms")
         return None if not isinstance(qrs, (int, float)) else ("present" if qrs >= 120 else "absent")
     if concept == "qt_interval":
+        return None
+    if concept == "qtc_prolongation":
         qtc = values.get("qtc_ms")
         return None if not isinstance(qtc, (int, float)) else ("present" if qtc >= 480 else "absent")
     return "present" if _focus_is_grounded(case, concept, subskill) else "absent"
@@ -179,9 +380,18 @@ def _case_is_subskill_eligible(case: dict[str, Any], concept: str, subskill: str
         return any(roi.get("concept") == segment and roi.get("lead") in leads for roi in _rois(case))
     if subskill == "measure":
         key, leads, segment = _measurement_contract(concept)
-        if not key:  # free-text measurement remains formative, as before
-            return True
-        if not isinstance(_features(case).get(key), (int, float)):
+        # A Focused set advertised as Measure must have a reviewed numeric
+        # target and trace boundary. Free-text-only rehearsal cannot produce a
+        # scored task and therefore is not a runnable topic/skill pair.
+        if not key:
+            return False
+        if _finite_float(_features(case).get(key)) is None:
+            return False
+        # QTc practice separates the rate-corrected numeric answer from the
+        # raw QT interval the learner can actually place calipers around.
+        if concept == "qtc_prolongation" and _finite_float(
+            _features(case).get("qtc_ms")
+        ) is None:
             return False
         return segment is None or any(
             roi.get("concept") == segment and roi.get("lead") in leads for roi in _rois(case)
@@ -203,27 +413,138 @@ def _receipt_concept(campaign: dict[str, Any]) -> str:
     return requested or str(campaign["conceptId"])
 
 
-def _public_pending_slot(slot: dict[str, Any]) -> dict[str, Any]:
-    """Remove the durable answer key from the pre-commit response.
+def is_qt_interval_measurement_proxy(
+    case_concept: str, subskill: str, receipt_concept: str
+) -> bool:
+    """Return whether this is the one reviewed cross-concept Training task."""
 
-    Named build phases are pedagogical, while transfer remains unannounced.
-    Case focus and target presence always reveal the server-owned truth.
-    """
-    public = {
-        key: value for key, value in slot.items()
-        if key not in {"caseFocus", "targetPresent"}
-    }
-    reason = str(slot.get("selectionReason") or "planned_sequence")
-    if slot.get("phase") == "transfer":
-        public.pop("phase", None)
-    if reason == "recent_independent_reuse_unavoidable":
-        public["selectionReason"] = "recent_reuse_unavoidable"
-    elif reason != "planned_sequence":
-        public["selectionReason"] = (
-            "adaptive_recheck" if "recheck" in reason or "miss" in reason or "overcall" in reason
-            else "adaptive_variation"
+    return (
+        case_concept == "qtc_prolongation"
+        and receipt_concept == "qt_interval"
+        and subskill == "measure"
+    )
+
+
+def training_task_concept(
+    case_concept: str, subskill: str, receipt_concept: str
+) -> str:
+    """Select the concept whose server-owned task is actually being graded."""
+
+    if is_qt_interval_measurement_proxy(
+        case_concept, subskill, receipt_concept
+    ):
+        return receipt_concept
+    return case_concept
+
+
+def _validate_receipt_contract(
+    case_concept: str, subskill: str, receipt_concept: str
+) -> str:
+    """Bind a mastery receipt to an authored objective/case/skill triple."""
+
+    definition = objective_definition(receipt_concept)
+    reason = "unknown_objective"
+    is_qt_proxy_pair = (
+        case_concept == "qtc_prolongation"
+        and receipt_concept == "qt_interval"
+    )
+    if definition is not None and subskill not in definition.allowed_subskills:
+        reason = "subskill_not_authored"
+    elif is_qt_proxy_pair and not is_qt_interval_measurement_proxy(
+        case_concept, subskill, receipt_concept
+    ):
+        reason = "proxy_subskill_not_authored"
+    elif is_qt_interval_measurement_proxy(
+        case_concept, subskill, receipt_concept
+    ):
+        return receipt_concept
+    elif (
+        definition is not None
+        and case_concept == receipt_concept == "qt_interval"
+    ):
+        # Preserve the registered direct-target API contract. The pool resolver
+        # still fails this incoherent raw-interval campaign closed because no
+        # binary positive/negative QT pool is authored.
+        return receipt_concept
+    elif definition is not None and case_concept not in definition.case_concepts:
+        reason = "case_concept_not_authored"
+    elif definition is not None:
+        return receipt_concept
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "training_receipt_contract_invalid",
+            "message": (
+                "This Focused Practice receipt target is not authored for the "
+                "selected ECG concept and skill."
+            ),
+            "reason": reason,
+        },
+    )
+
+
+def _validated_campaign_receipt(campaign: dict[str, Any]) -> str:
+    values = parse_qs(
+        str(campaign.get("contextKey") or ""), keep_blank_values=False
+    ).get("receiptConcept") or []
+    if len(values) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "training_receipt_contract_invalid",
+                "message": "A Focused Practice campaign must have one receipt target.",
+                "reason": "duplicate_receipt_target",
+            },
         )
-    return public
+    return _validate_receipt_contract(
+        str(campaign["conceptId"]),
+        str(campaign["subskill"]),
+        _receipt_concept(campaign),
+    )
+
+
+def _canonical_campaign_context(
+    case_concept: str, subskill: str, context_key: str
+) -> tuple[str, str]:
+    pairs = parse_qsl(context_key, keep_blank_values=False)
+    requested = [value.strip() for key, value in pairs if key == "receiptConcept"]
+    if len(requested) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "training_receipt_contract_invalid",
+                "message": "A Focused Practice campaign must have one receipt target.",
+                "reason": "duplicate_receipt_target",
+            },
+        )
+    receipt_concept = _validate_receipt_contract(
+        case_concept,
+        subskill,
+        requested[0] if requested and requested[0] else case_concept,
+    )
+    remaining = [(key, value) for key, value in pairs if key != "receiptConcept"]
+    return receipt_concept, urlencode(
+        [("receiptConcept", receipt_concept), *remaining], doseq=True
+    )
+
+
+def _public_pending_slot(slot: dict[str, Any]) -> dict[str, Any]:
+    """Remove answer-bearing planning metadata from a pre-commit response.
+
+    Phase, role, focus, truth, and selection rationale are useful after an
+    answer is committed, but each can disclose whether the target is present.
+    """
+    answer_bearing_keys = {
+        "caseFocus",
+        "phase",
+        "role",
+        "selectionReason",
+        "targetPresent",
+    }
+    return {
+        key: value for key, value in slot.items()
+        if key not in answer_bearing_keys
+    }
 
 
 def _pool_entry_from_truth(
@@ -259,7 +580,7 @@ def _indexed_pool_entry(candidate: dict[str, Any], concept: str, family: set[str
         truth = isinstance(value, (int, float)) and 60 <= float(value) <= 100
     elif concept == "qrs_duration":
         truth = isinstance(value, (int, float)) and float(value) >= 120
-    elif concept == "qt_interval":
+    elif concept == "qtc_prolongation":
         truth = isinstance(value, (int, float)) and float(value) >= 480
     else:
         truth = concept in set(candidate.get("supported_objectives") or [])
@@ -277,33 +598,55 @@ def _build_plan(
     length: int,
     *,
     reserve_transfer_roles: set[str] | None = None,
+    rng: Any | None = None,
 ) -> list[dict[str, Any]]:
+    """Create one balanced, unpredictable recipe that is persisted as slots.
+
+    A deterministic randomizer can be injected by tests. Production uses the
+    operating system's random source so neither phase order nor case order is a
+    reusable answer cue across five-item sets.
+    """
+
     planned_length = min(length, len(pool))
-    transfer_count = sum(
-        1 for index in range(planned_length)
-        if TRAINING_PHASE_CYCLE[index % len(TRAINING_PHASE_CYCLE)] == "transfer"
-    )
+    if planned_length <= 0:
+        return []
+    randomizer = rng or secrets.SystemRandom()
+    transfer_count = max(1, planned_length // 5)
+    instructional_count = planned_length - transfer_count
+    phases = [
+        TRAINING_BALANCED_ROLES[index % len(TRAINING_BALANCED_ROLES)]
+        for index in range(instructional_count)
+    ] + ["transfer"] * transfer_count
+    randomizer.shuffle(phases)
+
+    shuffled_pool = list(pool)
+    randomizer.shuffle(shuffled_pool)
     reserved: deque[dict[str, Any]] = deque()
     reserved_ids: set[str] = set()
     if reserve_transfer_roles and transfer_count:
-        eligible = [entry for entry in pool if entry["role"] in reserve_transfer_roles]
-        for entry in eligible[-transfer_count:]:
+        eligible = [
+            entry for entry in shuffled_pool
+            if entry["role"] in reserve_transfer_roles
+        ]
+        randomizer.shuffle(eligible)
+        for entry in eligible[:transfer_count]:
             reserved.append(entry)
             reserved_ids.add(entry["caseId"])
 
     remaining = {
-        entry["caseId"]: entry for entry in pool
+        entry["caseId"]: entry for entry in shuffled_pool
         if entry["caseId"] not in reserved_ids
     }
     queues = {
         role: deque(
-            entry["caseId"] for entry in pool
+            entry["caseId"] for entry in shuffled_pool
             if entry["role"] == role and entry["caseId"] not in reserved_ids
         )
-        for role in ("target", "mimic", "negative")
+        for role in TRAINING_BALANCED_ROLES
     }
     all_cases = deque(
-        entry["caseId"] for entry in pool if entry["caseId"] not in reserved_ids
+        entry["caseId"] for entry in shuffled_pool
+        if entry["caseId"] not in reserved_ids
     )
 
     def take(role: str | None = None) -> dict[str, Any] | None:
@@ -318,8 +661,7 @@ def _build_plan(
         return None
 
     plan: list[dict[str, Any]] = []
-    for index in range(planned_length):
-        desired = TRAINING_PHASE_CYCLE[index % len(TRAINING_PHASE_CYCLE)]
+    for desired in phases:
         entry = reserved.popleft() if desired == "transfer" and reserved else (
             take(desired if desired != "transfer" else None)
         )
@@ -360,21 +702,13 @@ def _evidence_valid(
             )
         return valid, True
     if subskill == "measure":
-        key, leads, _ = _measurement_contract(concept)
+        key, _, _ = _measurement_contract(concept)
         if not key:
             # A note can document rehearsal, but without a server-owned numeric
             # target its value cannot be called correct or used as mastery
             # evidence. Submit-time logic records completeness separately.
             return False, False
-        if evidence.get("mode") != "caliper" or evidence.get("lead") not in leads:
-            return False, True
-        measured = evidence.get("valueMs")
-        expected_value = _features(case).get(key)
-        if not isinstance(measured, (int, float)) or not isinstance(expected_value, (int, float)):
-            return False, True
-        expected_ms = 60_000 / expected_value if concept == "rate" and expected_value > 0 else expected_value
-        tolerance = 90 if concept == "rate" else 35
-        return abs(float(measured) - float(expected_ms)) <= tolerance, True
+        return _measurement_evidence_valid(case, concept, evidence), True
     # Structured synthesis/application/mechanism choices are graded below from
     # a server-owned answer key. Never let prose length stand in for semantic
     # evidence; an unsupported subskill fails closed.
@@ -408,6 +742,36 @@ def _adaptation_contract(
     return "contrast", "contrast_after_target_success"
 
 
+def _required_systematic_interpretation(
+    body: TrainingCampaignSubmitBody, subskill: str
+) -> dict[str, str] | None:
+    if subskill != "synthesize":
+        return None
+    if body.structuredInterpretation is None:
+        missing = list(SYSTEMATIC_INTERPRETATION_KEYS)
+    else:
+        values = {
+            key: str(getattr(body.structuredInterpretation, key) or "").strip()
+            for key in SYSTEMATIC_INTERPRETATION_KEYS
+        }
+        missing = [key for key, value in values.items() if not value]
+        if not missing and len(values["synthesis"]) >= 12:
+            return values
+    if not missing:
+        missing = ["synthesis"]
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "training_systematic_interpretation_required",
+            "message": (
+                "Complete all eight interpretation steps and provide a final "
+                "synthesis of at least 12 characters before checking this task."
+            ),
+            "missingFields": missing,
+        },
+    )
+
+
 def _grade_claimed_training_submission(
     *,
     campaign_store: Any,
@@ -427,7 +791,22 @@ def _grade_claimed_training_submission(
 
     concept = str(campaign["conceptId"])
     subskill = str(campaign["subskill"])
-    receipt_concept = _receipt_concept(campaign)
+    systematic_interpretation = _required_systematic_interpretation(body, subskill)
+    if subskill == "calibrate_confidence" and body.confidence is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "training_confidence_required",
+                "message": "Choose a confidence level before checking this calibration task.",
+            },
+        )
+    authored_confidence = (
+        body.confidence if subskill == "calibrate_confidence" else None
+    )
+    receipt_concept = _validated_campaign_receipt(campaign)
+    task_concept = training_task_concept(
+        concept, subskill, receipt_concept
+    )
     expected = _expected_answer(case, concept, subskill)
     focus_grounded = _focus_is_grounded(case, str(slot["caseFocus"]), subskill)
     classification_correct = (
@@ -443,7 +822,7 @@ def _grade_claimed_training_submission(
     )
     task_contract = build_subskill_task(
         case_id=body.caseId,
-        case_concept=concept,
+        case_concept=task_concept,
         subskill=subskill,
         case_focus=str(slot["caseFocus"]),
         contrast_family=_contrast_family(concept),
@@ -483,20 +862,35 @@ def _grade_claimed_training_submission(
                 task_contract,
                 answer=body.subskillTaskAnswer,
                 matches=body.subskillTaskMatches,
+                systematic_interpretation=systematic_interpretation,
+                case_packet=case,
             )
             if task_contract
             else None
         )
-        task_complete = bool(task_result and task_result["complete"])
-        evidence_valid = bool(task_result and task_result["correct"])
-        task_score = float(task_result["score"]) if task_result else 0.0
+        systematic_complete = bool(
+            task_result
+            and task_result.get("systematicInterpretationComplete", True)
+        )
+        task_complete = bool(
+            task_result and task_result["complete"] and systematic_complete
+        )
+        evidence_valid = bool(
+            task_result and task_result["correct"] and systematic_complete
+        )
+        choice_score = float(task_result["score"]) if task_result else 0.0
+        task_score = (
+            round((choice_score + (1.0 if systematic_complete else 0.0)) / 2.0, 4)
+            if subskill == "synthesize"
+            else choice_score
+        )
         evidence_source = (
             task_contract.evidence_source if task_contract else "response"
         )
     elif subskill == "calibrate_confidence":
         task_complete = task_contract is not None
         task_score, evidence_valid = calibration_grade(
-            body.confidence, classification_correct
+            int(authored_confidence), classification_correct
         )
         evidence_source = "confidence_commit"
 
@@ -522,6 +916,7 @@ def _grade_claimed_training_submission(
 
     structured = StructuredInterpretation(
         framework="clerkship",
+        **(systematic_interpretation or {}),
         selectedConcepts=[concept] if body.selectedAnswer == "present" else [],
     )
     attempt = AttemptRequest(
@@ -538,7 +933,10 @@ def _grade_claimed_training_submission(
                 else ""
             )
         ),
-        confidence=body.confidence,
+        # The generic deterministic grader still accepts a 1–5 value, but its
+        # legacy mastery delta is suppressed below. Only an explicitly authored
+        # calibration response is persisted as learner confidence.
+        confidence=authored_confidence or 3,
         hintsUsed=body.hintsUsed,
     )
     grade = {
@@ -556,7 +954,12 @@ def _grade_claimed_training_submission(
         ),
         "trainingSubskillTaskResult": task_result,
     }
-    exact_receipt_target = receipt_concept == concept
+    reviewed_receipt_target = (
+        receipt_concept == concept
+        or is_qt_interval_measurement_proxy(
+            concept, subskill, receipt_concept
+        )
+    )
     independently_assessable = bool(
         (subskill in {"localize", "measure"} and trace_native and evidence_valid)
         or (
@@ -570,7 +973,7 @@ def _grade_claimed_training_submission(
     independently_assessed = (
         slot["phase"] == "transfer"
         and body.hintsUsed == 0
-        and exact_receipt_target
+        and reviewed_receipt_target
         and independently_assessable
         and (
             subskill in STRUCTURED_CHOICE_SUBSKILLS
@@ -603,7 +1006,7 @@ def _grade_claimed_training_submission(
         "attempts": 1,
         "assistance": "scaffolded" if body.hintsUsed else "independent",
         "hintsUsed": body.hintsUsed,
-        "confidence": body.confidence,
+        "confidence": authored_confidence,
         "evidenceLevel": (
             "independent_transfer" if independently_assessed else "guided"
         ),
@@ -613,7 +1016,7 @@ def _grade_claimed_training_submission(
         "caseProvenance": "real_eligible",
         "unverifiedRehearsal": measurement_unverified,
         "caseEligible": (
-            exact_receipt_target
+            reviewed_receipt_target
             and focus_grounded
             and _is_training_case(case, concept, subskill)
         ),
@@ -621,15 +1024,24 @@ def _grade_claimed_training_submission(
         "_retentionVerified": independently_assessed,
         "_retentionMorphologyKey": retention_morphology_key(case),
     }
+    question_snapshot = {
+        "version": TRAINING_QUESTION_SNAPSHOT_VERSION,
+        "classification": build_training_classification_contract(
+            concept, int(slot["position"])
+        ),
+        "task": task_contract.public if task_contract else None,
+    }
     response_data = {
         "selectedAnswer": body.selectedAnswer,
-        "confidence": body.confidence,
+        "confidence": authored_confidence,
         "hintsUsed": body.hintsUsed,
         "evidenceNote": body.evidenceNote,
         "viewerTaskEvidence": body.viewerTaskEvidence,
         "subskillTaskAnswer": body.subskillTaskAnswer,
         "subskillTaskMatches": body.subskillTaskMatches,
         "subskillTaskValue": body.subskillTaskValue,
+        "structuredInterpretation": systematic_interpretation,
+        "questionSnapshot": question_snapshot,
         "expectedAnswer": expected,
         "structuredAnswer": structured.model_dump(),
         "freeTextAnswer": attempt.freeTextAnswer,
@@ -646,7 +1058,7 @@ def _grade_claimed_training_submission(
         "classificationCorrect": classification_correct,
         "focusGrounded": focus_grounded,
         "selectedResponse": body.selectedAnswer,
-        "confidence": body.confidence,
+        "confidence": authored_confidence,
         "hintsUsed": body.hintsUsed,
         "misconceptions": misconceptions,
     }
@@ -669,7 +1081,7 @@ def _grade_claimed_training_submission(
         tutor=None,
         receipt_event=receipt_event,
         summary=summary,
-        confidence=body.confidence,
+        confidence=authored_confidence,
         hints_used=body.hintsUsed,
         adaptation_preference=adaptation_preference,
         adaptation_reason=adaptation_reason,
@@ -677,57 +1089,52 @@ def _grade_claimed_training_submission(
 
 
 def _public_campaign(campaign: dict[str, Any]) -> dict[str, Any]:
-    """Keep the server-owned 5,000-slot planned recipe server-side.
+    """Keep the server-owned roster recipe and composition server-side.
 
-    The current slot and aggregate phase counts are sufficient for rendering.
-    Queued slot contracts may be reordered after a response; the durable slots,
-    not this initial recipe array, are authoritative for current order.
+    Queued slot contracts may be reordered after a response. Neither phase
+    counts nor reuse-by-role policy is needed to render learner progress, and
+    both can become answer-order cues in short sets.
     """
-    public = dict(campaign)
-    public.pop("phases", None)
-    return public
+    return {
+        key: value for key, value in campaign.items()
+        if key not in {"phases", "phaseCounts", "rosterPolicy"}
+    }
 
 
-def build_training_router(
-    repo,
-    learning_store,
-    campaign_store,
-    packet_provider: PacketTransformer,
-    blind_packet: PacketTransformer,
-    blind_summary: PacketTransformer,
-    resolve_learner: LearnerResolver,
-) -> APIRouter:
-    router = APIRouter(prefix="/training/campaigns", tags=["training-campaigns"])
-    capability_secret = get_settings().adaptive_plan_context_secret
-    bind_case_packets = getattr(learning_store, "set_case_packet_provider", None)
-    if callable(bind_case_packets):
-        bind_case_packets(repo.get_case)
-    # Each value can describe most of the 22k-record release corpus. Keep only a
-    # small working set so exploring multiple competencies cannot retain one
-    # full-corpus list per objective/subskill for the life of the worker.
-    pool_cache: OrderedDict[tuple[str, str], list[dict[str, Any]]] = OrderedDict()
-    pool_cache_lock = RLock()
+class TrainingPoolResolver:
+    """Resolve the exact runnable Focused-practice pool behind every route.
 
-    def eligible_pool(concept: str, subskill: str) -> list[dict[str, Any]]:
-        key = (concept, subskill)
+    The lightweight target check is shared with dashboard, planner, and
+    calendar receipt contracts. The full pool remains lazily materialized only
+    when a learner opens setup or launches a campaign, so projecting the full
+    competency matrix does not retain corpus-sized lists for every cell.
+    """
+
+    def __init__(self, repo) -> None:
+        self.repo = repo
+        self._pool_cache: OrderedDict[tuple[str, str], list[dict[str, Any]]] = OrderedDict()
+        self._target_depth_cache: dict[tuple[str, str], int] = {}
+        self._cache_lock = RLock()
+        self._pool_cache_max_entries = TRAINING_POOL_CACHE_MAX_ENTRIES
+
+    @staticmethod
+    def _pair_is_supported(concept: str, subskill: str) -> bool:
         if subskill not in ALLOWED_SUBSKILLS:
-            return []
+            return False
+        # A binary present/absent question is not coherent for a raw interval.
+        # qtc_prolongation owns the paired raw-QT caliper + typed-QTc task.
+        if concept == "qt_interval":
+            return False
         definition = objective_definition(concept)
-        # Reject unknown client-supplied strings before the indexed repository
-        # performs a full-corpus scan. All learner competencies are registry
-        # owned; accepting an arbitrary key cannot produce a target case.
         if definition is None or subskill not in definition.allowed_subskills:
-            return []
-        with pool_cache_lock:
-            cached = pool_cache.get(key)
-            if cached is not None:
-                pool_cache.move_to_end(key)
-                return cached
-        family = _contrast_family(concept)
+            return False
         if subskill == "discriminate" and not discrimination_task_available(concept):
-            return []
+            return False
         if subskill == "explain_mechanism" and not mechanism_task_available(concept):
-            return []
+            return False
+        return True
+
+    def _candidate_rows(self, concept: str, subskill: str) -> list[dict[str, Any]]:
         segment: str | None = None
         leads: list[str] = []
         measurement_key: str | None = None
@@ -739,35 +1146,112 @@ def build_training_router(
         truth_key = {
             "rate": "heart_rate",
             "qrs_duration": "qrs_ms",
-            "qt_interval": "qtc_ms",
+            "qtc_prolongation": "qtc_ms",
         }.get(concept)
-        indexed_candidates = getattr(repo, "training_candidates", None)
-        candidates = indexed_candidates(
+        indexed_candidates = getattr(self.repo, "training_candidates", None)
+        return indexed_candidates(
             segment=segment,
             leads=leads,
             measurement_key=measurement_key,
             truth_key=truth_key,
-        ) if callable(indexed_candidates) else repo.candidates(None)
-        entries: list[dict[str, Any]] = []
+        ) if callable(indexed_candidates) else self.repo.candidates(None)
+
+    def _entry_from_candidate(
+        self,
+        candidate: dict[str, Any],
+        concept: str,
+        subskill: str,
+        family: set[str],
+    ) -> dict[str, Any] | None:
+        case_id = str(candidate.get("case_id") or "")
+        if not case_id:
+            return None
+        if (
+            candidate.get("training_indexed")
+            and candidate.get("source") in LEGACY_AUDITED_SOURCES
+        ):
+            if not (candidate.get("supported_objectives") or []):
+                return None
+            return _indexed_pool_entry(candidate, concept, family)
+        case = self.repo.get_case(case_id)
+        if not _case_is_subskill_eligible(case or {}, concept, subskill):
+            return None
+        return _pool_entry(case, concept, subskill, family)
+
+    def _iter_entries(self, concept: str, subskill: str):
+        family = _contrast_family(concept)
         seen: set[str] = set()
-        for candidate in candidates:
+        for candidate in self._candidate_rows(concept, subskill):
             case_id = str(candidate.get("case_id") or "")
             if not case_id or case_id in seen:
                 continue
-            if candidate.get("training_indexed") and candidate.get("source") in LEGACY_AUDITED_SOURCES:
-                if not (candidate.get("supported_objectives") or []):
-                    continue
-                seen.add(case_id)
-                entries.append(_indexed_pool_entry(candidate, concept, family))
-                continue
-            case = repo.get_case(case_id)
-            if not _case_is_subskill_eligible(case or {}, concept, subskill):
+            entry = self._entry_from_candidate(candidate, concept, subskill, family)
+            if entry is None:
                 continue
             seen.add(case_id)
-            entries.append(_pool_entry(case, concept, subskill, family))
-        # A target campaign without at least one grounded positive case would be
-        # a generic normality quiz mislabeled as competency training.
-        if not any(entry["targetPresent"] for entry in entries):
+            yield entry
+
+    def _iter_target_entries(self, concept: str, subskill: str):
+        """Use the concept index for a cheap exact target-only availability check."""
+
+        family = _contrast_family(concept)
+        for candidate in self.repo.candidates(concept):
+            entry = self._entry_from_candidate(candidate, concept, subskill, family)
+            if entry is not None and entry["targetPresent"]:
+                yield entry
+
+    def exact_target_depth(self, concept: str, subskill: str) -> int:
+        """Count exact eligible positives only up to the durable threshold."""
+
+        key = (concept, subskill)
+        if not self._pair_is_supported(concept, subskill):
+            return 0
+        with self._cache_lock:
+            cached_pool = self._pool_cache.get(key)
+            if cached_pool is not None:
+                self._pool_cache.move_to_end(key)
+                return min(
+                    DURABLE_DISTINCT_SUCCESSFUL_ECGS,
+                    sum(1 for entry in cached_pool if entry["targetPresent"]),
+                )
+            cached_depth = self._target_depth_cache.get(key)
+            if cached_depth is not None:
+                return cached_depth
+        depth = 0
+        for _entry in self._iter_target_entries(concept, subskill):
+            depth += 1
+            if depth >= DURABLE_DISTINCT_SUCCESSFUL_ECGS:
+                break
+        with self._cache_lock:
+            self._target_depth_cache[key] = depth
+        return depth
+
+    def has_exact_target(self, concept: str, subskill: str) -> bool:
+        """Return whether this exact pair can launch formative Focused work."""
+
+        return self.exact_target_depth(concept, subskill) > 0
+
+    def has_durable_exact_target(self, concept: str, subskill: str) -> bool:
+        """Gate planner/dashboard receipts on enough distinct positive ECGs."""
+
+        return self.exact_target_depth(
+            concept, subskill
+        ) >= DURABLE_DISTINCT_SUCCESSFUL_ECGS
+
+    def eligible_pool(self, concept: str, subskill: str) -> list[dict[str, Any]]:
+        key = (concept, subskill)
+        if not self._pair_is_supported(concept, subskill):
+            return []
+        with self._cache_lock:
+            cached = self._pool_cache.get(key)
+            if cached is not None:
+                self._pool_cache.move_to_end(key)
+                return cached
+        entries = list(self._iter_entries(concept, subskill))
+        # A target campaign without at least one grounded positive case would
+        # be a generic normality quiz mislabeled as competency training.
+        target_available = any(entry["targetPresent"] for entry in entries)
+        if not target_available:
             entries = []
         entries.sort(
             key=lambda entry: (
@@ -777,18 +1261,44 @@ def build_training_router(
                 else (1, entry["caseId"]),
             )
         )
-        with pool_cache_lock:
+        with self._cache_lock:
             # Another request may have populated the same pool while this one
-            # was built. Reuse that immutable working set and preserve LRU order.
-            cached = pool_cache.get(key)
+            # was built. Reuse that working set and preserve LRU order.
+            cached = self._pool_cache.get(key)
             if cached is not None:
-                pool_cache.move_to_end(key)
+                self._pool_cache.move_to_end(key)
                 return cached
-            pool_cache[key] = entries
-            pool_cache.move_to_end(key)
-            while len(pool_cache) > TRAINING_POOL_CACHE_MAX_ENTRIES:
-                pool_cache.popitem(last=False)
+            self._target_depth_cache[key] = min(
+                DURABLE_DISTINCT_SUCCESSFUL_ECGS,
+                sum(1 for entry in entries if entry["targetPresent"]),
+            )
+            self._pool_cache[key] = entries
+            self._pool_cache.move_to_end(key)
+            while len(self._pool_cache) > self._pool_cache_max_entries:
+                self._pool_cache.popitem(last=False)
             return entries
+
+
+def build_training_router(
+    repo,
+    learning_store,
+    campaign_store,
+    packet_provider: PacketTransformer,
+    blind_packet: PacketTransformer,
+    blind_summary: PacketTransformer,
+    resolve_learner: LearnerResolver,
+    training_pool_resolver: TrainingPoolResolver | None = None,
+) -> APIRouter:
+    router = APIRouter(prefix="/training/campaigns", tags=["training-campaigns"])
+    capability_secret = get_settings().adaptive_plan_context_secret
+    bind_case_packets = getattr(learning_store, "set_case_packet_provider", None)
+    if callable(bind_case_packets):
+        bind_case_packets(repo.get_case)
+    # Each full pool can describe most of the 22k-record release corpus. The
+    # shared resolver keeps only a small LRU while retaining lightweight exact
+    # availability checks for dashboard, planner, and calendar projections.
+    pool_resolver = training_pool_resolver or TrainingPoolResolver(repo)
+    eligible_pool = pool_resolver.eligible_pool
 
     def require_known_objective(concept: str) -> None:
         if objective_definition(concept) is None:
@@ -881,15 +1391,30 @@ def build_training_router(
             slot = campaign_store.get_slot_for_case(campaign["campaignId"], pending)
             if not _is_training_case(case, campaign["conceptId"], campaign["subskill"]):
                 raise HTTPException(status_code=409, detail="Training campaign case failed its audited source contract")
+            receipt_concept = _validated_campaign_receipt(campaign)
+            task_concept = training_task_concept(
+                str(campaign["conceptId"]),
+                str(campaign["subskill"]),
+                receipt_concept,
+            )
             task = build_subskill_task(
                 case_id=str(pending),
-                case_concept=str(campaign["conceptId"]),
+                case_concept=task_concept,
                 subskill=str(campaign["subskill"]),
                 case_focus=str(slot["caseFocus"]),
                 contrast_family=_contrast_family(str(campaign["conceptId"])),
                 variant=int(slot["position"]),
                 case_packet=case,
             ) if slot else None
+            classification = build_training_classification_contract(
+                str(campaign["conceptId"]),
+                int(slot["position"] if slot else campaign["position"]),
+            )
+            question_snapshot = {
+                "version": TRAINING_QUESTION_SNAPSHOT_VERSION,
+                "classification": classification,
+                "task": task.public if task else None,
+            }
             reference = case_reference(campaign, str(pending))
             display_id = assessment_display_id(
                 "training", int(slot["position"] if slot else campaign["position"]) + 1
@@ -911,6 +1436,8 @@ def build_training_router(
                     display_id=display_id,
                 ),
                 "task": task.public if task else None,
+                "classification": classification,
+                "questionSnapshot": question_snapshot,
             }
         elif feedback:
             case = repo.get_case(feedback)
@@ -919,15 +1446,37 @@ def build_training_router(
             if not _is_training_case(case, campaign["conceptId"], campaign["subskill"]):
                 raise HTTPException(status_code=409, detail="Training feedback case failed its audited source contract")
             if case and answer:
+                receipt_concept = _validated_campaign_receipt(campaign)
+                task_concept = training_task_concept(
+                    str(campaign["conceptId"]),
+                    str(campaign["subskill"]),
+                    receipt_concept,
+                )
                 task = build_subskill_task(
                     case_id=str(feedback),
-                    case_concept=str(campaign["conceptId"]),
+                    case_concept=task_concept,
                     subskill=str(campaign["subskill"]),
                     case_focus=str(slot["caseFocus"]),
                     contrast_family=_contrast_family(str(campaign["conceptId"])),
                     variant=int(slot["position"]),
                     case_packet=case,
                 ) if slot else None
+                stored_snapshot = (
+                    (answer.get("response") or {}).get("questionSnapshot")
+                    if isinstance(answer.get("response"), dict)
+                    else None
+                )
+                if not isinstance(stored_snapshot, dict):
+                    stored_snapshot = {
+                        "version": TRAINING_QUESTION_SNAPSHOT_VERSION,
+                        "classification": build_training_classification_contract(
+                            str(campaign["conceptId"]),
+                            int(slot["position"] if slot else campaign["position"] - 1),
+                        ),
+                        "task": task.public if task else None,
+                    }
+                classification = stored_snapshot.get("classification")
+                frozen_task = stored_snapshot.get("task")
                 reference = case_reference(campaign, str(feedback))
                 display_id = assessment_display_id(
                     "training", int(slot["position"] if slot else campaign["position"] - 1) + 1
@@ -950,7 +1499,9 @@ def build_training_router(
                         display_id=display_id,
                     ),
                     "answer": public_answer(campaign, answer),
-                    "task": task.public if task else None,
+                    "task": frozen_task,
+                    "classification": classification,
+                    "questionSnapshot": stored_snapshot,
                 }
         return {
             "campaign": public_campaign(campaign),
@@ -958,6 +1509,37 @@ def build_training_router(
             "summary": public_summary(
                 campaign, campaign_store.summary(campaign["campaignId"])
             ),
+        }
+
+    @router.get("/availability")
+    def availability(
+        response: Response,
+        conceptId: str = Query(min_length=1, max_length=160),
+        authorization: str | None = Header(default=None),
+        session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    ) -> dict[str, Any]:
+        """Return cheap exact-pair launchability without materializing 8 pools."""
+
+        resolve_learner(authorization, "demo", session_cookie)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Vary"] = "Authorization, Cookie"
+        require_known_objective(conceptId)
+        subskills: dict[str, dict[str, bool]] = {}
+        for subskill in TRAINING_SUBSKILL_ORDER:
+            exact_depth = pool_resolver.exact_target_depth(conceptId, subskill)
+            available = exact_depth > 0
+            subskills[subskill] = {
+                "available": available,
+                "independentReceiptsAvailable": bool(
+                    exact_depth >= DURABLE_DISTINCT_SUCCESSFUL_ECGS
+                    and training_independent_receipt_available(conceptId, subskill)
+                ),
+            }
+        return {
+            "conceptId": conceptId,
+            "subskills": subskills,
+            "source": "exact_target_index",
         }
 
     @router.get("/pool")
@@ -999,6 +1581,11 @@ def build_training_router(
         if body.subskill not in ALLOWED_SUBSKILLS:
             raise HTTPException(status_code=422, detail="Unknown Training subskill")
         require_known_objective(body.conceptId)
+        _, canonical_context_key = _canonical_campaign_context(
+            body.conceptId,
+            body.subskill,
+            body.contextKey,
+        )
         learner = resolve_learner(authorization, body.learnerId, session_cookie)
         entries = eligible_pool(body.conceptId, body.subskill)
         if not entries:
@@ -1006,8 +1593,13 @@ def build_training_router(
         canonical_plan = _build_plan(
             entries,
             min(body.length, len(entries)),
-            reserve_transfer_roles={"target", "mimic"}
-            if body.subskill == "discriminate" else None,
+            reserve_transfer_roles=(
+                {"target"}
+                if body.subskill in {"localize", "measure"}
+                else {"target", "mimic"}
+                if body.subskill == "discriminate"
+                else None
+            ),
         )
         learning_store.ensure_profile(learner)
         try:
@@ -1019,7 +1611,7 @@ def build_training_router(
                 len(entries),
                 canonical_plan,
                 entries,
-                context_key=body.contextKey,
+                context_key=canonical_context_key,
                 replace_active=body.replaceActive,
             )
         except TrainingExposureConflictError as exc:
@@ -1175,7 +1767,7 @@ def build_training_router(
 
         concept = campaign["conceptId"]
         subskill = campaign["subskill"]
-        receipt_concept = _receipt_concept(campaign)
+        receipt_concept = _validated_campaign_receipt(campaign)
         if body.receiptConcept and body.receiptConcept != receipt_concept:
             raise HTTPException(
                 status_code=422,

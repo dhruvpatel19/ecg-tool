@@ -282,7 +282,7 @@ def test_every_prescribed_subskill_links_to_a_mode_that_emits_that_exact_receipt
         assert stage["receiptSubskill"] == subskill
         assert f"subskill={subskill}" in stage["href"]
         query = parse_qs(urlparse(stage["href"]).query)
-        expected_length = 25 if expected_mode == "train" else 5
+        expected_length = 10 if expected_mode == "train" else 5
         assert stage["suggestedLength"] == expected_length
         assert query["suggestedLength"] == [str(expected_length)]
         assert query["returnTo"] == ["/home?panel=plan"]
@@ -324,6 +324,52 @@ def test_every_prescribed_subskill_links_to_a_mode_that_emits_that_exact_receipt
     assert unreviewed_alias["stages"] == []
 
 
+def test_qt_interval_measurement_uses_only_the_reviewed_qtc_training_proxy() -> None:
+    definition = OBJECTIVES["qt_interval"]
+    queried_pairs: list[tuple[str, str]] = []
+
+    def available(case_concept: str, subskill: str) -> bool:
+        queried_pairs.append((case_concept, subskill))
+        return (case_concept, subskill) == ("qtc_prolongation", "measure")
+
+    assert _receipt_mode(
+        definition,
+        "qtc_prolongation",
+        "measure",
+        training_receipt_available=available,
+    ) == "train"
+    assert _receipt_mode(
+        definition,
+        "qtc_prolongation",
+        "recognize",
+        training_receipt_available=available,
+    ) is None
+    assert _receipt_mode(
+        definition,
+        "qtc_prolongation",
+        "explain_mechanism",
+        training_receipt_available=available,
+    ) is None
+    assert queried_pairs == [("qtc_prolongation", "measure")]
+
+    plan = build_mastery_plan(
+        {"subskillMastery": []},
+        {"qtc_prolongation": 25},
+        definitions=[definition],
+        training_receipt_available=available,
+    )
+    assert len(plan["stages"]) == 1
+    stage = plan["stages"][0]
+    assert stage["mode"] == "train"
+    assert plan["primary"]["caseConcept"] == "qtc_prolongation"
+    assert stage["receiptConcept"] == "qt_interval"
+    assert stage["receiptSubskill"] == "measure"
+    query = parse_qs(urlparse(stage["href"]).query)
+    assert query["concept"] == ["qtc_prolongation"]
+    assert query["receiptConcept"] == ["qt_interval"]
+    assert query["subskill"] == ["measure"]
+
+
 def test_formative_only_application_is_not_advertised_as_a_mastery_path() -> None:
     plan = build_mastery_plan(
         {"subskillMastery": []},
@@ -352,6 +398,33 @@ def test_training_cells_without_a_trace_or_contrast_grader_do_not_enter_plan() -
     )
     assert plan["primary"] is None
     assert plan["stages"] == []
+
+
+def test_exact_training_pool_gate_prevents_a_dead_focused_practice_stage() -> None:
+    definition = _definition(
+        "right_bundle_branch_block",
+        "right_bundle_branch_block",
+        "localize",
+    )
+    unavailable = build_mastery_plan(
+        {"subskillMastery": []},
+        {"right_bundle_branch_block": 50},
+        definitions=[definition],
+        training_receipt_available=lambda _concept, _subskill: False,
+    )
+    assert unavailable["primary"] is None
+    assert unavailable["stages"] == []
+
+    available = build_mastery_plan(
+        {"subskillMastery": []},
+        {"right_bundle_branch_block": 50},
+        definitions=[definition],
+        training_receipt_available=lambda concept, subskill: (
+            concept == "right_bundle_branch_block" and subskill == "localize"
+        ),
+    )
+    assert available["primary"]["subskill"] == "localize"
+    assert available["stages"][0]["mode"] == "train"
 
 
 def test_sparse_family_cannot_be_advertised_as_a_durable_mastery_path() -> None:
@@ -479,8 +552,8 @@ def test_saved_session_preferences_shape_runnable_stages_without_weakening_recei
         },
     )
     training_stage = training["stages"][0]
-    assert training_stage["suggestedLength"] == 10
-    assert parse_qs(urlparse(training_stage["href"]).query)["suggestedLength"] == ["10"]
+    assert training_stage["suggestedLength"] == 5
+    assert parse_qs(urlparse(training_stage["href"]).query)["suggestedLength"] == ["5"]
     assert training_stage["receiptSubskill"] == "discriminate"
     assert training["preferenceContext"]["primaryGoal"] == "clinical_reading"
 

@@ -17,7 +17,7 @@ from .ingest.source_contract import KNOWN_SOURCES
 from .ontology import CONCEPTS, CONCEPT_BY_ID
 from .source_policy import packet_allows_learning_evidence
 
-REGISTRY_VERSION = "2026.07.14"
+REGISTRY_VERSION = "2026.07.19"
 
 SUBSKILLS = (
     "recognize",
@@ -533,6 +533,13 @@ def _case_mapping(objective_id: str) -> tuple[tuple[str, ...], str]:
         return ("normal_ecg",), "waveform_fundamentals"
     if objective_id == "pr_interval":
         return ("normal_ecg", "av_block_first_degree"), "av_conduction"
+    if objective_id == "qt_interval":
+        # The corpus authors a QTc case family, while the M08 measurement
+        # objective assesses the learner's raw QT caliper placement and value.
+        # Training owns the narrow measurement-only receipt proxy; keeping the
+        # mapping here lets Guided/Planner discover that executable handoff
+        # without pretending a raw QT value is itself a binary diagnosis.
+        return ("qtc_prolongation",), "intervals"
     if objective_id == "preexcited_atrial_fibrillation":
         # This remains formative until a reviewed rhythm stream contains both
         # pre-excitation and AF evidence, but it belongs in the tachyarrhythmia

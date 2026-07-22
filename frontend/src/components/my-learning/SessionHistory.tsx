@@ -38,6 +38,12 @@ export function sessionOutcomeLabel(item: LearningSessionSummary) {
   return "Not scored";
 }
 
+function sessionOutcomeMetricLabel(item: LearningSessionSummary) {
+  if (item.score !== null) return item.mode === "clinical" ? "formative score" : "score";
+  if (item.correctCount === null) return "not scored";
+  return item.mode === "training" ? "skill tasks met" : "correct";
+}
+
 export function SessionHistory({ items, loading, failed = false, compact = false, emptyState = "sessions", emptyAction }: SessionHistoryProps) {
   if (loading) {
     return <div className={styles.loading} role="status">Loading your sessions…</div>;
@@ -75,24 +81,26 @@ export function SessionHistory({ items, loading, failed = false, compact = false
         const presentation = modePresentation[item.mode];
         const Icon = presentation.Icon;
         const focus = item.focusCompetencies[0];
-        const isPartialRapid = item.mode === "rapid" && item.status === "abandoned";
-        const sessionLabel = isPartialRapid ? "Partial Rapid round" : presentation.label;
+        const isPartialPractice = item.status === "abandoned" && (item.mode === "rapid" || item.mode === "training");
+        const sessionLabel = isPartialPractice
+          ? item.mode === "rapid" ? "Partial Rapid round" : "Partial Focused set"
+          : presentation.label;
         return (
           <article className={styles.row} key={item.sessionRef}>
             <span className={styles.icon} data-mode={item.mode} aria-hidden="true"><Icon size={17} /></span>
             <div className={styles.copy}>
               <strong>{sessionLabel}</strong>
-              <span>{occurredLabel(item.completedAt)} · {item.attempted} of {item.total} {isPartialRapid ? "submitted · ended early" : "completed"}</span>
+              <span>{occurredLabel(item.completedAt)} · {item.attempted} of {item.total} {isPartialPractice ? "submitted · ended early" : "completed"}</span>
               {focus ? <small>{conceptLabel(focus.objectiveId)} · {subskillLabel(focus.subskill)}</small> : <small>Mixed skills</small>}
               {item.flaggedCount > 0 ? <span className={styles.saved}><Bookmark size={12} aria-hidden="true" /> {item.flaggedCount} saved for review</span> : null}
             </div>
             <div className={styles.outcome}>
               <strong>{sessionOutcomeLabel(item)}</strong>
-              <span>{item.score !== null ? (item.mode === "clinical" ? "formative score" : "score") : item.correctCount !== null ? "correct" : "not scored"}</span>
+              <span>{sessionOutcomeMetricLabel(item)}</span>
             </div>
             {item.reviewAvailable ? (
               <Link href={`/home/review/${encodeURIComponent(item.sessionRef)}`} aria-label={`Review ${sessionLabel} from ${occurredLabel(item.completedAt)}`}>
-                <span>{compact ? "Review" : isPartialRapid ? "Review partial round" : "Review session"}</span><ArrowRight size={15} aria-hidden="true" />
+                <span>{compact ? "Review" : isPartialPractice ? "Review partial practice" : "Review session"}</span><ArrowRight size={15} aria-hidden="true" />
               </Link>
             ) : (
               <span className={styles.unavailable}>Review unavailable</span>
